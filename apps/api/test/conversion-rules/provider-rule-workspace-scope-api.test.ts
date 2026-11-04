@@ -138,6 +138,7 @@ function createWorld(options: { unnichat?: boolean } = {}) {
   ];
   const connections: Row[] = [
     { id: "connection_umbler", provider: "umbler", parserReleaseId: "release_umbler" },
+    { id: "connection_roichat", provider: "roichat", parserReleaseId: "release_umbler" },
     { id: "connection_qr_a", provider: "uazapi", parserReleaseId: "release_uazapi" },
     { id: "connection_qr_b", provider: "uazapi", parserReleaseId: "release_uazapi" },
     { id: "connection_gupshup", provider: "gupshup", parserReleaseId: "release_gupshup" },
@@ -726,6 +727,29 @@ describe("provider rules API: workspace scope", () => {
     await expect(
       world.service.rotateEndpoint(workspaceId, created.rule.id, "user_1"),
     ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("creates a sale rule anchored on a ROI Chat connection without treating it as a ROI Chat purchase", async () => {
+    const world = createWorld();
+    const created = await world.service.createRule(
+      workspaceId,
+      providerConversionRuleCreateInputSchema.parse({
+        name: "Venda Braip",
+        triggerType: "provider_automation",
+        automationSource: "braip",
+        eventName: "Purchase",
+        scope: "all_numbers",
+        channelIds: [],
+        connectionId: "connection_roichat",
+        perRuleUrl: false,
+      }),
+      "user_1",
+    );
+    expect(created.rule).toMatchObject({
+      connectionId: "connection_roichat",
+      origin: "automation_braip",
+      automationSource: "braip",
+    });
   });
 
   it("refuses a Braip rule with a non-sale event (same contract as Payt)", () => {

@@ -786,8 +786,11 @@ export class ProviderConversionRulesService {
             input.triggerType === "provider_automation"
               ? input.automationSource
               : undefined;
+          // A sales-platform rule may be anchored on a ROI Chat number's
+          // connection: that does not make it a ROI Chat purchase rule.
           const roichatRule =
             input.triggerType === "provider_automation" &&
+            salesPlatform === null &&
             (automationSource === "roichat" ||
               connection?.provider === "roichat");
           if (roichatRule) {

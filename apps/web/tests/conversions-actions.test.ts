@@ -310,6 +310,20 @@ describe("conversions actions: create", () => {
       message: "Não foi possível criar a regra.",
     });
 
+    serverApiFetch.mockRejectedValueOnce(
+      apiError(400, "Escolha a conexão de WhatsApp dos números desta regra"),
+    );
+    expect(await createConversionRuleAction(createForm())).toEqual({
+      ok: false,
+      message: "Escolha números de uma conexão de WhatsApp para esta regra.",
+    });
+
+    serverApiFetch.mockRejectedValueOnce(apiError(400, "Bad Request"));
+    expect(await createConversionRuleAction(createForm())).toEqual({
+      ok: false,
+      message: "Não foi possível criar a regra. Motivo: Bad Request",
+    });
+
     serverApiFetch.mockRejectedValueOnce(apiError(401, "Unauthorized"));
     expect(await createConversionRuleAction(createForm())).toMatchObject({
       ok: false,
