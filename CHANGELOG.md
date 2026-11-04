@@ -7,6 +7,28 @@ Version 1.0.0 was the initial public release of the `nod-rastrackdash-wpp` stude
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-11-03
+
+Upgrade notes for students: [`docs/releases/1.3.3.json`](docs/releases/1.3.3.json). **No new migration and no new variable.**
+
+### Fixed
+
+- Sales-platform rules (Yampi, Braip, Payt) anchored on a ROI Chat connection
+  were treated as ROI Chat purchase rules and refused on creation with
+  "A compra do ROI Chat pertence a uma conexão ROI Chat".
+
+### Changed
+
+- Creating a rule: curated API refusals now match regardless of accents and
+  cover five more reasons. Any other refusal shows the API text after
+  "Motivo:", unless it is over 200 characters or looks like it holds an
+  address or a key.
+
+### Documentation
+
+- `docs/AI_AGENTS.md` tells the student's AI about the per-connection Meta
+  Cloud App Secret from 1.3.2.
+
 ## [1.3.2] - 2026-10-30
 
 Upgrade notes for students: [`docs/releases/1.3.2.json`](docs/releases/1.3.2.json). **One additive migration (`20261030120000_meta_cloud_app_secret_per_connection`): back up PostgreSQL before redeploying. No new variable.** Single-app installs keep using `META_APP_SECRET`; agencies with one Meta app per client fill App ID + App Secret on each Meta Cloud connection card ("App do Meta desta conexão").
