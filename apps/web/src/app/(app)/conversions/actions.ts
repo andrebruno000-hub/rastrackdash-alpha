@@ -113,6 +113,7 @@ const conversionsPath = "/conversions";
 const invalidMessage = "Revise os dados da regra e tente de novo.";
 const createUnknownMessage =
   "Não deu para confirmar se a regra foi criada. Use “Conferir e concluir”: repetir este mesmo pedido nunca cria uma regra duplicada.";
+const createRefusedMessage = "Não foi possível criar a regra.";
 const unifyUnknownMessage =
   "Não deu para confirmar a unificação. Confira a lista antes de tentar de novo; repetir o mesmo pedido não duplica nada.";
 const changeUnknownMessage =
@@ -209,6 +210,15 @@ const curatedMessages: Readonly<Record<string, string>> = {
   "Conexões Unnichat exigem o número de WhatsApp do cliente":
     "As conexões do Unnichat precisam do número de WhatsApp do cliente.",
   "Sem permissao para gerenciar integracoes": noPermissionMessage,
+  "A compra do ROI Chat pertence a uma conexao ROI Chat":
+    "A compra do ROI Chat precisa de uma conexão ROI Chat.",
+  "O ROI Chat envia somente compra": "O ROI Chat envia somente compra.",
+  "Filtro de produto so existe para plataformas de venda":
+    "O filtro de produto só existe para plataformas de venda.",
+  "Automacao por tag ainda so esta disponivel para este provedor":
+    "Esta conexão ainda não aceita automação por etiqueta.",
+  "Todas as conexoes so existe para automacoes Unnichat/Umbler/ROI Chat em todos os numeros":
+    "“Todas as conexões” só existe para automações Unnichat, Umbler ou ROI Chat em todos os números.",
   "Este workspace tem canais demais para unificar regras com segurança; mantenha as regras por número":
     "Este workspace tem canais demais para unificar regras com segurança. Mantenha as regras por número.",
 };
@@ -232,9 +242,34 @@ function apiStatus(error: unknown): number | null {
   return isApiRequestError(error) && typeof status === "number" ? status : null;
 }
 
+/** A API usa as duas grafias (com e sem acento): a busca ignora os acentos. */
+function withoutAccents(text: string): string {
+  return text.normalize("NFD").replace(/\p{M}/gu, "");
+}
+
+const curatedByPlainText: ReadonlyMap<string, string> = new Map(
+  Object.entries(curatedMessages).map(([key, value]) => [
+    withoutAccents(key),
+    value,
+  ]),
+);
+
 function curatedMessage(error: unknown): string | null {
   const message = (error as Error | null)?.message?.trim() ?? "";
-  return curatedMessages[message] ?? null;
+  return curatedByPlainText.get(withoutAccents(message)) ?? null;
+}
+
+/**
+ * Recusa da criação fora da lista: mostra o motivo da API para o aluno saber o
+ * que corrigir, exceto se parecer conter endereço ou chave.
+ */
+function createRefusalMessage(error: unknown): string {
+  const reason = (error as Error | null)?.message?.trim() ?? "";
+  const safe =
+    reason.length > 0 &&
+    reason.length <= 200 &&
+    !/:\/\/|[A-Za-z0-9_-]{24,}|\p{Cc}/u.test(reason);
+  return safe ? `${createRefusedMessage} Motivo: ${reason}` : createRefusedMessage;
 }
 
 type Failure = {
@@ -379,7 +414,7 @@ export async function createConversionRuleAction(
         };
       }
     }
-    return failure(error, "Não foi possível criar a regra.", createUnknownMessage);
+    return failure(error, createRefusalMessage(error), createUnknownMessage);
   }
 }
 
