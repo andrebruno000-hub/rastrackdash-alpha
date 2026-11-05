@@ -128,15 +128,25 @@ import {
   UNNICHAT_AUTOMATION_V1_PARSER_VERSION,
 } from "../inbound-webhooks/providers/unnichat/unnichat-automation-v1.parser";
 import { ROICHAT_PURCHASE_REPEATED_REASON } from "../inbound-webhooks/providers/roichat/roichat-automation-v1.parser";
+import {
+  WEBHOOK_AUTOMATION_V1_PARSER_VERSION,
+  parseWebhookForRule,
+  type ParsedWebhookRuleAutomation,
+} from "../inbound-webhooks/providers/webhook/webhook-automation-v1.parser";
+import {
+  WEBHOOK_EVENT_REPEATED_REASON,
+  webhookAutomationConversionIdentity,
+} from "../conversion-rules/webhook-purchase-dedupe";
 
-/** Automation callbacks re-parsed at production time (Umbler, Unnichat). */
+/** Automation callbacks re-parsed at production time (Umbler, Unnichat, Webhook / n8n). */
 type ParsedAutomationForProduction =
   | ParsedUmblerAutomationV1
   | (ParsedUnnichatAutomationV1 & {
       provider: "unnichat";
       automation: "crm_movement";
       eventName: ConversionEventNameDto;
-    });
+    })
+  | ParsedWebhookRuleAutomation;
 const PURCHASE_DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1_000;
 const terminalStatuses = new Set(["materialized", "duplicate", "blocked"]);
 const executionInclude = {
@@ -844,7 +854,9 @@ export class ProviderConversionProductionService
     let ctwaProof =
       isSalesPlatformProvider(occurrence.provider)
         ? (lead.ctwaDestination ?? purchaseContext?.ctwaProof)
-        : occurrence.provider === CTWA_DESTINATION_PROVIDER && !lead.adId
+        : // Webhook / n8n: the verified entry of any lead, like a sale.
+          occurrence.provider === "webhook" ||
+            (occurrence.provider === CTWA_DESTINATION_PROVIDER && !lead.adId)
           ? lead.ctwaDestination
           : undefined;
     // No ctwa_clid, nothing is sent: the resolved lead always carries it and a
@@ -1164,11 +1176,25 @@ export class ProviderConversionProductionService
               },
             )
           : null;
+      // Webhook / n8n, window events: identity of the occurrence (the same
+      // message_id is the same event_id at Meta, whatever the execution).
+      const webhookIdentity =
+        !purchaseKey &&
+        occurrence.provider === "webhook" &&
+        dedupePolicy.mode === "rolling_window"
+          ? webhookAutomationConversionIdentity({
+              workspaceId: execution.workspaceId,
+              eventName,
+              occurrenceKey: occurrence.occurrenceKey,
+            })
+          : null;
       const dedupeKey =
         purchaseKey ??
         (automationIdentity
           ? `provider-automation:${occurrence.provider}:${automationIdentity}`
-          : `provider-conversion:${execution.id}`);
+          : webhookIdentity
+            ? `provider-automation:webhook:${webhookIdentity}`
+            : `provider-conversion:${execution.id}`);
       // Once-per-lead events only: the same lead identity already converted
       // for this Meta destination by another number or by the CTWA entry.
       const otherNumberDuplicate =
@@ -1238,7 +1264,9 @@ export class ProviderConversionProductionService
             : dedupePolicy.mode === "rolling_window"
               ? occurrence.provider === "roichat"
                 ? ROICHAT_PURCHASE_REPEATED_REASON
-                : "purchase_within_24h"
+                : occurrence.provider === "webhook"
+                  ? WEBHOOK_EVENT_REPEATED_REASON
+                  : "purchase_within_24h"
               : "qualified_lead_already_materialized";
         await transaction.providerConversionRuleExecution.update({
           where: { id: execution.id },
@@ -1297,13 +1325,15 @@ export class ProviderConversionProductionService
               : `conversion_${conversionEventMetaEventIdPrefix(eventName)}_${purchaseKey.slice(9)}`
             : automationIdentity
               ? `${occurrence.provider}_${conversionEventMetaEventIdPrefix(eventName)}_${automationIdentity}`
-              : lifetimeIdentity
-                ? this.leadLifetimeMetaEventId(
-                    execution.workspaceId,
-                    lifetimeIdentity.lockIdentity,
-                    eventName,
-                  )
-                : this.metaEventId(execution.id, eventName),
+              : webhookIdentity
+                ? `webhook_${conversionEventMetaEventIdPrefix(eventName)}_${webhookIdentity}`
+                : lifetimeIdentity
+                  ? this.leadLifetimeMetaEventId(
+                      execution.workspaceId,
+                      lifetimeIdentity.lockIdentity,
+                      eventName,
+                    )
+                  : this.metaEventId(execution.id, eventName),
           dedupeKey,
           leadId: lead.id,
           phoneHash: lead.phoneHash,
@@ -2488,6 +2518,9 @@ export class ProviderConversionProductionService
       isSalesPlatformProvider(
         String(execution.providerRule.parserRelease?.provider),
       ) ||
+      // Webhook / n8n: the call lands on the lead's own number (any
+      // connection), like a sale.
+      execution.providerRule.parserRelease?.provider === "webhook" ||
       (providerRuleScope(execution.providerRule) === "all_numbers" &&
         providerRuleSpansProviderConnections(execution.providerRule))
     )
@@ -2533,6 +2566,25 @@ export class ProviderConversionProductionService
     execution: ExecutionRecord,
   ): ParsedAutomationForProduction {
     const payload = this.decryptedPayload(execution);
+    if (
+      execution.providerRule.parserRelease?.provider === "webhook" &&
+      execution.providerRule.parserRelease.version ===
+        WEBHOOK_AUTOMATION_V1_PARSER_VERSION
+    ) {
+      // Same reading as the ingestion (stored first arrival = same key, the
+      // rule's event and value source).
+      const parsed = parseWebhookForRule(
+        payload,
+        execution.sourceDelivery.firstReceivedAt,
+        execution.providerRule.conversionRule,
+      );
+      if (!parsed.ok) {
+        throw new ProviderConversionProductionFailure(
+          "provider_conversion_payload_invalid",
+        );
+      }
+      return parsed.value;
+    }
     // Fase 4b: the Unnichat automation carries the click (ctwa_clid); the
     // event comes from the rule, never from the payload's event_name.
     if (

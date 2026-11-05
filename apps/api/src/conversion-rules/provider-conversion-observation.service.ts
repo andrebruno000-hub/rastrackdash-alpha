@@ -33,6 +33,11 @@ import {
 } from "../inbound-webhooks/providers/sales-platform-sale";
 import type { ParsedUnnichatAutomationV1 } from "../inbound-webhooks/providers/unnichat/unnichat-automation-v1.parser";
 import type { ParsedRoichatAutomationV1 } from "../inbound-webhooks/providers/roichat/roichat-automation-v1.parser";
+import type { ParsedWebhookRuleAutomation } from "../inbound-webhooks/providers/webhook/webhook-automation-v1.parser";
+import {
+  resolveWebhookLeadChannel,
+  type WebhookNumberMatch,
+} from "./webhook-lead-routing";
 import {
   PAYT_LEAD_OTHER_CHANNEL_REASON,
   resolvePurchaseChannels,
@@ -87,6 +92,40 @@ export type AutomationCallbackOrigin = {
 
 /** Sale of a product outside the rule's product filter (fase 4). */
 export const PAYT_PRODUCT_NOT_IN_RULE_REASON = "payt_product_not_in_rule";
+
+/**
+ * Automations routed like a sale: the occurrence belongs to the paid lead of
+ * the phone, on the lead's own number (any WhatsApp connection). In the
+ * student edition: the sales platforms (Payt, Braip, Yampi) and Webhook /
+ * n8n (porte do SaaS 098d0950).
+ */
+function isLeadRoutedAutomationProvider(
+  provider: string | null | undefined,
+): boolean {
+  return (
+    isSalesPlatformProvider(provider) ||
+    // Webhook / n8n: the lead's own number, from any connection.
+    provider === "webhook"
+  );
+}
+
+/**
+ * Webhook / n8n receipts that did not reach a number, in the words the
+ * integration receipts already use (integrationUnattributedReasons).
+ */
+export const WEBHOOK_NOT_PAID_LEAD_REASON = "contact_not_paid_lead";
+export const WEBHOOK_LEAD_AMBIGUOUS_REASON = "buyer_ambiguous";
+export const WEBHOOK_ORIGIN_UNRESOLVED_REASON = "origin_channel_unresolved";
+/** Webhook / n8n: the current click has an entry on two numbers, none named. */
+export const WEBHOOK_LEAD_MULTIPLE_NUMBERS_REASON = "contact_multiple_numbers";
+
+function webhookUnattributedReason(
+  lead: ProviderConversionPaidLeadResolutionDto | null,
+): string {
+  if (lead?.status === "ambiguous") return WEBHOOK_LEAD_AMBIGUOUS_REASON;
+  if (lead?.status === "resolved") return WEBHOOK_ORIGIN_UNRESOLVED_REASON;
+  return WEBHOOK_NOT_PAID_LEAD_REASON;
+}
 
 const observedRuleInclude = {
   conversionRule: true,
@@ -171,7 +210,9 @@ type ParsedProviderAutomation =
       automation: "crm_movement";
       eventName: ConversionEventNameDto;
     })
-  | ParsedRoichatAutomationV1;
+  | ParsedRoichatAutomationV1
+  // Webhook / n8n: the event and the value source come from the rule.
+  | ParsedWebhookRuleAutomation;
 
 export type ProviderConversionObservationResult = {
   executionIds: string[];
@@ -179,6 +220,8 @@ export type ProviderConversionObservationResult = {
 };
 
 export type ProviderConversionAutomationObservationResult = {
+  /** Webhook / n8n: how the phone_number_id relates to the lead's origin. */
+  webhookNumberMatch?: WebhookNumberMatch;
   decisionId: string | null;
   decisionCode: ProviderConversionDecisionDto["decisionCode"] | null;
   reasonCode: string;
@@ -388,7 +431,7 @@ export class ProviderConversionObservationService {
     // An Unnichat automation resolves the lead on its own entry connection
     // (a rule "todas as conexões": then on any number of its scope).
     const purchaseLead =
-      isSalesPlatformProvider(rule.parserRelease.provider) ||
+      isLeadRoutedAutomationProvider(rule.parserRelease.provider) ||
       rule.parserRelease.provider === "unnichat" ||
       roichat
       ? await this.resolveAutomationPurchaseLead({
@@ -399,17 +442,47 @@ export class ProviderConversionObservationService {
           phoneCandidates,
         })
       : null;
-    const channel = await this.resolveAutomationChannel({
-      workspaceId: input.workspaceId,
-      connectionId: input.connectionId,
-      origin,
-      phone: input.automation.phone,
-      phoneCandidates,
-      deliveryReceivedAt: input.deliveryReceivedAt,
-      purchaseLead,
-      rule,
-      routedChannelId: input.routedChannelId ?? null,
-    });
+    // Webhook / n8n: its own routing (the entry of the lead's current click,
+    // on any connection), phone_number_id only breaks a tie. Lead not
+    // resolved: no number, the reason is decided below.
+    const webhook = rule.parserRelease.provider === "webhook";
+    const webhookRouting =
+      webhook &&
+      input.automation.provider === "webhook" &&
+      purchaseLead?.status === "resolved"
+        ? await resolveWebhookLeadChannel(this.prisma, {
+            workspaceId: input.workspaceId,
+            channelIds: await resolveProviderRuleScopeChannelIds(
+              this.prisma,
+              input.workspaceId,
+              rule,
+            ),
+            phoneHashes: this.paytPurchaseIdentityHashes(
+              {
+                phone: input.automation.phone,
+                phoneCandidates: input.automation.phoneCandidates,
+              },
+              purchaseLead.lead.phoneHash,
+            ),
+            lead: purchaseLead.lead,
+            receivedAt: input.deliveryReceivedAt,
+            phoneNumberId: input.automation.phoneNumberId,
+          })
+        : null;
+    const webhookNumberMatch = webhookRouting?.numberMatch;
+    const channel = webhook
+      ? (webhookRouting?.channel ?? null)
+      : await this.resolveAutomationChannel({
+          workspaceId: input.workspaceId,
+          connectionId: input.connectionId,
+          origin,
+          phone: input.automation.phone,
+          phoneCandidates,
+          deliveryReceivedAt: input.deliveryReceivedAt,
+          purchaseLead,
+          rule,
+          routedChannelId: input.routedChannelId ?? null,
+        });
     // A workspace-wide ("all numbers") automation yields to the specific rule
     // of the same origin and event that owns the resolved number: that rule
     // receives the same callback on its own endpoint and sends it.
@@ -445,6 +518,28 @@ export class ProviderConversionObservationService {
           leadResolved: purchaseLead?.status === "resolved",
         };
       }
+    }
+    if (webhook && !channel) {
+      // Webhook / n8n (always every number): an organic contact is simply
+      // not attributable (ignored, the normal case); an ambiguous phone, an
+      // unknown origin number or an entry on two numbers stays blocked and
+      // can be tried again.
+      const reasonCode = webhookRouting?.tie
+        ? WEBHOOK_LEAD_MULTIPLE_NUMBERS_REASON
+        : webhookUnattributedReason(purchaseLead);
+      return {
+        ...(webhookNumberMatch ? { webhookNumberMatch } : {}),
+        decisionId: null,
+        decisionCode: null,
+        reasonCode,
+        disposition:
+          reasonCode === WEBHOOK_NOT_PAID_LEAD_REASON ? "ignored" : "blocked",
+        executionId: null,
+        eligibleExecutionId: null,
+        reviewId: null,
+        channelId: null,
+        leadResolved: purchaseLead?.status === "resolved",
+      };
     }
     if (isSalesPlatformProvider(rule.parserRelease.provider) && !channel) {
       // One Payt rule per WhatsApp number receives the same sale. When the
@@ -584,6 +679,7 @@ export class ProviderConversionObservationService {
       reviewId: orchestration.reviewId,
       channelId: channel?.id ?? null,
       leadResolved: leadResolution.status === "resolved",
+      ...(webhookNumberMatch ? { webhookNumberMatch } : {}),
       observationDetail:
         disposition.state === "observed" && !orchestration.purchaseDuplicate
           ? (disposition.detail ?? null)
@@ -1536,7 +1632,8 @@ export class ProviderConversionObservationService {
     // its sales audit-only. Canonical production still requires every live
     // certification, activation and feature gate below.
     // Sales platforms of the student edition: Payt, Braip (6.5) and Yampi (6.7).
-    const salesPlatform = isSalesPlatformProvider(
+    // Webhook / n8n follows the same gate (porte do SaaS 098d0950).
+    const salesPlatform = isLeadRoutedAutomationProvider(
       input.rule.parserRelease?.provider,
     );
     if (salesPlatform && input.channel.conversionEngineMode !== "canonical") {

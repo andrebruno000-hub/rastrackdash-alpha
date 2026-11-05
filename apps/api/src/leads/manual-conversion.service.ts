@@ -162,6 +162,7 @@ const PROVIDER_NAMES: Record<string, string> = {
   uazapi: "Uazapi",
   waha: "WAHA",
   meta_cloud: "Meta Cloud",
+  webhook: "Webhook / n8n",
 };
 
 /** Portuguese origin of a prior conversion (409 / warning messages). */

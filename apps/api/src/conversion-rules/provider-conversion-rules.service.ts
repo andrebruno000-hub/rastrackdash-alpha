@@ -111,7 +111,19 @@ import {
   type ProviderRuleOrigin,
   type ScopedChannel,
   type ScopedProviderRule,
+  WHATSAPP_CHANNEL_PROVIDERS,
 } from "./provider-rule-scope";
+import {
+  assertWebhookCreate,
+  assertWebhookEventFree,
+  assertWebhookUpdate,
+  isWebhookRule,
+  lockWebhookRules,
+} from "./webhook-rule-policy";
+import {
+  readWebhookValueSource,
+  webhookRuleConfig,
+} from "../inbound-webhooks/providers/webhook/webhook-automation-v1.parser";
 import {
   LEAD_SUBMITTED_AWAITING_RULE_DAYS,
   LEAD_SUBMITTED_AWAITING_RULE_SCAN,
@@ -718,8 +730,15 @@ export class ProviderConversionRulesService {
             const lockId = providerRuleCreateLockId(workspaceId, requestKey);
             await transaction.$queryRaw`SELECT pg_advisory_xact_lock(${lockId}::bigint)::text`;
           }
+          // Webhook / n8n (porte do SaaS 098d0950): anchored on a live
+          // WhatsApp connection of the workspace (all numbers), URL per rule.
+          const webhookRule =
+            input.triggerType === "provider_automation" &&
+            input.automationSource === "webhook";
           // Message/catalog/label rules may span connections and then carry no
           // connection; the Umbler automation always names its connection.
+          // Webhook / n8n without a connection informed: the API picks the
+          // anchor (it only stores the deliveries and owns the URL).
           const connection = input.connectionId
             ? await transaction.inboundWebhookConnection.findFirst({
                 where: {
@@ -729,7 +748,9 @@ export class ProviderConversionRulesService {
                 },
                 include: { parserRelease: true },
               })
-            : null;
+            : webhookRule
+              ? await this.webhookAnchorConnection(transaction, workspaceId)
+              : null;
 
           if (input.connectionId && !connection) {
             throw new NotFoundException(connectionNotFoundMessage);
@@ -740,9 +761,14 @@ export class ProviderConversionRulesService {
               where: { workspaceId_requestKey: { workspaceId, requestKey } },
             });
             if (claim) {
+              // Webhook / n8n without a connection informed: the claim holds
+              // the anchor the API picked, never sent by the client (the body
+              // hash still has to match).
+              const apiPickedAnchor = webhookRule && !input.connectionId;
               if (
                 claim.requestHash !== requestHash ||
                 (claim.connectionId !== null &&
+                  !apiPickedAnchor &&
                   claim.connectionId !== (input.connectionId ?? null))
               ) {
                 throw this.createReceiptConflict(
@@ -791,6 +817,7 @@ export class ProviderConversionRulesService {
           const roichatRule =
             input.triggerType === "provider_automation" &&
             salesPlatform === null &&
+            !webhookRule &&
             (automationSource === "roichat" ||
               connection?.provider === "roichat");
           if (roichatRule) {
@@ -805,6 +832,15 @@ export class ProviderConversionRulesService {
             if (input.eventName !== "Purchase") {
               throw new BadRequestException("O ROI Chat envia somente compra");
             }
+          }
+          if (webhookRule) {
+            assertWebhookCreate({ connection, scope: input.scope });
+            await lockWebhookRules(transaction, workspaceId);
+            await assertWebhookEventFree(
+              transaction,
+              workspaceId,
+              input.eventName,
+            );
           }
 
           const productFilterCodes =
@@ -829,6 +865,7 @@ export class ProviderConversionRulesService {
           if (
             input.triggerType === "provider_automation" &&
             !isPaytAutomation &&
+            !webhookRule &&
             connection &&
             !["umbler", "uazapi", "unnichat", "roichat"].includes(
               connection.provider,
@@ -851,7 +888,9 @@ export class ProviderConversionRulesService {
 
           const scope: ProviderConversionRuleScopeDto =
             input.scope ?? "specific_numbers";
-          const origin = this.createOrigin(input, connection, salesPlatform);
+          const origin: ProviderRuleOrigin = webhookRule
+            ? "automation_webhook"
+            : this.createOrigin(input, connection, salesPlatform);
           // "Todos os numeros da <plataforma> (todas as conexoes)": explicit,
           // only for Umbler/Unnichat automations (and, since 6.8, the ROI
           // Chat purchase) for all numbers.
@@ -893,7 +932,9 @@ export class ProviderConversionRulesService {
               ? null
               : salesPlatform
                 ? salesPlatform
-                : connection?.provider === "umbler" ||
+                : webhookRule
+                  ? "webhook"
+                  : connection?.provider === "umbler" ||
                     connection?.provider === "unnichat" ||
                     connection?.provider === "roichat"
                   ? connection.provider
@@ -907,7 +948,7 @@ export class ProviderConversionRulesService {
               transaction,
               workspaceId,
               connection.id,
-              salesPlatform ?? connection.provider,
+              salesPlatform ?? (webhookRule ? "webhook" : connection.provider),
               input.channelIds,
             );
           } else {
@@ -971,7 +1012,13 @@ export class ProviderConversionRulesService {
             ? effectiveInboundParserStatus(parserRelease)
             : null;
           const modeDefaulted = input.mode === undefined;
-          ruleMode = input.mode ?? this.bornRuleMode(config, parserStatus);
+          // Webhook / n8n: every rule starts in observation (as in the SaaS);
+          // the reader itself is certified by migration (production direct).
+          ruleMode =
+            input.mode ??
+            (webhookRule
+              ? "observation"
+              : this.bornRuleMode(config, parserStatus));
           this.assertModeAllowed(ruleMode, parserStatus);
           let defaultValueCents: number | null = null;
           let defaultCurrency: string | null = null;
@@ -999,6 +1046,11 @@ export class ProviderConversionRulesService {
                 // Label ids only identify a label inside one instance.
                 nameOnly: !bound,
               });
+            }
+            if (webhookRule) {
+              defaultItems = webhookRuleConfig(
+                input.webhookValueSource ?? "received",
+              ) as Prisma.InputJsonValue;
             }
           } else if (input.triggerType === "structured_catalog") {
             defaultCurrency = input.catalog.currency;
@@ -1653,6 +1705,11 @@ export class ProviderConversionRulesService {
               : messagePhrase.exampleMessage,
         });
       }
+      if (input.webhookValueSource !== undefined && isWebhookRule(current)) {
+        conversionRuleData.defaultItems = webhookRuleConfig(
+          input.webhookValueSource,
+        ) as Prisma.InputJsonValue;
+      }
 
       if (Object.keys(conversionRuleData).length > 0) {
         await transaction.conversionRule.update({
@@ -1725,6 +1782,12 @@ export class ProviderConversionRulesService {
           this.isRoichatPurchaseRule(current)
         ) {
           throw new ConflictException(roichatNumberUrlOnlyMessage);
+        }
+        // Webhook / n8n only receives through its rule URL: never closed.
+        if (input.publicUrlDisabled === true && isWebhookRule(current)) {
+          throw new ConflictException(
+            "A regra de webhook só recebe pela URL dela; para parar, pause a regra",
+          );
         }
         const isDisabled = current.endpoint.publicUrlDisabledAt != null;
         if (input.publicUrlDisabled && !isDisabled) {
@@ -4281,6 +4344,36 @@ export class ProviderConversionRulesService {
     }
   }
 
+  /**
+   * Anchor of a new Webhook / n8n rule (porte do oneCodeAnchorConnection do
+   * SaaS): a live WhatsApp connection of the workspace (production first,
+   * then the oldest not paused). It only stores the deliveries and owns the
+   * rule URL; each call lands on the lead's own number, on any connection.
+   */
+  private async webhookAnchorConnection(
+    transaction: Prisma.TransactionClient,
+    workspaceId: string,
+  ) {
+    // Only a connection that receives (a paused anchor would refuse every
+    // call routed to the rule).
+    const candidates = await transaction.inboundWebhookConnection.findMany({
+      where: {
+        workspaceId,
+        removedAt: null,
+        status: { in: ["observation", "production"] },
+        provider: { in: [...WHATSAPP_CHANNEL_PROVIDERS] },
+      },
+      include: { parserRelease: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: 100,
+    });
+    return (
+      candidates.find((candidate) => candidate.status === "production") ??
+      candidates[0] ??
+      null
+    );
+  }
+
   /** Fase 6.8: ROI Chat purchase rule (its parser release names the provider). */
   private isRoichatPurchaseRule(rule: {
     conversionRule: { triggerType: string };
@@ -4374,6 +4467,9 @@ export class ProviderConversionRulesService {
         "Só regras com URL própria têm URL antiga para desativar",
       );
     }
+    // Webhook / n8n: value source, all numbers; "valor recebido" keeps the
+    // fixed value optional (fallback only).
+    const webhook = assertWebhookUpdate(current, input);
     // Only extracted-value message rules may drop the average value: the value
     // then comes from the message itself.
     const nextValueMode = isValuedMessageRule
@@ -4385,7 +4481,8 @@ export class ProviderConversionRulesService {
       input.defaultValueCents === null &&
       nextValueMode !== "message_extracted" &&
       // ROI Chat: the sale carries its value; the rule's is only a fallback.
-      !this.isRoichatPurchaseRule(current)
+      !this.isRoichatPurchaseRule(current) &&
+      !webhook.valueOptional
     ) {
       throw new BadRequestException(
         "Regras com valor fixo precisam manter um valor positivo",
@@ -4738,8 +4835,19 @@ export class ProviderConversionRulesService {
       // after a connection changes and does not require a new database column.
       automationSource:
         this.salesPlatformOfRule(rule) ??
-        (this.isRoichatPurchaseRule(rule) ? "roichat" : null),
+        (this.isRoichatPurchaseRule(rule)
+          ? "roichat"
+          : isWebhookRule(rule)
+            ? "webhook"
+            : null),
       productFilterCodes: rule.productFilterCodes ?? [],
+      ...(isWebhookRule(rule)
+        ? {
+            webhookValueSource: readWebhookValueSource(
+              rule.conversionRule.defaultItems,
+            ),
+          }
+        : {}),
       endpoint: rule.endpoint ? this.endpointToDto(rule.endpoint) : null,
       catalog: rule.catalog ? this.catalogToDto(rule.catalog) : null,
       lastExecution: rule.executions[0]

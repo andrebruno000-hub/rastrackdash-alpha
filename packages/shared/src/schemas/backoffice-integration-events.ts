@@ -156,6 +156,11 @@ export const integrationReceiptReasons = {
   unnichat_automation_v1_invalid_payload: "Formato da automação não reconhecido",
   umbler_automation_v1_invalid_payload: "Formato da automação não reconhecido",
   roichat_automation_v1_invalid_payload: "Formato da compra do ROI Chat não reconhecido",
+  webhook_automation_v1_invalid_payload: "Formato da chamada não reconhecido",
+  webhook_phone_missing: "Chamada sem telefone do lead (phone)",
+  webhook_value_missing: "Evento sem valor (value) e sem valor fixo na regra",
+  webhook_value_invalid:
+    "Valor (value) ou moeda inválidos e sem valor fixo na regra",
 } as const;
 
 /** Texto de um motivo gravado no recibo (qualquer resultado). */

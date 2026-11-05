@@ -44,6 +44,9 @@ export function inboundParserProductionEligible(
         // Fase 6.8: ROI Chat entry and purchase parsers (certified by
         // migration: validated with real payloads received in the SaaS).
         "roichat",
+        // Webhook / n8n automation parser (certified by migration: the
+        // contract is ours, docs/setup/n8n/README.md).
+        "webhook",
       ].includes(release.provider) && release.status === "certified"
     );
   try {
