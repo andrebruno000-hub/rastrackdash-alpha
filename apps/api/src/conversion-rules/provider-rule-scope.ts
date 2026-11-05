@@ -7,6 +7,7 @@ import {
   type ProviderConversionRuleCapabilitiesDto,
   type ProviderConversionRuleOriginDto,
   type ProviderConversionRuleScopeDto,
+  webhookEventNames,
 } from "@wpptrack/shared";
 import { phoneIdentityKey } from "../common/phone/phone-identity";
 import { isBridgedWhatsappProvider } from "../inbound-webhooks/bridged-whatsapp-providers";
@@ -501,6 +502,23 @@ export function providerRuleCapabilities(): ProviderConversionRuleCapabilitiesDt
       labelMatch: null,
       unifiable: false,
       eventNames: ["Purchase"],
+    },
+    {
+      // Webhook / n8n (porte do SaaS 098d0950): the student's n8n, panel or
+      // SDR bot calls the rule URL. Always every number (the lead's own
+      // number, on any WhatsApp connection); one rule per event; the rule is
+      // anchored on a live WhatsApp connection chosen by the API.
+      origin: "automation_webhook",
+      scopes: ["all_numbers"],
+      channelProviders: [...WHATSAPP_CHANNEL_PROVIDERS],
+      authorChannelProviders: null,
+      connectionBound: false,
+      requiresConnection: providerRuleOriginRequiresConnection(
+        "automation_webhook",
+      ),
+      labelMatch: null,
+      unifiable: false,
+      eventNames: [...webhookEventNames],
     },
   ];
   return {
