@@ -7,7 +7,23 @@ Version 1.0.0 was the initial public release of the `nod-rastrackdash-wpp` stude
 
 ## [Unreleased]
 
-Upgrade notes for students: [`docs/releases/unreleased.json`](docs/releases/unreleased.json). **No new migration and no new variable.**
+Upgrade notes for students: [`docs/releases/unreleased.json`](docs/releases/unreleased.json). **Two additive migrations (Webhook / n8n) and no new variable.**
+
+### Added
+
+- Conversions: "Webhook / n8n" origin ported from the SaaS (098d0950). n8n,
+  a support panel or an SDR bot calls the rule's own URL
+  (`POST {API_PUBLIC_URL}/webhooks/inbound/conversions/{id}?token=…`, JSON
+  with `phone`, optional `value`/`currency`, `phone_number_id`,
+  `message_id`); the lead may come from any WhatsApp connection (Meta Cloud,
+  the student's Uazapi/WAHA by URL + token, Umbler, Unnichat, ROI Chat, Data
+  Crazy, Gupshup). Only a lead that came from an ad counts: a call for a
+  contact without an ad click is discarded without taking the lead's slot,
+  so the call after the click is the first one. One rule per event, every
+  number, starts in observation. Additive migrations
+  `20261105120000_webhook_provider` and `20261105120100_webhook_parser_release`
+  (certified `webhook/automation-v1` reader). Guide and ready n8n flow in
+  `docs/setup/n8n/`.
 
 ### Fixed
 
