@@ -7,6 +7,7 @@ import type {
   IntegrationEndpointDto,
   IntegrationEndpointProviderDto,
   ProviderConversionRuleCapabilitiesDto,
+  ProviderConversionRuleDto,
   ProviderConversionRuleOriginDto,
 } from "@wpptrack/shared";
 import {
@@ -39,6 +40,12 @@ import { MessagePhraseFields } from "./message-phrase-fields";
 import { PendingNumbersWarning } from "./pending-numbers";
 import { PaytSetupPanel } from "./payt-setup";
 import { UmblerAutomationPayloadPanel } from "./umbler-automation-payload";
+import { ValueSourceFields } from "./value-source-fields";
+import {
+  firstFreeWebhookEvent,
+  webhookRuleForEvent,
+  webhookRuleName,
+} from "./webhook-view";
 import { UnnichatAutomationSetupPanel } from "../integrations/unnichat-setup";
 import { UazapiLabelPicker } from "../integrations/uazapi-label-picker";
 import {
@@ -130,7 +137,16 @@ export type NewRuleFlowProps = {
   singleUrlActions?: SingleUrlActions;
   /** GET /channels de alguma conexão falhou: a lista de números está incompleta. */
   numbersUnavailable?: boolean;
+  /** Webhook / n8n: as regras dele (uma por evento). */
+  webhookRules?: readonly ProviderConversionRuleDto[];
 };
+
+/** Passos de uma origem: o Webhook / n8n vale sempre para todos os números. */
+function stepsFor(origin: RuleOriginId | null) {
+  return origin === "automation_webhook"
+    ? stepOrder.filter((item) => item.id !== "scope")
+    : stepOrder;
+}
 
 /** Porte do #165: números que não puderam ser lidos não viram "sem número". */
 export const numbersUnavailableNote =
@@ -183,19 +199,31 @@ export function NewRuleFlow({
   integrationEndpoints = [],
   singleUrlActions,
   numbersUnavailable = false,
+  webhookRules = [],
 }: NewRuleFlowProps) {
   const startOrigin =
     initialOrigin && offeredOrigins.includes(initialOrigin) ? initialOrigin : null;
   const [origin, setOrigin] = useState<RuleOriginId | null>(startOrigin);
   const [step, setStep] = useState<Step>(startOrigin ? "event" : "origin");
+  // Rascunho inicial de uma origem. Webhook / n8n: todos os números, no
+  // primeiro evento sem regra.
+  function draftFor(next: RuleOriginId): RuleDraft | null {
+    if (!isProviderOrigin(next)) return null;
+    const draft = withDefaultConnection(
+      emptyRuleDraft(next),
+      connections,
+      capabilities,
+    );
+    return next === "automation_webhook"
+      ? {
+          ...draft,
+          scope: "all_numbers",
+          eventName: firstFreeWebhookEvent(webhookRules) ?? draft.eventName,
+        }
+      : draft;
+  }
   const [draft, setDraft] = useState<RuleDraft | null>(() =>
-    startOrigin && isProviderOrigin(startOrigin)
-      ? withDefaultConnection(
-          emptyRuleDraft(startOrigin),
-          connections,
-          capabilities,
-        )
-      : null,
+    startOrigin ? draftFor(startOrigin) : null,
   );
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -219,9 +247,18 @@ export function NewRuleFlow({
       capabilities,
       workspaceCurrency,
       singleUrl: Boolean(singleUrlActions),
+      webhookRules,
     }),
-    [numbers, connections, capabilities, workspaceCurrency, singleUrlActions],
+    [
+      numbers,
+      connections,
+      capabilities,
+      workspaceCurrency,
+      singleUrlActions,
+      webhookRules,
+    ],
   );
+  const steps = stepsFor(origin);
   const definition = origin ? ruleOriginDefinition(origin) : null;
   const locked = inFlight !== null;
   // Sending or uncertain: the request (key + exact payload) lives only here,
@@ -249,11 +286,7 @@ export function NewRuleFlow({
   function chooseOrigin(next: RuleOriginId) {
     setError(null);
     setOrigin(next);
-    setDraft(
-      isProviderOrigin(next)
-        ? withDefaultConnection(emptyRuleDraft(next), connections, capabilities)
-        : null,
-    );
+    setDraft(draftFor(next));
   }
 
   function goNext() {
@@ -264,6 +297,19 @@ export function NewRuleFlow({
         return;
       }
       setStep("event");
+      return;
+    }
+    if (step === "event" && draft?.origin === "automation_webhook") {
+      // Uma regra (uma URL) por evento: um evento já usado fica com a URL dele.
+      const existing = webhookRuleForEvent(webhookRules, draft.eventName);
+      if (existing) {
+        setError(
+          `${ruleEventLabelForOrigin(draft.origin, draft.eventName)} já tem a regra “${existing.conversionRule.name}”: use a URL dela.`,
+        );
+        return;
+      }
+      if (!draft.name.trim()) patch({ name: webhookRuleName(draft.eventName) });
+      setStep("details");
       return;
     }
     if (step === "event") {
@@ -290,8 +336,8 @@ export function NewRuleFlow({
 
   function goBack() {
     setError(null);
-    const index = stepOrder.findIndex((item) => item.id === step);
-    if (index > 0) setStep(stepOrder[index - 1]!.id);
+    const index = steps.findIndex((item) => item.id === step);
+    if (index > 0) setStep(steps[index - 1]!.id);
   }
 
   async function confirm(request: NonNullable<typeof inFlight>) {
@@ -434,7 +480,9 @@ export function NewRuleFlow({
                   ? "URL de postback da Payt (exibida uma única vez)"
                   : draft?.origin === "automation_unnichat"
                     ? "URL da regra no Unnichat (exibida uma única vez)"
-                    : "Endereço da automação (exibido uma única vez)"}
+                    : draft?.origin === "automation_webhook"
+                      ? "URL da regra (exibida uma única vez)"
+                      : "Endereço da automação (exibido uma única vez)"}
               </span>
               <input
                 readOnly
@@ -458,6 +506,13 @@ export function NewRuleFlow({
                   draft.eventName,
                 )}
               />
+            ) : draft?.origin === "automation_webhook" ? (
+              <p className="action-note">
+                Use esta URL no n8n ou no painel (POST com o JSON do lead). A
+                regra começa em observação: confira o recebimento antes de
+                ativar o envio. O passo a passo e o fluxo pronto ficam em
+                Gerenciar.
+              </p>
             ) : draft ? (
               <UmblerAutomationPayloadPanel eventName={draft.eventName} />
             ) : null}
@@ -479,13 +534,13 @@ export function NewRuleFlow({
     );
   }
 
-  const currentIndex = stepOrder.findIndex((item) => item.id === step);
+  const currentIndex = steps.findIndex((item) => item.id === step);
   const crmOrigin = origin && definition?.kind === "crm" ? (origin as CrmRuleOrigin) : null;
 
   return (
     <div className="conversion-flow provider-conversion-builder">
       <ol className="conversion-flow-steps" aria-label="Etapas da nova regra">
-        {stepOrder.map((item, index) => (
+        {steps.map((item, index) => (
           <li
             key={item.id}
             className={
@@ -523,6 +578,7 @@ export function NewRuleFlow({
         <EventStep
           draft={draft}
           capabilities={capabilities}
+          webhookRules={webhookRules}
           onChange={(eventName) => patch({ eventName })}
         />
       ) : null}
@@ -772,13 +828,19 @@ function PaytEventStep({
 function EventStep({
   draft,
   capabilities,
+  webhookRules = [],
   onChange,
 }: {
   draft: RuleDraft;
   capabilities: ProviderConversionRuleCapabilitiesDto | null;
+  /** Webhook / n8n: uma regra (uma URL) por evento. */
+  webhookRules?: readonly ProviderConversionRuleDto[];
   onChange: (eventName: ConversionEventNameDto) => void;
 }) {
   const definition = ruleOriginDefinition(draft.origin);
+  const webhook = draft.origin === "automation_webhook";
+  const takenBy = (eventName: ConversionEventNameDto) =>
+    webhook ? webhookRuleForEvent(webhookRules, eventName) : null;
   if (
     draft.origin === "automation_payt" ||
     draft.origin === "automation_braip" ||
@@ -826,8 +888,13 @@ function EventStep({
               {events
                 .filter((event) => event.category === category)
                 .map((event) => (
-                  <option key={event.eventName} value={event.eventName}>
+                  <option
+                    key={event.eventName}
+                    value={event.eventName}
+                    disabled={Boolean(takenBy(event.eventName))}
+                  >
                     {accentEventCopy(event.label)}
+                    {takenBy(event.eventName) ? " (já tem regra)" : ""}
                   </option>
                 ))}
             </optgroup>
@@ -838,12 +905,20 @@ function EventStep({
         <span className="micro-label">{accentEventCopy(metadata.label)}</span>
         <small>{accentEventCopy(metadata.description)}</small>
       </div>
-      {/* Produção direta: toda regra nova já nasce enviando. */}
+      {/* Produção direta: toda regra nova já nasce enviando (menos o
+          Webhook / n8n, que começa em observação). */}
       <LeadSubmittedOverrideNotice
         enabled={capabilities?.leadSubmittedRuleOverrideEnabled === true}
         eventName={definition.lockedEvent ?? draft.eventName}
-        mode="production"
+        mode={webhook ? "observation" : "production"}
       />
+      {webhook ? (
+        <p className="action-note">
+          O n8n, o painel ou o robô chama a URL desta regra quando o evento
+          acontece. Vale para os leads de qualquer número conectado; o evento
+          enviado à Meta é o escolhido aqui. Uma regra por evento.
+        </p>
+      ) : null}
       {draft.origin === "automation_umbler" ? (
         <p className="action-note">
           A automação da Umbler reconhece Lead qualificado e Compra realizada.
@@ -1544,6 +1619,26 @@ function DetailsStep({
         </>
       ) : null}
 
+      {draft.origin === "automation_webhook" ? (
+        <>
+          <ValueSourceFields
+            name="webhook-new-rule-value-source"
+            eventName={draft.eventName}
+            source={draft.webhookValueSource}
+            value={draft.averageValue}
+            disabled={disabled}
+            onSourceChange={(webhookValueSource) =>
+              onChange({ webhookValueSource })
+            }
+            onValueChange={(averageValue) => onChange({ averageValue })}
+          />
+          <p className="action-note">
+            Depois de criar, você recebe a URL desta regra para usar no n8n
+            ou no painel.
+          </p>
+        </>
+      ) : null}
+
       {conversionEventCarriesValue(definition.lockedEvent ?? draft.eventName) ? (
         <RuleCurrencySelect
           value={draft.currency}
@@ -1596,8 +1691,9 @@ function DetailsStep({
         <div>
           <dt>Envio</dt>
           <dd>
-            Já começa enviando: cada conversão reconhecida vai para a Meta pelo
-            destino (pixel e página) de cada número.
+            {draft.origin === "automation_webhook"
+              ? "Começa em observação: as chamadas aparecem em Eventos recebidos sem ir para a Meta. Depois de conferir, ative o envio."
+              : "Já começa enviando: cada conversão reconhecida vai para a Meta pelo destino (pixel e página) de cada número."}
           </dd>
         </div>
       </dl>
@@ -1702,6 +1798,9 @@ function RoichatPurchaseFields({
 }
 
 export function ruleCurrencyHint(origin: string): string {
+  if (origin === "automation_webhook") {
+    return "A moeda enviada na chamada vence; esta vale para o valor fixo e quando ela não vier.";
+  }
   if (origin === "automation_roichat") {
     return "A moeda da compra vence; esta só vale quando a compra não informa a moeda.";
   }

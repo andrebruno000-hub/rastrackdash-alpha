@@ -3,6 +3,7 @@ import type {
   ProviderConversionRuleCapabilitiesDto,
   ProviderConversionRuleOriginDto,
 } from "@wpptrack/shared";
+import { webhookEventNames } from "@wpptrack/shared";
 import {
   integrationLogoPath,
   integrationProvider,
@@ -193,6 +194,30 @@ export const ruleOriginDefinitions: readonly RuleOriginDefinition[] = [
     // vem da própria venda.
     allowedEvents: ["Purchase", "InitiateCheckout", "CartAbandoned"],
     betaEvents: ["CartAbandoned"],
+  },
+  {
+    // Webhook / n8n (porte do SaaS 098d0950): o n8n, o painel de atendimento
+    // ou o robô SDR chama a URL de uma regra. Sempre todos os números; uma
+    // regra por evento; o lead pode ter vindo de qualquer conexão do aluno
+    // (API Oficial, Uazapi ou WAHA por URL + token, Umbler, Unnichat...).
+    id: "automation_webhook",
+    kind: "provider",
+    label: "Webhook / n8n",
+    description:
+      "Quando o seu n8n, painel ou robô chama a URL da regra, para o contato que veio do anúncio.",
+    logoProvider: null,
+    fallbackChannelProviders: [
+      "umbler",
+      "gupshup",
+      "uazapi",
+      "meta_cloud",
+      "data_crazy",
+      "unnichat",
+      "waha",
+      "roichat",
+    ],
+    connection: "any",
+    allowedEvents: [...webhookEventNames],
   },
   {
     id: "kommo",

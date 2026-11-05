@@ -52,6 +52,8 @@ export type RuleEditCapabilities = {
   catalogAliases: boolean;
   /** Fase 5.3: filtro de produto (só regras de venda da Payt). */
   productFilter: boolean;
+  /** Webhook / n8n: "Usar o valor recebido" ou "Valor fixo" (eventos com valor). */
+  webhookValueSource: boolean;
 };
 
 export function ruleEditCapabilities(
@@ -74,13 +76,16 @@ export function ruleEditCapabilities(
         origin === "automation_umbler" ||
         origin === "automation_unnichat" ||
         // Fase 6.8: ROI Chat, valor de reserva opcional (a compra traz o valor).
-        origin === "automation_roichat"),
+        origin === "automation_roichat" ||
+        // Webhook / n8n: valor fixo ou reserva do valor recebido.
+        origin === "automation_webhook"),
     currency: carriesValue && origin !== "structured_catalog",
     catalogAliases: origin === "structured_catalog" && Boolean(rule.catalog),
     productFilter:
       origin === "automation_payt" ||
       origin === "automation_braip" ||
       origin === "automation_yampi",
+    webhookValueSource: carriesValue && origin === "automation_webhook",
   };
 }
 
@@ -130,6 +135,7 @@ export function ruleEditDraft(
     currency: normalizeCurrencyCode(rule.conversionRule.defaultCurrency) ?? "",
     labels: labels ? [...rule.triggerPhrases] : [],
     productCodes: [...(rule.productFilterCodes ?? [])],
+    webhookValueSource: rule.webhookValueSource ?? "received",
     catalog: {
       name: rule.catalog?.name ?? "",
       productName: rule.catalog?.productName ?? "",
@@ -280,14 +286,23 @@ export function buildRuleUpdatePayload(
   }
 
   if (capabilities.value) {
-    // ROI Chat: the rule value is only a fallback (optional, removable).
+    // ROI Chat and Webhook / n8n ("valor recebido"): the rule value is only a
+    // fallback (optional, removable).
     const values = valueChanges(
       rule,
       draft,
-      draft.origin === "automation_roichat",
+      draft.origin === "automation_roichat" ||
+        (capabilities.webhookValueSource &&
+          draft.webhookValueSource === "received"),
     );
     if (!values.ok) return values;
     Object.assign(payload, values.value);
+    if (
+      capabilities.webhookValueSource &&
+      draft.webhookValueSource !== (rule.webhookValueSource ?? "received")
+    ) {
+      payload.webhookValueSource = draft.webhookValueSource;
+    }
   }
 
   if (capabilities.currency) {

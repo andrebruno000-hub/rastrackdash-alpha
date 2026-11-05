@@ -129,6 +129,17 @@ const noPermissionMessage =
  * acentuada. Qualquer outra mensagem vira o texto padrão da ação.
  */
 const curatedMessages: Readonly<Record<string, string>> = {
+  // Webhook / n8n (porte do SaaS 098d0950): recusas escritas para a tela.
+  "A regra de webhook vale para todos os números":
+    "A regra de webhook vale para todos os números.",
+  "Conecte (ou retome) um número de WhatsApp antes de criar uma regra de webhook":
+    "Conecte (ou retome) um número de WhatsApp antes de criar uma regra de webhook.",
+  "Este evento já tem uma regra de webhook; use a URL dela":
+    "Este evento já tem uma regra de webhook; use a URL dela.",
+  "Informe o valor fixo (ticket médio) para usar valor fixo":
+    "Informe o valor fixo (ticket médio) para usar valor fixo.",
+  "A regra de webhook só recebe pela URL dela; para parar, pause a regra":
+    "A regra de webhook só recebe pela URL dela; para parar, pause a regra.",
   "Conexao nao encontrada": "Conexão não encontrada.",
   "Conexao invalida": "Conexão inválida.",
   "Regra de conversao do provedor nao encontrada":
@@ -363,10 +374,18 @@ export async function createConversionRuleAction(
     // Regra sem conexão (todos os números ou vários provedores) tem recibo sem
     // conexão; qualquer outra precisa bater com o que foi enviado.
     const expectedConnectionId = input.data.connectionId ?? null;
+    // Webhook / n8n (porte do SaaS 098d0950): a API ancora a regra numa
+    // conexão de WhatsApp viva escolhida por ela, então o recibo traz uma
+    // conexão que não foi enviada.
+    const anchorChosenByApi =
+      input.data.triggerType === "provider_automation" &&
+      input.data.automationSource === "webhook" &&
+      expectedConnectionId === null;
 
     if (
       !result.success ||
-      result.data.receipt.connectionId !== expectedConnectionId ||
+      (!anchorChosenByApi &&
+        result.data.receipt.connectionId !== expectedConnectionId) ||
       (result.data.outcome === "created" &&
         result.data.rule.id !== result.data.receipt.ruleId)
     ) {

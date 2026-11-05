@@ -15,6 +15,7 @@ import {
   leadSubmittedOverrideCopy,
 } from "./lead-submitted-override";
 import { ruleEventLabel, ruleEventLabelForOrigin } from "./event-copy";
+import { webhookEventCarriesValue } from "./webhook-view";
 import {
   automationPlatformOf,
   crmManageHref,
@@ -260,6 +261,7 @@ export function providerRuleOrigin(
   if (rule.automationSource === "braip") return "automation_braip";
   if (rule.automationSource === "roichat") return "automation_roichat";
   if (rule.automationSource === "yampi") return "automation_yampi";
+  if (rule.automationSource === "webhook") return "automation_webhook";
 
   switch (rule.conversionRule.triggerType) {
     case "message_phrase":
@@ -433,6 +435,17 @@ function triggerDetailForProviderRule(
     case "automation_yampi":
       // Só pela URL única da Yampi (uma para a conta toda).
       return "URL única da Yampi";
+    case "automation_webhook":
+      // Porte do SaaS 098d0950: a URL da regra; o valor vem da chamada ou é fixo.
+      return !webhookEventCarriesValue(rule.conversionRule.eventName)
+        ? "Chamada na URL da regra"
+        : (rule.webhookValueSource ?? "received") === "fixed"
+          ? rule.conversionRule.defaultValueCents
+            ? `Valor fixo de ${formatMoney(rule.conversionRule.defaultValueCents, rule.conversionRule.defaultCurrency ?? "BRL")}`
+            : "Valor fixo da regra"
+          : rule.conversionRule.defaultValueCents
+            ? `Valor recebido (reserva: ${formatMoney(rule.conversionRule.defaultValueCents, rule.conversionRule.defaultCurrency ?? "BRL")})`
+            : "Valor recebido na chamada";
   }
 }
 
@@ -1084,14 +1097,17 @@ export function ineligibleNumbers(
   const supported = new Set(
     origin === "automation_payt" ||
       origin === "automation_braip" ||
-      origin === "automation_yampi"
+      origin === "automation_yampi" ||
+      origin === "automation_webhook"
       ? originChannelProviders(origin, capabilities)
       : capabilities.origins
           .filter(
             (item) =>
               item.origin !== "automation_payt" &&
               item.origin !== "automation_braip" &&
-              item.origin !== "automation_yampi",
+              item.origin !== "automation_yampi" &&
+              // Webhook / n8n: any WhatsApp number, like a sale.
+              item.origin !== "automation_webhook",
           )
           .flatMap((item) => item.channelProviders),
   );
