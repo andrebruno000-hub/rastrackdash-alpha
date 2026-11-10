@@ -25,6 +25,18 @@ Upgrade notes for students: [`docs/releases/unreleased.json`](docs/releases/unre
 - API (additive): each `dailyComparison` day carries `spendCents` and
   `trafficRevenueCents`, which add up to the period totals.
 
+### Fixed
+
+- Security: the slow-request log no longer records the Meta Cloud
+  `hub.verify_token` or the Google OAuth `code`/`state` in clear text. Every
+  query parameter with a sensitive name (token, secret, key, signature, code,
+  state...) is logged as `[REDACTED]`; other parameters stay visible.
+- Settings > Currency: the per ad account currency selector shows the value
+  just saved instead of the previous one.
+- Searchable lists (Business Manager, Pixel, Page, credential) open in a
+  portal above the page, so dialogs (including the glass ones) no longer clip
+  them; long lists render the first 100 items and the rest is found by typing.
+
 ## [1.3.3] - 2026-11-03
 
 Upgrade notes for students: [`docs/releases/1.3.3.json`](docs/releases/1.3.3.json). **No new migration and no new variable.**

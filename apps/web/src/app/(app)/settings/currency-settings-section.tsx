@@ -209,7 +209,10 @@ export function CurrencySettingsSection({
                               name="accountId"
                               value={account.id}
                             />
+                            {/* Keyed by the saved value: the form resets after the action,
+                                so a remount makes it show the currency just saved. */}
                             <select
+                              key={account.currencyOverride ?? ""}
                               name="currencyOverride"
                               defaultValue={account.currencyOverride ?? ""}
                               aria-label={`Moeda da conta ${account.adAccountName}`}

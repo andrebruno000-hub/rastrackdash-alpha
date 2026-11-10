@@ -5900,6 +5900,27 @@ body {
   padding: 12px;
 }
 
+.searchable-select-option.disabled,
+.searchable-select-option[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.searchable-select-option.disabled:hover {
+  background: transparent;
+}
+
+.searchable-select-option .searchable-select-reason {
+  color: var(--amber);
+  font-family: inherit;
+  font-size: 11px;
+}
+
+html[data-presentation-mode="active"]
+  .searchable-select-menu[data-presentation-sensitive="true"] {
+  display: none;
+}
+
 .button,
 .login-form button,
 .login-form .secondary-button,
