@@ -212,11 +212,11 @@ describe("Conectar Meta (PalmUP)", () => {
     ).toBe("business_1");
     await waitFor(() => {
       expect(
-        (screen.getByLabelText("Business Manager") as HTMLInputElement).value,
+        (screen.getByRole("combobox", { name: "Business Manager" }) as HTMLInputElement).value,
       ).toBe("BM Cliente");
     });
     expect(
-      (screen.getByLabelText("Credencial Meta") as HTMLInputElement).value,
+      (screen.getByRole("combobox", { name: "Credencial Meta" }) as HTMLInputElement).value,
     ).toBe("Login social PalmUP");
     expect(screen.queryByRole("link", { name: /abrir login da meta/i })).toBeNull();
     expect(document.body.innerHTML).not.toContain(leakedToken);
