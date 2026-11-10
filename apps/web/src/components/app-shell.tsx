@@ -16,20 +16,20 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plug,
+  Route,
   Send,
   Settings2,
   ShieldCheck,
   SquareKanban,
+  Target,
   UsersRound,
   X,
-  Zap,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState, useTransition } from "react";
-import { BrandMark, BrandName } from "./brand";
 import { LogoutButton } from "./logout-button";
 import { BrandFooter } from "./brand-footer";
 import { DataAutoRefresh } from "./data-auto-refresh";
@@ -53,7 +53,7 @@ const navigationIconById: Record<ClientNavigationId, LucideIcon> = {
   reports: BarChart3,
   events: Send,
   integrations: Plug,
-  conversions: Zap,
+  conversions: Route,
   settings: Settings2,
 };
 
@@ -87,7 +87,6 @@ function workspaceAccessLabel(workspace: CurrentWorkspaceDto): string {
   if (workspace.accessMode === "platform_support") {
     return "acesso de suporte";
   }
-
   return workspaceRoleLabel(workspace.role).toLowerCase();
 }
 
@@ -95,7 +94,6 @@ function workspaceRoleLabel(role: WorkspaceListEntryDto["role"]): string {
   if (role === "owner") {
     return "responsável da conta";
   }
-
   return role === "admin" ? "administrador" : "analista";
 }
 
@@ -112,161 +110,112 @@ export function AppShell({
   workspaces?: WorkspaceListEntryDto[];
   brand?: BrandConfig;
 }) {
-  const router = useRouter();
   const pathname = usePathname();
-  const presentationMode = usePresentationMode();
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const router = useRouter();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [workspaceSwitchError, setWorkspaceSwitchError] = useState(false);
-  const [isWorkspaceSwitchPending, startWorkspaceTransition] = useTransition();
-  const workspaceSelectorRef = useRef<HTMLElement>(null);
-  const previousAccessPathnameRef = useRef(pathname);
+  const [isWorkspaceSwitchPending, startWorkspaceSwitch] = useTransition();
+  const presentationMode = usePresentationMode();
+  const workspaceSelectorRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    if (previousAccessPathnameRef.current === pathname) {
+    if (typeof window === "undefined") {
       return;
     }
-
-    previousAccessPathnameRef.current = pathname;
-    router.refresh();
-  }, [pathname, router]);
-
-  useEffect(() => {
-    setSidebarCollapsed(
-      window.localStorage.getItem(sidebarStorageKey) === "true",
-    );
+    const savedPreference = window.localStorage.getItem(sidebarStorageKey);
+    if (savedPreference === "true") {
+      setSidebarCollapsed(true);
+    }
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem(sidebarStorageKey, String(sidebarCollapsed));
-  }, [sidebarCollapsed]);
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia("(max-width: 900px)");
-    const updateViewport = () => {
-      setIsMobile(mediaQuery.matches);
-
-      if (!mediaQuery.matches) {
-        setMobileMenuOpen(false);
+    function handleDocumentClick(event: MouseEvent) {
+      if (
+        workspaceSelectorRef.current &&
+        !workspaceSelectorRef.current.contains(event.target as Node)
+      ) {
+        setWorkspaceMenuOpen(false);
       }
+    }
+
+    document.addEventListener("click", handleDocumentClick);
+    return () => {
+      document.removeEventListener("click", handleDocumentClick);
     };
-
-    updateViewport();
-    mediaQuery.addEventListener("change", updateViewport);
-
-    return () => mediaQuery.removeEventListener("change", updateViewport);
   }, []);
 
-  useEffect(() => {
-    if (!isMobile || !mobileMenuOpen) {
-      return;
-    }
-
-    const previousOverflow = document.body.style.overflow;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setMobileMenuOpen(false);
+  function toggleSidebarCollapse() {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(sidebarStorageKey, String(next));
       }
-    };
+      return next;
+    });
+  }
 
-    document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", closeOnEscape);
-
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [isMobile, mobileMenuOpen]);
-
-  useEffect(() => {
-    if (!workspaceMenuOpen) {
-      return;
-    }
-
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!workspaceSelectorRef.current?.contains(event.target as Node)) {
-        setWorkspaceMenuOpen(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setWorkspaceMenuOpen(false);
-      }
-    };
-
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    window.addEventListener("keydown", closeOnEscape);
-
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [workspaceMenuOpen]);
-
-  const closeMobileMenu = () => setMobileMenuOpen(false);
-  const navigationGroups = visibleNavigationGroups(workspace?.permissions);
-  const canSelectWorkspace =
-    workspace?.accessMode !== "platform_support" &&
-    workspaces.length > 0 &&
-    (workspaces.length > 1 || !workspace);
-
-  const openWorkspaceMenu = () => {
-    setWorkspaceSwitchError(false);
-
-    if (sidebarCollapsed && !isMobile) {
-      setSidebarCollapsed(false);
-    }
-
+  function openWorkspaceMenu() {
     setWorkspaceMenuOpen((current) => !current);
-  };
+    setWorkspaceSwitchError(false);
+  }
 
-  const selectWorkspace = (workspaceId: string) => {
-    if (workspaceId === workspace?.id || isWorkspaceSwitchPending) {
+  function selectWorkspace(workspaceId: string) {
+    if (workspaceId === workspace?.id) {
       setWorkspaceMenuOpen(false);
       return;
     }
 
     setWorkspaceSwitchError(false);
-    startWorkspaceTransition(async () => {
+    startWorkspaceSwitch(async () => {
       const result = await switchActiveWorkspace(workspaceId);
-
       if (!result.ok) {
         setWorkspaceSwitchError(true);
         return;
       }
 
       setWorkspaceMenuOpen(false);
-      closeMobileMenu();
       router.refresh();
     });
-  };
+  }
+
+  function closeMobileMenu() {
+    setMobileMenuOpen(false);
+  }
+
+  const navigationGroups = visibleNavigationGroups(workspace?.permissions);
+  const canSelectWorkspace = workspaces.length > 1;
 
   return (
     <div
       className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileMenuOpen ? " mobile-menu-open" : ""}`}
-      data-sidebar-state={sidebarCollapsed ? "collapsed" : "expanded"}
     >
-      <header className="mobile-shell-header">
-        <Link
-          className="brand"
-          href="/overview"
-          aria-label={`${brand.name} - ir para a Visão geral`}
-          onClick={closeMobileMenu}
-        >
-          <BrandMark brand={brand} gradientId="rastrackdash-r-mobile" />
-          <span className="brand-copy">
-            <BrandName brand={brand} />
-          </span>
-        </Link>
+      <header className="mobile-header">
+        <div className="mobile-header-brand">
+          <Link
+            className="brand-link"
+            href="/overview"
+            title={brand.name}
+            onClick={closeMobileMenu}
+          >
+            {brand.logoSvg ? (
+              <span
+                className="brand-logo"
+                dangerouslySetInnerHTML={{ __html: brand.logoSvg }}
+              />
+            ) : null}
+            <span className="brand-copy">
+              <strong>{brand.name}</strong>
+            </span>
+          </Link>
+        </div>
         <button
           className="mobile-menu-toggle"
           type="button"
-          aria-label={mobileMenuOpen ? "Fechar menu" : "Abrir menu"}
-          aria-controls="app-sidebar"
+          aria-label={mobileMenuOpen ? "Fechar navegação" : "Abrir navegação"}
           aria-expanded={mobileMenuOpen}
-          onClick={() => setMobileMenuOpen((current) => !current)}
+          onClick={() => setMobileMenuOpen((open) => !open)}
         >
           {mobileMenuOpen ? (
             <X aria-hidden="true" size={20} strokeWidth={2.2} />
@@ -276,43 +225,48 @@ export function AppShell({
         </button>
       </header>
 
-      <aside
-        id="app-sidebar"
-        className="sidebar"
-        aria-hidden={isMobile && !mobileMenuOpen}
-        inert={isMobile && !mobileMenuOpen}
-      >
-        <div className="sidebar-topline">
+      <aside className="sidebar">
+        <div className="sidebar-header">
           <Link
-            className="brand"
+            className="brand-link"
             href="/overview"
-            aria-label={`${brand.name} - ir para a Visão geral`}
+            title={brand.name}
             onClick={closeMobileMenu}
           >
-            <BrandMark brand={brand} gradientId="rastrackdash-r-sidebar" />
+            {brand.logoSvg ? (
+              <span
+                className="brand-logo"
+                dangerouslySetInnerHTML={{ __html: brand.logoSvg }}
+              />
+            ) : null}
             <span className="brand-copy">
-              <BrandName brand={brand} />
+              <strong>{brand.name}</strong>
+              <small>Operação WhatsApp</small>
             </span>
           </Link>
           <button
-            className="sidebar-toggle desktop-sidebar-toggle"
+            className="sidebar-collapse-toggle"
             type="button"
-            aria-label={sidebarCollapsed ? "Expandir menu" : "Recolher menu"}
-            aria-expanded={!sidebarCollapsed}
-            onClick={() => setSidebarCollapsed((current) => !current)}
-            title={sidebarCollapsed ? "Expandir menu" : "Recolher menu"}
+            aria-label={
+              sidebarCollapsed
+                ? "Expandir barra lateral"
+                : "Recolher barra lateral"
+            }
+            title={
+              sidebarCollapsed
+                ? "Expandir barra lateral"
+                : "Recolher barra lateral"
+            }
+            onClick={toggleSidebarCollapse}
           >
             {sidebarCollapsed ? (
               <PanelLeftOpen aria-hidden="true" size={18} strokeWidth={2.2} />
             ) : (
               <PanelLeftClose aria-hidden="true" size={18} strokeWidth={2.2} />
             )}
-            <span className="sidebar-toggle-label">
-              {sidebarCollapsed ? "Expandir menu" : "Recolher menu"}
-            </span>
           </button>
           <button
-            className="sidebar-toggle mobile-sidebar-close"
+            className="sidebar-mobile-close"
             type="button"
             aria-label="Fechar menu"
             onClick={closeMobileMenu}
@@ -366,6 +320,7 @@ export function AppShell({
                   strokeWidth={2.1}
                 />
               </button>
+
               <div
                 id="workspace-selector-menu"
                 className="workspace-selector-menu"
@@ -375,7 +330,6 @@ export function AppShell({
               >
                 {workspaces.map((availableWorkspace, index) => {
                   const selected = availableWorkspace.id === workspace?.id;
-
                   return (
                     <button
                       key={availableWorkspace.id}
@@ -442,7 +396,6 @@ export function AppShell({
                 const active =
                   pathname === href || pathname.startsWith(`${href}/`);
                 const Icon = navigationIconById[item.id];
-
                 return (
                   <Link
                     className={active ? "active" : undefined}
@@ -461,6 +414,22 @@ export function AppShell({
               })}
             </nav>
           ))}
+
+          {/* Módulo Oficial Google Ads - Anúncios Alpha */}
+          <nav className="sidebar-nav" aria-label="Google Ads">
+            <p className="nav-label">Google Ads</p>
+            <Link
+              className={pathname === "/google-ads" || pathname.startsWith("/google-ads/") ? "active" : undefined}
+              href="/google-ads"
+              title="Google Ads & Roleta"
+              onClick={closeMobileMenu}
+            >
+              <span className="nav-icon" aria-hidden="true">
+                <Target size={17} strokeWidth={2.1} />
+              </span>
+              <span className="nav-text">Google Ads</span>
+            </Link>
+          </nav>
         </div>
 
         {workspace?.platformRole ? (
@@ -502,8 +471,10 @@ export function AppShell({
           <PresentationModeToggle />
           <LogoutButton />
         </section>
+
         <BrandFooter brand={brand} className="sidebar-footer" />
       </aside>
+
       <button
         className="mobile-sidebar-backdrop"
         type="button"
@@ -511,6 +482,7 @@ export function AppShell({
         tabIndex={mobileMenuOpen ? 0 : -1}
         onClick={closeMobileMenu}
       />
+
       <main className="content">
         {workspace?.accessMode === "platform_support" ? (
           <div className="support-context-bar" role="status">
@@ -529,11 +501,13 @@ export function AppShell({
             </form>
           </div>
         ) : null}
-        {/* The CRM board refreshes itself (counts + first pages only). */}
+
         {workspace && !pathname.startsWith("/crm") ? (
           <DataAutoRefresh source={dataSource ?? null} />
         ) : null}
+
         {children}
+
         <BrandFooter brand={brand} className="content-footer" />
       </main>
     </div>
