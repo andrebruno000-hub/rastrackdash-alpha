@@ -7,6 +7,7 @@ import {
   type ProviderConversionRuleCapabilitiesDto,
   type ProviderConversionRuleOriginDto,
   type ProviderConversionRuleScopeDto,
+  webhookEventNames,
 } from "@wpptrack/shared";
 import { phoneIdentityKey } from "../common/phone/phone-identity";
 import { isBridgedWhatsappProvider } from "../inbound-webhooks/bridged-whatsapp-providers";
@@ -169,6 +170,7 @@ export function providerRuleOrigin(
       if (provider === "umbler") return "automation_umbler";
       if (provider === "unnichat") return "automation_unnichat";
       if (provider === "roichat") return "automation_roichat";
+      if (provider === "webhook") return "automation_webhook";
       return null;
     }
     default:
@@ -196,6 +198,8 @@ export function providerRuleOriginChannelProviders(
     case "automation_payt":
     case "automation_braip":
     case "automation_yampi":
+    // Webhook / n8n: the lead's own number, whatever connection it came by.
+    case "automation_webhook":
       return WHATSAPP_CHANNEL_PROVIDERS;
   }
 }
@@ -290,7 +294,8 @@ export function providerRuleGateConnectionId(
 /**
  * Sales-platform postback rules. In the student edition: Payt, Braip and
  * (Fase 6.7) Yampi. Hotmart joins when ported; Brink Park is not part of the
- * student edition.
+ * student edition. Webhook / n8n follows the same shape (anchored rule, the
+ * lead's number on any connection), as in the SaaS.
  */
 export function providerRuleIsSalesPlatform(
   rule: Pick<
@@ -302,7 +307,8 @@ export function providerRuleIsSalesPlatform(
   return (
     origin === "automation_payt" ||
     origin === "automation_braip" ||
-    origin === "automation_yampi"
+    origin === "automation_yampi" ||
+    origin === "automation_webhook"
   );
 }
 
@@ -350,7 +356,8 @@ export function providerRuleOriginRequiresConnection(
     origin === "automation_roichat" ||
     origin === "automation_payt" ||
     origin === "automation_braip" ||
-    origin === "automation_yampi"
+    origin === "automation_yampi" ||
+    origin === "automation_webhook"
   );
 }
 
@@ -495,6 +502,23 @@ export function providerRuleCapabilities(): ProviderConversionRuleCapabilitiesDt
       labelMatch: null,
       unifiable: false,
       eventNames: ["Purchase"],
+    },
+    {
+      // Webhook / n8n (porte do SaaS 098d0950): the student's n8n, panel or
+      // SDR bot calls the rule URL. Always every number (the lead's own
+      // number, on any WhatsApp connection); one rule per event; the rule is
+      // anchored on a live WhatsApp connection chosen by the API.
+      origin: "automation_webhook",
+      scopes: ["all_numbers"],
+      channelProviders: [...WHATSAPP_CHANNEL_PROVIDERS],
+      authorChannelProviders: null,
+      connectionBound: false,
+      requiresConnection: providerRuleOriginRequiresConnection(
+        "automation_webhook",
+      ),
+      labelMatch: null,
+      unifiable: false,
+      eventNames: [...webhookEventNames],
     },
   ];
   return {

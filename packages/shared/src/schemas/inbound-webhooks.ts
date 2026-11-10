@@ -28,6 +28,10 @@ export const inboundWebhookProviders = [
   // Fase 6.7: Yampi, plataforma de venda como a Braip (yampi automation-v1,
   // certificada por migration). Liberada para todos os workspaces.
   "yampi",
+  // Webhook / n8n: so existe como release de parser (webhook automation-v1,
+  // certificada por migration) das regras chamadas por uma automacao. O lead
+  // pode ter chegado por qualquer conexao de WhatsApp do workspace.
+  "webhook",
 ] as const;
 export const inboundWebhookParserReleaseStatuses = [
   "observation_only",

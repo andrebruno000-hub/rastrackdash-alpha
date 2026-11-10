@@ -256,6 +256,33 @@ antiga). Em `/leads`, aplique um período e clique em **Exportar** → **Excel
 **Data/hora de entrada**. A exportação é uma leitura e funciona mesmo com a
 licença bloqueada.
 
+## Webhook / n8n (conversão chamada pelo seu fluxo)
+
+Nova origem em **Conversões → Nova regra**: o n8n, o painel de atendimento ou
+o robô SDR chama a URL de uma regra e o evento vai à Meta para o lead do
+anúncio, venha ele de qualquer conexão de WhatsApp (API Oficial, a sua Uazapi
+e a sua WAHA por URL + token, Umbler, Unnichat, ROI Chat, Data Crazy,
+Gupshup). Guia completo: [`n8n/README.md`](n8n/README.md).
+
+**Backup:** cópia do PostgreSQL conferida antes do deploy (há migration).
+**Migration:** duas, só aditivas, aplicadas sozinhas no boot da API, nesta
+ordem: `20261105120000_webhook_provider` e
+`20261105120100_webhook_parser_release` (o leitor Webhook / n8n
+`automation-v1` chega certificado, sem passo de liberação). **Variáveis de
+ambiente:** nenhuma nova. **Preservação de customizações:** atualize pelo
+fluxo de sempre do seu fork; as regras existentes não mudam.
+
+**Verificação:** o log mostra as duas migrations aplicadas; em
+`/backoffice/inbound-webhooks/parsers` aparece **Webhook / n8n** certificado;
+em Conversões → Nova regra aparece **Webhook / n8n**. A regra nasce em
+observação: chame a URL com um lead de teste do anúncio e confira em
+Gerenciar → **Eventos recebidos** (nada vai à Meta até ativar o envio).
+
+**Recuperação da versão anterior:** pause ou exclua as regras Webhook / n8n
+antes de voltar o código; as migrations podem ficar no banco (a versão
+anterior ignora o valor novo). PENDENTE: atualização e rollback reais não
+foram executados, e o fluxo do n8n não foi importado numa instância real.
+
 ## Versão instalada
 
 O `/backoffice` mostra ao **dono da plataforma** se esta instância está na versão mais recente da `main` do template. Para isso, a API precisa saber **qual commit foi instalado** — e o build descobre isso sozinho.

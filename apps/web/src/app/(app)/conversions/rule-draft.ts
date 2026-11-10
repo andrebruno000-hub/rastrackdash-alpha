@@ -2,12 +2,16 @@ import type {
   ConversionEventNameDto,
   CurrencyCode,
   ProviderConversionRuleCapabilitiesDto,
+  ProviderConversionRuleDto,
   ProviderConversionRuleOriginDto,
+  WebhookValueSourceDto,
 } from "@wpptrack/shared";
 import {
   conversionEventCarriesValue,
   conversionEventRequiresValue,
 } from "@wpptrack/shared";
+import { eventLabel } from "../integrations/single-url/single-url-copy";
+import { webhookRuleForEvent } from "./webhook-view";
 import {
   automationPlatformOf,
   contactMessageProviders,
@@ -77,6 +81,11 @@ export type RuleDraft = {
   currency: "" | CurrencyCode;
   /** Payt: códigos de produto/oferta aceitos (vazio = todos os produtos). */
   productCodes: string[];
+  /**
+   * Webhook / n8n: valor dos eventos com valor ("received" = o da chamada,
+   * com o da regra como reserva; "fixed" = sempre o da regra).
+   */
+  webhookValueSource: WebhookValueSourceDto;
 };
 
 export type DraftContext = {
@@ -91,6 +100,8 @@ export type DraftContext = {
    * recebe por ela (a URL própria da regra nasce desativada).
    */
   singleUrl?: boolean;
+  /** Webhook / n8n: regras do workspace (uma por evento). */
+  webhookRules?: readonly ProviderConversionRuleDto[];
 };
 
 export function emptyRuleDraft(
@@ -119,6 +130,7 @@ export function emptyRuleDraft(
     triggerLabels: [],
     currency: "",
     productCodes: [],
+    webhookValueSource: "received",
     catalog: {
       name: "",
       productName: "",
@@ -309,6 +321,60 @@ export function scopeIssue(
   return null;
 }
 
+/**
+ * Webhook / n8n (porte do SaaS 098d0950): uma regra por evento, sempre todos
+ * os números, URL própria, nasce em observação. Nenhuma conexão é enviada: a
+ * API ancora a regra numa conexão de WhatsApp viva do aluno (API Oficial,
+ * Uazapi ou WAHA por URL + token, Umbler...), e o lead pode vir de qualquer
+ * uma.
+ */
+function webhookPayload(
+  draft: RuleDraft,
+  eventName: ConversionEventNameDto,
+  name: string,
+  context: DraftContext,
+): Result<Record<string, unknown>> {
+  const definition = ruleOriginDefinition(draft.origin);
+  if (definition.allowedEvents && !definition.allowedEvents.includes(eventName)) {
+    return { ok: false, message: "Esta origem não reconhece o evento escolhido." };
+  }
+  const existing = webhookRuleForEvent(context.webhookRules ?? [], eventName);
+  if (existing) {
+    return {
+      ok: false,
+      message: `${eventLabel(eventName)} já tem a regra “${existing.conversionRule.name}”: use a URL dela.`,
+    };
+  }
+  const carries = conversionEventCarriesValue(eventName);
+  const cents = carries ? moneyToCents(draft.averageValue) : null;
+  if (carries && draft.averageValue.trim() && !cents) {
+    return { ok: false, message: "Informe um valor válido (ex.: 1.500,00)." };
+  }
+  if (
+    carries &&
+    draft.webhookValueSource === "fixed" &&
+    conversionEventRequiresValue(eventName) &&
+    !cents
+  ) {
+    return { ok: false, message: "Informe o ticket médio." };
+  }
+  return {
+    ok: true,
+    value: {
+      name,
+      scope: "all_numbers",
+      channelIds: [],
+      mode: "observation",
+      triggerType: "provider_automation",
+      automationSource: "webhook",
+      eventName,
+      ...(carries ? { webhookValueSource: draft.webhookValueSource } : {}),
+      ...(cents ? { defaultValueCents: cents } : {}),
+      ...(cents && draft.currency ? { defaultCurrency: draft.currency } : {}),
+    },
+  };
+}
+
 /** Chave aleatória (não secreta) de uma tentativa de criação; null sem crypto. */
 export function mintRequestKey(): string | null {
   const webCrypto = (globalThis as { crypto?: Crypto }).crypto;
@@ -474,6 +540,11 @@ export function buildRulePayload(
 
   const issue = scopeIssue(draft, context);
   if (issue) return { ok: false, message: issue };
+
+  // Webhook / n8n: sem conexão no pedido (a API escolhe a âncora).
+  if (draft.origin === "automation_webhook") {
+    return webhookPayload(draft, draft.eventName, name, context);
+  }
 
   const definition = ruleOriginDefinition(draft.origin);
   const connectionId = resolveRuleConnectionId(draft, context);

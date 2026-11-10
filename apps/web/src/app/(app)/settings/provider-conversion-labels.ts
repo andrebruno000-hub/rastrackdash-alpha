@@ -131,6 +131,19 @@ export function executionReasonLabel(reasonCode: string | null): string {
     purchase_within_24h: "Compra repetida em menos de 24h",
     purchase_repeated_within_12h:
       "Mesma compra (mesmo valor e moeda) repetida em menos de 12h",
+    // Webhook / n8n (porte do SaaS 098d0950; mesmas palavras dos recibos).
+    webhook_automation_v1_invalid_payload: "Formato da chamada não reconhecido",
+    webhook_phone_missing: "Chamada sem telefone do lead (phone)",
+    webhook_value_missing: "Evento sem valor (value) e sem valor fixo na regra",
+    webhook_value_invalid:
+      "Valor (value) ou moeda inválidos e sem valor fixo na regra",
+    webhook_event_repeated: "Mesma chamada repetida",
+    contact_multiple_numbers:
+      "Lead com entrada em mais de um número: informe o phone_number_id",
+    contact_not_paid_lead: "Contato não é lead de anúncio",
+    buyer_ambiguous: "Mais de um lead com este telefone",
+    origin_channel_unresolved:
+      "Não deu para saber por qual número o lead chegou",
     provider_conversion_paid_lead_missing: "Lead pago não localizado",
     provider_conversion_catalog_mismatch: "Mensagem divergiu do catálogo",
     provider_conversion_payload_unavailable: "Payload não está mais disponível",

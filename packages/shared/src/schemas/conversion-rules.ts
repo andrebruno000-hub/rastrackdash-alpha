@@ -71,6 +71,9 @@ export const providerConversionAutomationSources = [
   "braip",
   "roichat",
   "yampi",
+  // Webhook / n8n (porte do SaaS #235): o n8n, o painel de atendimento ou o
+  // robo SDR chama a URL de UMA regra.
+  "webhook",
 ] as const;
 export const providerConversionAutomationSourceSchema = z.enum(
   providerConversionAutomationSources,
@@ -91,6 +94,40 @@ export function isRoichatProvider(
 ): provider is typeof ROICHAT_PROVIDER {
   return provider === ROICHAT_PROVIDER;
 }
+
+/**
+ * Webhook / n8n (porte do SaaS #235, integracao generica): o n8n, o painel de
+ * atendimento ou o robo SDR chama a URL de UMA regra (uma URL por regra; o
+ * segredo vai na URL). O evento vem da regra; o corpo so identifica o lead
+ * (`phone`) e, nos eventos com valor, pode trazer `value` + `currency`.
+ * Sempre para todos os numeros; so lead pago (anuncio) recebe a conversao,
+ * venha ele de qualquer conexao. Valor: "received" = o do corpo, com o valor
+ * da regra como reserva; "fixed" = sempre o valor da regra.
+ */
+export const WEBHOOK_PROVIDER = "webhook" as const;
+export const webhookEventNames = [
+  "QualifiedLead",
+  "Purchase",
+  "InitiateCheckout",
+  "AddToCart",
+  "ViewContent",
+  "CartAbandoned",
+  "OrderCreated",
+  "OrderShipped",
+  "OrderDelivered",
+  "OrderCanceled",
+  "OrderReturned",
+  "RatingProvided",
+  "ReviewProvided",
+] as const;
+export function isWebhookProvider(
+  provider: string | null | undefined,
+): provider is typeof WEBHOOK_PROVIDER {
+  return provider === WEBHOOK_PROVIDER;
+}
+export const webhookValueSources = ["received", "fixed"] as const;
+export const webhookValueSourceSchema = z.enum(webhookValueSources);
+export type WebhookValueSourceDto = z.infer<typeof webhookValueSourceSchema>;
 
 /**
  * Fase 4a: eventos padrao que um postback da Payt pode virar. O evento vem do
@@ -182,6 +219,8 @@ export const providerConversionRuleOrigins = [
   "automation_braip",
   "automation_roichat",
   "automation_yampi",
+  // Webhook / n8n: o n8n ou o painel chama a URL da regra (uma URL por regra).
+  "automation_webhook",
 ] as const;
 export const providerConversionRuleOriginSchema = z.enum(
   providerConversionRuleOrigins,
@@ -569,9 +608,47 @@ const providerAutomationCreateSchema = z
     // conexoes)" (so com scope all_numbers). Ausente/false = numeros da
     // conexao da regra (comportamento historico).
     crossConnectionScope: z.boolean().optional(),
+    // Webhook / n8n: de onde vem o valor dos eventos com valor (padrao "received").
+    webhookValueSource: webhookValueSourceSchema.optional(),
   })
   .superRefine((input, context) => {
     refineRuleScopeChannels(input, context);
+    if (isWebhookProvider(input.automationSource)) {
+      if (!(webhookEventNames as readonly string[]).includes(input.eventName)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Este evento nao pode ser enviado por webhook",
+          path: ["eventName"],
+        });
+      }
+      if (input.scope !== "all_numbers") {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A regra de webhook vale para todos os numeros",
+          path: ["scope"],
+        });
+      }
+      if (input.triggerPhrases || input.triggerLabels) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A regra de webhook nao usa frases nem etiquetas",
+          path: ["triggerPhrases"],
+        });
+      }
+      if (input.perRuleUrl === false || input.crossConnectionScope) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A regra de webhook recebe pela propria URL",
+          path: ["perRuleUrl"],
+        });
+      }
+    } else if (input.webhookValueSource) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A origem do valor so existe nas regras de webhook",
+        path: ["webhookValueSource"],
+      });
+    }
     if (isRoichatProvider(input.automationSource)) {
       // ROI Chat: so compra; o valor vem da venda (valor da regra = reserva).
       if (input.eventName !== "Purchase") {
@@ -591,7 +668,11 @@ const providerAutomationCreateSchema = z
     }
     if (!isSalesPlatformProvider(input.automationSource)) {
       refineEventValueFields(input, context, {
-        valueOptional: isRoichatProvider(input.automationSource),
+        valueOptional:
+          isRoichatProvider(input.automationSource) ||
+          // Webhook / n8n "valor recebido": o valor da regra e so reserva.
+          (isWebhookProvider(input.automationSource) &&
+            (input.webhookValueSource ?? "received") === "received"),
       });
       if (input.productFilterCodes && input.productFilterCodes.length > 0) {
         context.addIssue({
@@ -775,6 +856,8 @@ export const providerConversionRuleUpdateInputSchema = z
     confirmPublicUrlDisable: z.literal(true).optional(),
     // Unnichat/Umbler: true = "Ampliar para todas as conexoes" (all_numbers).
     crossConnectionScope: z.boolean().optional(),
+    // Webhook / n8n: troca a origem do valor (valor recebido ou valor fixo).
+    webhookValueSource: webhookValueSourceSchema.optional(),
   })
   .refine((input) => Object.keys(input).length > 0, {
     message: "Informe ao menos um campo para atualizar",
@@ -1030,6 +1113,8 @@ export const providerConversionRuleSchema = z.object({
   // Unnichat/Umbler "Todos os numeros da <plataforma> (todas as conexoes)".
   // Ausente/false em all_numbers = numeros da conexao da regra.
   crossConnectionScope: z.boolean().optional(),
+  // Webhook / n8n: origem do valor (ausente nas outras origens).
+  webhookValueSource: webhookValueSourceSchema.optional(),
   // Somente "all_numbers" ativa: numeros cobertos cuja conexao nao esta em
   // producao ou cujo canal nao esta ativo, com o motivo. Opcional para
   // aceitar respostas anteriores ao campo (ausente = nenhum pendente).

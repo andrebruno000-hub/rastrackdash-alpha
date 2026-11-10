@@ -1,5 +1,6 @@
 import { isSalesPlatformProvider } from "../inbound-webhooks/providers/sales-platform-sale";
 import { roichatPurchaseDedupePolicy } from "./roichat-purchase-dedupe";
+import { webhookDedupePolicy } from "./webhook-purchase-dedupe";
 import type {
   ProviderConversionDecisionConversionDto,
   ProviderConversionDecisionDto,
@@ -431,6 +432,10 @@ export class ProviderConversionDecisionEngine {
     // value and currency) within 12h is a duplicate (roichat-purchase-dedupe).
     const roichat = roichatPurchaseDedupePolicy(input);
     if (roichat) return roichat;
+    // Webhook / n8n: message_id or the same call within 12h, never the 24h
+    // window that would silence a real second sale (webhook-purchase-dedupe).
+    const webhook = webhookDedupePolicy(input);
+    if (webhook) return webhook;
     const scopeKey = [
       input.rule.eventName,
       input.occurrence.workspaceId,

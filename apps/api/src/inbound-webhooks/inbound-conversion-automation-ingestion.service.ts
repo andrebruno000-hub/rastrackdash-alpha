@@ -54,6 +54,10 @@ import { PrismaService } from "../common/prisma/prisma.service";
 import { RUNTIME_ENV, type RuntimeEnv } from "../common/runtime/runtime.module";
 import {
   PAYT_PRODUCT_NOT_IN_RULE_REASON,
+  WEBHOOK_LEAD_AMBIGUOUS_REASON,
+  WEBHOOK_LEAD_MULTIPLE_NUMBERS_REASON,
+  WEBHOOK_NOT_PAID_LEAD_REASON,
+  WEBHOOK_ORIGIN_UNRESOLVED_REASON,
   ProviderConversionObservationService,
   type AutomationCallbackOrigin,
   type ProviderConversionAutomationObservationResult,
@@ -97,6 +101,13 @@ import {
   ROICHAT_PURCHASE_REPEAT_WINDOW_SECONDS,
   ROICHAT_PURCHASE_REPEATED_REASON,
 } from "./providers/roichat/roichat-automation-v1.parser";
+import {
+  WEBHOOK_AUTOMATION_V1_PARSER_VERSION,
+  WEBHOOK_REPEAT_WINDOW_SECONDS,
+  parseWebhookForRule,
+  type ParsedWebhookRuleAutomation,
+} from "./providers/webhook/webhook-automation-v1.parser";
+import { WEBHOOK_EVENT_REPEATED_REASON } from "../conversion-rules/webhook-purchase-dedupe";
 
 const publicEndpointNotFoundMessage = "Webhook não encontrado";
 const publicPersistenceFailureMessage = "Webhook temporariamente indisponível";
@@ -138,6 +149,11 @@ function ownedByAnotherRuleMessage(reasonCode: string | null | undefined) {
  */
 const leadMatchingRecoverableReasons = new Set<string>([
   "payt_channel_missing_or_ambiguous",
+  // Webhook / n8n: more than one lead with the phone, origin number unknown
+  // or the current click with an entry on two numbers.
+  WEBHOOK_LEAD_AMBIGUOUS_REASON,
+  WEBHOOK_ORIGIN_UNRESOLVED_REASON,
+  WEBHOOK_LEAD_MULTIPLE_NUMBERS_REASON,
 ]);
 const visibleAutomationDeliveryWhere = {
   OR: [
@@ -275,7 +291,9 @@ type ParsedAutomation =
   | ParsedUmblerAutomationV1
   | ParsedSaleAutomationV1
   | ParsedUnnichatAutomation
-  | ParsedRoichatAutomationV1;
+  | ParsedRoichatAutomationV1
+  // Webhook / n8n: the event and the value source come from the rule.
+  | ParsedWebhookRuleAutomation;
 type AutomationParseResult =
   | { ok: true; value: ParsedAutomation }
   | { ok: false; errorCode: string };
@@ -466,6 +484,44 @@ export class InboundConversionAutomationIngestionService {
    * purchase (repurchase is allowed). Production applies the same window to
    * the frozen decisions (businessDedupePolicy), under its advisory lock.
    */
+  /**
+   * Webhook / n8n without message_id: the same call (same lead, value and
+   * currency on this URL) within 12h is a resend, counted on the first
+   * delivery (the ROI Chat decision). Production applies the same window to
+   * the frozen decisions, under its advisory lock.
+   */
+  private async findWebhookRepeatedCall(input: {
+    endpoint: PublicConversionEndpoint;
+    fingerprint: string;
+    receivedAt: Date;
+  }): Promise<{ id: string; firstReceivedAt: Date } | null> {
+    try {
+      return await this.prisma.inboundWebhookDelivery.findFirst({
+        where: {
+          workspaceId: input.endpoint.workspaceId,
+          connectionId: input.endpoint.providerRule.connectionId,
+          providerRuleEndpointId: input.endpoint.id,
+          purpose: "conversion_automation",
+          firstReceivedAt: {
+            gte: new Date(
+              input.receivedAt.getTime() -
+                WEBHOOK_REPEAT_WINDOW_SECONDS * 1_000,
+            ),
+            lte: input.receivedAt,
+          },
+          normalizedSummary: {
+            path: ["webhookFingerprint"],
+            equals: input.fingerprint,
+          },
+        },
+        orderBy: [{ firstReceivedAt: "desc" }, { id: "desc" }],
+        select: { id: true, firstReceivedAt: true },
+      });
+    } catch {
+      throw new ServiceUnavailableException(publicPersistenceFailureMessage);
+    }
+  }
+
   private async findRoichatRepeatedPurchase(input: {
     endpoint: PublicConversionEndpoint;
     parsed: ParsedRoichatAutomationV1;
@@ -602,6 +658,38 @@ export class InboundConversionAutomationIngestionService {
           reasonCode: parsed.errorCode,
         },
       };
+    }
+
+    if (
+      parsed.ok &&
+      parsed.value.provider === "webhook" &&
+      parsed.value.fingerprint &&
+      !parsed.value.hasMessageId
+    ) {
+      const repeated = await this.findWebhookRepeatedCall({
+        endpoint,
+        fingerprint: parsed.value.fingerprint,
+        receivedAt,
+      });
+      if (repeated) {
+        await this.recordDuplicate(
+          endpoint,
+          repeated.id,
+          providerAttempt,
+          receivedAt,
+          touchRuleEndpoint,
+        );
+        return {
+          status: "accepted",
+          deliveryId: repeated.id,
+          duplicate: true,
+          observationStatus: "duplicate",
+          ruleOutcome: {
+            status: "duplicate",
+            reasonCode: WEBHOOK_EVENT_REPEATED_REASON,
+          },
+        };
+      }
     }
 
     if (parsed.ok && parsed.value.provider === "roichat") {
@@ -1930,6 +2018,8 @@ export class InboundConversionAutomationIngestionService {
       !rule.conversionRule.active ||
       rule.conversionRule.triggerType !== "provider_automation" ||
       (!isPaytAutomation &&
+        // Webhook / n8n: anchored on any WhatsApp connection, URL per rule.
+        rule.parserRelease.provider !== "webhook" &&
         rule.connection.provider !== "umbler" &&
         rule.connection.provider !== "unnichat" &&
         // Fase 6.8: the ROI Chat rule's own URL is born disabled (the
@@ -1975,6 +2065,7 @@ export class InboundConversionAutomationIngestionService {
       !rule.conversionRule.active ||
       rule.conversionRule.triggerType !== "provider_automation" ||
       (!isPaytAutomation &&
+        rule.parserRelease.provider !== "webhook" &&
         rule.connection.provider !== "umbler" &&
         rule.connection.provider !== "unnichat" &&
         // Fase 6.8: the ROI Chat purchase routed from the number URL.
@@ -2103,6 +2194,17 @@ export class InboundConversionAutomationIngestionService {
       return parseRoichatAutomationV1(payload, receivedAt ?? new Date());
     }
     if (
+      rule.parserRelease.provider === "webhook" &&
+      rule.parserRelease.version === WEBHOOK_AUTOMATION_V1_PARSER_VERSION
+    ) {
+      // First arrival, event and value source from the rule.
+      return parseWebhookForRule(
+        payload,
+        receivedAt ?? new Date(),
+        rule.conversionRule,
+      );
+    }
+    if (
       rule.parserRelease.provider === "unnichat" &&
       rule.parserRelease.version === UNNICHAT_AUTOMATION_V1_PARSER_VERSION
     ) {
@@ -2142,6 +2244,8 @@ export class InboundConversionAutomationIngestionService {
         return "unnichat-automation-v1";
       case "roichat":
         return "roichat-automation-v1";
+      case "webhook":
+        return "webhook-automation-v1";
       default:
         return "umbler-automation-v1";
     }
@@ -2220,6 +2324,13 @@ export class InboundConversionAutomationIngestionService {
       ...(routedChannelId ? { routedChannelId } : {}),
     });
     const processedAt = new Date();
+    // Webhook / n8n: only a paid lead counts. An organic call leaves no mark
+    // that dedupes: its occurrence key and 12h fingerprint are released, so
+    // the same contact calling again after an ad click is a first call,
+    // evaluated at its own arrival (and sends the Qualified Lead once).
+    const organicWebhook =
+      input.parsed.provider === "webhook" &&
+      observed.reasonCode === WEBHOOK_NOT_PAID_LEAD_REASON;
 
     await this.prisma.inboundWebhookDelivery.updateMany({
       where: {
@@ -2230,6 +2341,9 @@ export class InboundConversionAutomationIngestionService {
         purpose: "conversion_automation",
       },
       data: {
+        ...(organicWebhook
+          ? { ingressKey: `webhook-organic:${input.deliveryId}` }
+          : {}),
         parserVersion: this.automationParserVersion(input.endpoint),
         status: "processed",
         classification: this.automationDeliveryClassification(observed),
@@ -2250,6 +2364,16 @@ export class InboundConversionAutomationIngestionService {
             ? {
                 purchaseFingerprint: input.parsed.purchaseFingerprint,
                 eventTimeSource: input.parsed.eventTimeSource,
+              }
+            : {}),
+          // Webhook / n8n: how the call read (no contact data).
+          ...(input.parsed.provider === "webhook" &&
+          "fingerprint" in input.parsed
+            ? {
+                webhookValueStatus: input.parsed.receivedValue.status,
+                webhookFingerprint: organicWebhook ? null : input.parsed.fingerprint,
+                webhookHasMessageId: input.parsed.hasMessageId,
+                webhookNumberMatch: observed.webhookNumberMatch ?? null,
               }
             : {}),
           decisionId: observed.decisionId,
@@ -2722,6 +2846,9 @@ export class InboundConversionAutomationIngestionService {
                   eventName: parsed.eventName,
                   ...("purchaseFingerprint" in parsed
                     ? { purchaseFingerprint: parsed.purchaseFingerprint }
+                    : {}),
+                  ...("fingerprint" in parsed && parsed.fingerprint
+                    ? { webhookFingerprint: parsed.fingerprint }
                     : {}),
                   executionStatus: "decision_pending",
                   reasonCode: "decision_pending",

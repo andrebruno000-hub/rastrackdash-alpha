@@ -23,6 +23,7 @@ import type { ComingSoonNumber } from "./conversions-data";
 import { conversionsLicenseLockedNote } from "./license-lock";
 import { MessagePhraseFields } from "./message-phrase-fields";
 import { ruleCurrencyHint, ScopeStep, ValueFields } from "./new-rule-flow";
+import { ValueSourceFields } from "./value-source-fields";
 import { ReceivedEvents } from "./received-events";
 import {
   buildRuleUpdatePayload,
@@ -58,6 +59,7 @@ const automationOrigins: readonly ProviderConversionRuleOriginDto[] = [
   "automation_braip",
   "automation_roichat",
   "automation_yampi",
+  "automation_webhook",
 ];
 
 /**
@@ -519,6 +521,12 @@ function RuleEditForm({
             <dt>Evento</dt>
             <dd>{ruleEventLabelForOrigin(origin, rule.conversionRule.eventName)}</dd>
           </div>
+          {origin === "automation_webhook" ? (
+            <div>
+              <dt>Alcance</dt>
+              <dd>Todos os números</dd>
+            </div>
+          ) : null}
         </dl>
         <p className="action-note">
           Para trocar a origem ou o evento, crie uma regra nova e exclua esta.
@@ -530,19 +538,22 @@ function RuleEditForm({
         />
       </fieldset>
 
-      <ScopeStep
-        draft={draft}
-        numbers={numbers}
-        connections={connections}
-        capabilities={capabilities}
-        comingSoonNumbers={comingSoonNumbers}
-        onChange={patch}
-        disabled={disabled}
-        connectionLocked
-        initialCrossConnection={rule.crossConnectionScope === true}
-        legend="Números"
-        numbersUnavailable={numbersUnavailable}
-      />
+      {/* Webhook / n8n: sempre todos os números (o alcance não muda). */}
+      {origin === "automation_webhook" ? null : (
+        <ScopeStep
+          draft={draft}
+          numbers={numbers}
+          connections={connections}
+          capabilities={capabilities}
+          comingSoonNumbers={comingSoonNumbers}
+          onChange={patch}
+          disabled={disabled}
+          connectionLocked
+          initialCrossConnection={rule.crossConnectionScope === true}
+          legend="Números"
+          numbersUnavailable={numbersUnavailable}
+        />
+      )}
 
       {editCaps.productFilter ? (
         <fieldset className="conversion-flow-fieldset" disabled={disabled}>
@@ -671,7 +682,22 @@ function RuleEditForm({
       {editCaps.value ? (
         <fieldset className="conversion-flow-fieldset" disabled={disabled}>
           <legend>Valor enviado à Meta</legend>
-          <ValueFields draft={draft} onChange={patch} />
+          {origin === "automation_webhook" ? (
+            <ValueSourceFields
+              name={`webhook-value-source-${rule.id}`}
+              eventName={rule.conversionRule.eventName}
+              source={draft.webhookValueSource}
+              value={draft.averageValue}
+              disabled={disabled}
+              onSourceChange={(webhookValueSource) =>
+                patch({ webhookValueSource })
+              }
+              onValueChange={(averageValue) => patch({ averageValue })}
+              showLegend={false}
+            />
+          ) : (
+            <ValueFields draft={draft} onChange={patch} />
+          )}
         </fieldset>
       ) : null}
 

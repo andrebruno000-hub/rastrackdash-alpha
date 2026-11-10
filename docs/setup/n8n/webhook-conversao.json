@@ -1,0 +1,183 @@
+{
+  "name": "RastrackDash - conversao por webhook (exemplo)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Conversao por webhook (dados ficticios)\n\nQuem chama este fluxo e o painel de atendimento ou o robo SDR, no momento em que a mensagem e ENVIADA. A Meta nao entrega ao n8n as mensagens do atendente.\n\n1. No RastrackDash, em Conversoes, crie uma regra \"Webhook / n8n\" para cada evento e copie a URL de cada uma.\n2. Cole as URLs nos dois nos HTTP (o segredo ja vai na URL; nao precisa de cabecalho).\n3. Troque as frases dos nos IF pelas frases que voces usam.\n4. Corpo esperado no Webhook: phone, message, message_id, e opcionalmente phone_number_id e value.\n\nGuia: docs/setup/n8n/README.md",
+        "height": 420,
+        "width": 420
+      },
+      "id": "5f0c1e2a-0b6e-4c1a-9a51-000000000001",
+      "name": "Como usar",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-520, -200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mensagem-enviada",
+        "options": {}
+      },
+      "id": "5f0c1e2a-0b6e-4c1a-9a51-000000000002",
+      "name": "Mensagem enviada",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "webhookId": "5f0c1e2a-0b6e-4c1a-9a51-0000000000aa"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5f0c1e2a-0b6e-4c1a-9a51-0000000000c1",
+              "leftValue": "={{ $json.body.message }}",
+              "rightValue": "Vou te passar para o especialista",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "id": "5f0c1e2a-0b6e-4c1a-9a51-000000000003",
+      "name": "Frase de lead qualificado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [260, -120]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5f0c1e2a-0b6e-4c1a-9a51-0000000000c2",
+              "leftValue": "={{ $json.body.message }}",
+              "rightValue": "Pagamento confirmado",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "id": "5f0c1e2a-0b6e-4c1a-9a51-000000000004",
+      "name": "Frase de compra?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [260, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "COLE_AQUI_A_URL_DA_REGRA_LEAD_QUALIFICADO",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ phone: $json.body.phone, phone_number_id: $json.body.phone_number_id, message_id: $json.body.message_id }) }}",
+        "options": {}
+      },
+      "id": "5f0c1e2a-0b6e-4c1a-9a51-000000000005",
+      "name": "Enviar lead qualificado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [540, -140],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "COLE_AQUI_A_URL_DA_REGRA_COMPRA",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ phone: $json.body.phone, phone_number_id: $json.body.phone_number_id, message_id: $json.body.message_id, value: $json.body.value, currency: \"BRL\" }) }}",
+        "options": {}
+      },
+      "id": "5f0c1e2a-0b6e-4c1a-9a51-000000000006",
+      "name": "Enviar compra",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [540, 100],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Mensagem enviada": {
+      "main": [
+        [
+          {
+            "node": "Frase de lead qualificado?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Frase de compra?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Frase de lead qualificado?": {
+      "main": [
+        [
+          {
+            "node": "Enviar lead qualificado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Frase de compra?": {
+      "main": [
+        [
+          {
+            "node": "Enviar compra",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

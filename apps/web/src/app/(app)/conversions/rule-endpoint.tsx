@@ -29,6 +29,11 @@ import {
   type SingleUrlActions,
 } from "../integrations/single-url/single-url-panels";
 import { ruleEventLabelForOrigin, ruleEventLabel } from "./event-copy";
+import {
+  WEBHOOK_N8N_FLOW_PATH,
+  webhookBodyExample,
+  webhookSetupSteps,
+} from "./webhook-view";
 
 type RuleAction = (formData: FormData) => Promise<ProviderConversionRuleActionResult>;
 
@@ -39,12 +44,14 @@ const platformNames: Partial<Record<ProviderConversionRuleOriginDto, string>> = 
   automation_braip: "Braip",
   automation_roichat: "ROI Chat",
   automation_yampi: "Yampi",
+  automation_webhook: "n8n",
 };
 
 // Artigo por plataforma: "na Umbler Talk", "na Payt", mas "no Unnichat".
 const platformLocatives: Partial<Record<ProviderConversionRuleOriginDto, string>> = {
   automation_unnichat: "no Unnichat",
   automation_roichat: "no ROI Chat",
+  automation_webhook: "no n8n",
 };
 
 function inPlatform(origin: ProviderConversionRuleOriginDto): string {
@@ -140,6 +147,27 @@ function SetupSteps({
       <UnnichatAutomationSetupPanel
         eventLabel={ruleEventLabel(rule.conversionRule.eventName)}
       />
+    );
+  }
+  if (origin === "automation_webhook") {
+    // Porte do SaaS 098d0950: passo a passo, corpo de exemplo (fictício) e o
+    // fluxo pronto do n8n (o guia completo fica em docs/setup/n8n).
+    return (
+      <>
+        <ol className="integration-steps">
+          {webhookSetupSteps.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+        </ol>
+        <pre className="payload-block">
+          {webhookBodyExample(rule.conversionRule.eventName)}
+        </pre>
+        <p className="action-note">
+          <a href={WEBHOOK_N8N_FLOW_PATH} download="webhook-conversao.json">
+            Baixar fluxo pronto do n8n
+          </a>
+        </p>
+      </>
     );
   }
   return null;

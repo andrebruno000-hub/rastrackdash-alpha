@@ -1,5 +1,6 @@
 import { isSalesPlatformProvider } from "../inbound-webhooks/providers/sales-platform-sale";
 import { roichatPurchaseDedupePolicy } from "./roichat-purchase-dedupe";
+import { webhookDedupePolicy } from "./webhook-purchase-dedupe";
 import { Injectable } from "@nestjs/common";
 import { normalizeCurrencyCode } from "@wpptrack/shared";
 import type {
@@ -124,7 +125,9 @@ export class ProviderConversionLegacyDecisionEngine {
     // A sale (Payt, Braip, ROI Chat) carries its own value; the rule average is only a fallback.
     if (
       (isSalesPlatformProvider(input.occurrence.provider) ||
-        input.occurrence.provider === "roichat") &&
+        input.occurrence.provider === "roichat" ||
+        // Webhook / n8n "valor recebido": the call carries the value.
+        input.occurrence.provider === "webhook") &&
       input.occurrence.observedValueCents
     ) {
       return this.eligible(
@@ -234,6 +237,7 @@ export class ProviderConversionLegacyDecisionEngine {
         input.occurrence.purchaseKey
           ? { mode: "lifetime", scopeKey: input.occurrence.purchaseKey }
           : (roichatPurchaseDedupePolicy(input) ??
+            webhookDedupePolicy(input) ??
             (input.rule.eventName === "QualifiedLead"
             ? {
                 mode: "lifetime",

@@ -1748,7 +1748,22 @@ describe("provider rules API: Conversões screen support", () => {
         "waha",
         "roichat",
       ],
+      // Webhook / n8n (porte do SaaS 098d0950): a lead of any WhatsApp
+      // connection of the student.
+      automation_webhook: [
+        "umbler",
+        "gupshup",
+        "uazapi",
+        "meta_cloud",
+        "data_crazy",
+        "unnichat",
+        "waha",
+        "roichat",
+      ],
     });
+    expect(
+      capabilities.origins.find((origin) => origin.origin === "automation_webhook"),
+    ).toMatchObject({ scopes: ["all_numbers"], connectionBound: false });
     expect(
       capabilities.origins.find((origin) => origin.origin === "message_phrase")
         ?.authorChannelProviders,
@@ -1781,6 +1796,8 @@ describe("provider rules API: Conversões screen support", () => {
       automation_roichat: [true, true],
       automation_braip: [false, true],
       automation_yampi: [false, true],
+      // Webhook / n8n: not bound to one connection, needs a WhatsApp one live.
+      automation_webhook: [false, true],
     });
     // Unnichat: any catalog event (the rule chooses it), never unified.
     expect(

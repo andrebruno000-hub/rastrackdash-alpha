@@ -72,7 +72,10 @@ import {
   productionDirectEligible,
 } from "./production-direct";
 import { normalizePhoneIdentity } from "../common/phone/phone-identity";
-import { reanchorSpanningAutomationRules } from "../conversion-rules/provider-rule-reanchor";
+import {
+  reanchorSpanningAutomationRules,
+  reanchorWebhookRules,
+} from "../conversion-rules/provider-rule-reanchor";
 
 const parserVersion = "v1";
 
@@ -140,6 +143,7 @@ export class InboundWebhookConnectionsService {
       // URL (hub).
       // WAHA is a WhatsApp connection (Integrações → WhatsApp) whose own
       // receiver uses the waha parser release; it has no generic connection.
+      // Webhook / n8n: automation rules only (URL per rule in Conversoes).
       providers: inboundWebhookProviders
         .filter(
           (provider) =>
@@ -147,7 +151,8 @@ export class InboundWebhookConnectionsService {
             provider !== "payt" &&
             provider !== "braip" &&
             provider !== "yampi" &&
-            provider !== "waha",
+            provider !== "waha" &&
+            provider !== "webhook",
         )
         .map((provider) => {
           const release = releaseByProvider.get(provider);
@@ -568,7 +573,7 @@ export class InboundWebhookConnectionsService {
         connectionId,
       );
 
-      return applyInboundWebhookConnectionStatus(transaction, {
+      const applied = await applyInboundWebhookConnectionStatus(transaction, {
         workspaceId,
         connectionId,
         status: input.status,
@@ -583,6 +588,16 @@ export class InboundWebhookConnectionsService {
           input.status === "production" &&
           productionDirectEligible(current.parserRelease),
       });
+      // A paused anchor would close every Webhook / n8n URL anchored here.
+      if (input.status === "paused") {
+        await reanchorWebhookRules(transaction, {
+          workspaceId,
+          connectionId,
+          actorUserId,
+          reason: "connection_paused",
+        });
+      }
+      return applied;
     });
 
     return this.toDto(updated);
@@ -624,6 +639,14 @@ export class InboundWebhookConnectionsService {
         removedConnectionId: connectionId,
         provider: current.provider,
         actorUserId,
+      });
+      // Webhook / n8n rules (every number) anchored here move to another live
+      // WhatsApp connection: their URLs keep receiving.
+      await reanchorWebhookRules(transaction, {
+        workspaceId,
+        connectionId,
+        actorUserId,
+        reason: "connection_removed",
       });
 
       // rastrackdash sanitize (rewrite_rules.external-channel-seat-gate-noop):

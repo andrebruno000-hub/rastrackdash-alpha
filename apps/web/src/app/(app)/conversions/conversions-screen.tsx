@@ -57,6 +57,7 @@ import {
 import { BulkDeleteModal, cleanupCandidateIds } from "./bulk-delete";
 import { LegacyRules, type LegacyRuleActions } from "./legacy-rules";
 import { NewRuleFlow } from "./new-rule-flow";
+import { webhookRulesOf } from "./webhook-view";
 import { PendingNumbersWarning } from "./pending-numbers";
 import { RuleExecutions } from "./rule-executions";
 import {
@@ -212,6 +213,11 @@ export function ConversionsScreen({
   const [manage, setManage] = useState<ManageTarget | null>(null);
   const rulesById = useMemo(
     () => new Map(providerRules.map((rule) => [rule.id, rule])),
+    [providerRules],
+  );
+  // Webhook / n8n (uma URL por evento): a Nova regra mantém uma por evento.
+  const webhookRules = useMemo(
+    () => webhookRulesOf(providerRules),
     [providerRules],
   );
   const manageRule = manage ? (rulesById.get(manage.row.id) ?? manage.rule) : null;
@@ -756,6 +762,7 @@ export function ConversionsScreen({
             integrationEndpoints={singleUrl?.endpoints}
             singleUrlActions={singleUrl?.actions}
             numbersUnavailable={numbersPartial}
+            webhookRules={webhookRules}
             onBusyChange={setFlowBusy}
             onFinished={() => {
               setCloseBlocked(false);
