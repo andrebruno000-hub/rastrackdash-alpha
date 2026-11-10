@@ -1,15 +1,17 @@
 {
   "version": "PENDENTE: versão definida pelo mantenedor",
-  "title": "PENDENTE: título da atualização",
-  "summary": "PENDENTE: benefício e impacto para o aluno",
-  "changes": "PENDENTE: novidades e melhorias incluídas",
-  "fixes": "",
-  "requirements": "PENDENTE: requisitos reais ou declaração de que não mudaram",
-  "upgradeGuide": "PENDENTE: preparar passos verificados\nBackup: informar cópia e cuidados aplicáveis.\nMigration: informar quais e a ordem, ou não se aplica.\nVariáveis de ambiente: informar nomes e finalidade, sem valores secretos.\nPreservação de customizações: preservar alterações locais do aluno.\nVerificação: informar verificações e resultado esperado.",
-  "rollback": "PENDENTE: procedimento de recuperação verificado e limitações",
+  "title": "Licença vitalícia aparece como \"Não expira\"",
+  "summary": "Quem tem licença vitalícia vê, em Backoffice > Licença, o tipo \"Vitalícia\" e \"Não expira\" no lugar de uma data de expiração. Nada muda nas outras licenças.",
+  "changes": "",
+  "fixes": "Backoffice > Licença: com licença vitalícia, o campo \"Expira em\" mostra \"Não expira\" em vez da data técnica 31/12/2099 que o servidor de licenças usa para esse tipo. O tipo de licença já aparecia como \"Vitalícia\" quando o servidor informa o intervalo.",
+  "requirements": "Nada muda em versões de Node, PostgreSQL ou Redis.\nBanco: nenhuma migration nova.\nVariáveis: nenhuma nova e nenhum padrão alterado.\nDependências: nenhuma nova.",
+  "upgradeGuide": "Atualização comum: redeploy do web (a API não muda); siga docs/setup/update.md.\nBackup: faça e confira uma cópia do PostgreSQL antes do redeploy, como em toda atualização.\nMigration: não se aplica.\nVariáveis de ambiente: nenhuma para adicionar ou mudar. Não substitua o arquivo nem apague variáveis.\nPreservação de customizações: atualize pelo fluxo de sempre do seu fork (merge ou rebase da main), mantendo suas alterações locais, marca, integrações e arquivos. Se você personalizou apps/web/src/app/(backoffice)/backoffice/license/page.tsx ou apps/web/src/lib/license-status.ts, resolva o merge mantendo as duas mudanças.\nVerificação: em Backoffice > Licença, uma licença anual continua mostrando a data em \"Expira em\"; uma licença vitalícia mostra \"Vitalícia\" e \"Não expira\".\nValidação feita: testes automáticos da página de licença com uma resposta anual e uma vitalícia. A tela não foi aberta numa instalação real com licença vitalícia.",
+  "rollback": "Volte o web ao código anterior (no seu fork, git revert do commit desta atualização, preservando suas customizações) e faça o deploy do web. Não há dado para desfazer: a licença vitalícia volta a mostrar a data 31/12/2099 em \"Expira em\".",
   "minVersion": null,
   "breakingChange": false,
-  "components": "BOTH",
-  "links": [],
-  "tags": []
+  "components": "WEB",
+  "links": [
+    "https://github.com/samoskito/nod-rastrackdash-wpp/blob/main/docs/setup/update.md"
+  ],
+  "tags": ["licenca", "vitalicia"]
 }

@@ -62,6 +62,30 @@ describe("backoffice license page", () => {
     expect(html).toContain("15/06/2027");
   });
 
+  it("shows a lifetime license as not expiring instead of the far date", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        status: "active",
+        softLock: false,
+        hardLock: false,
+        usable: true,
+        expiresAt: "2099-12-31T23:59:59.000Z",
+        validUntil: null,
+        source: "server",
+        locked: false,
+        lockReason: null,
+        interval: "lifetime",
+      }),
+    );
+
+    const element = await LicensePage();
+    const html = renderToStaticMarkup(createElement("div", null, element));
+
+    expect(html).toContain("Vitalícia");
+    expect(html).toContain("Não expira");
+    expect(html).not.toContain("2099");
+  });
+
   it("explains how to activate when the instance is locked for lack of a license", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse({
