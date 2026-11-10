@@ -323,98 +323,75 @@ export function AppShell({
                 disabled={isWorkspaceSwitchPending}
                 onClick={openWorkspaceMenu}
               >
-                <div className="workspace-selector-trigger-copy">
-                  <p className="sidebar-workspace-kicker">Workspace</p>
-                  <strong className="sidebar-workspace-title">
-                    <PresentationMask fallback="Workspace">
-                      {workspace?.title ?? "Selecione o workspace"}
-                    </PresentationMask>
-                  </strong>
-                  <small className="sidebar-workspace-role">
-                    <PresentationMask fallback="Acesso ativo">
-                      {workspace
-                        ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
-                        : "Nenhum workspace ativo"}
-                    </PresentationMask>
-                  </small>
-                </div>
-                <ChevronsUpDown
-                  className="workspace-selector-caret"
-                  size={16}
-                  strokeWidth={2.2}
-                  aria-hidden="true"
-                />
+                <span>Workspace</span>
+                <strong>
+                  <PresentationMask placeholder="Workspace demonstrativo">
+                    {workspace?.name ?? "Workspace indisponível"}
+                  </PresentationMask>
+                </strong>
+                <small>
+                  <PresentationMask placeholder="acesso demonstrativo">
+                    {workspace
+                      ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
+                      : "Sessão autenticada"}
+                  </PresentationMask>
+                </small>
+                <ChevronsUpDown aria-hidden="true" size={16} strokeWidth={2.2} />
               </button>
 
-              {workspaceMenuOpen ? (
-                <div
-                  className="workspace-dropdown-panel"
-                  role="listbox"
-                  aria-label="Workspaces disponíveis"
-                >
-                  <p className="workspace-dropdown-header">Workspaces</p>
-                  <div className="workspace-dropdown-list">
-                    {workspaces.map((entry) => {
-                      const isSelected = entry.id === workspace?.id;
+              <div
+                className="workspace-selector-menu"
+                hidden={!workspaceMenuOpen}
+                role="listbox"
+                aria-label="Workspaces disponíveis"
+              >
+                {workspaces.map((availableWorkspace) => {
+                  const selected = availableWorkspace.id === workspace?.id;
 
-                      return (
-                        <button
-                          className={`workspace-dropdown-item${isSelected ? " selected" : ""}`}
-                          key={entry.id}
-                          type="button"
-                          role="option"
-                          aria-selected={isSelected}
-                          disabled={isWorkspaceSwitchPending}
-                          onClick={() => selectWorkspace(entry.id)}
-                        >
-                          <Building2
-                            className="workspace-item-icon"
-                            size={16}
-                            strokeWidth={2}
-                            aria-hidden="true"
-                          />
-                          <div className="workspace-item-copy">
-                            <strong className="workspace-item-title">
-                              <PresentationMask fallback="Workspace">
-                                {entry.title}
-                              </PresentationMask>
-                            </strong>
-                            <small className="workspace-item-meta">
-                              <PresentationMask fallback="slug - papel">
-                                {`${entry.slug} - ${workspaceRoleLabel(entry.role).toLowerCase()}`}
-                              </PresentationMask>
-                            </small>
-                          </div>
-                          {isSelected ? (
-                            <Check
-                              className="workspace-item-check"
-                              size={15}
-                              strokeWidth={2.4}
-                              aria-hidden="true"
-                            />
-                          ) : null}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  {workspaceSwitchError ? (
-                    <p className="workspace-switch-error" role="alert">
-                      Não foi possível alternar de workspace. Tente novamente.
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
+                  return (
+                    <button
+                      className={`workspace-selector-option${selected ? " selected" : ""}`}
+                      key={availableWorkspace.id}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      disabled={isWorkspaceSwitchPending}
+                      onClick={() => selectWorkspace(availableWorkspace.id)}
+                    >
+                      <Building2 aria-hidden="true" size={17} strokeWidth={2.1} />
+                      <span className="workspace-selector-option-copy">
+                        <strong>
+                          <PresentationMask placeholder="Workspace demonstrativo">
+                            {availableWorkspace.name}
+                          </PresentationMask>
+                        </strong>
+                        <small>
+                          {workspaceRoleLabel(availableWorkspace.role)}
+                        </small>
+                      </span>
+                      {selected ? (
+                        <Check aria-hidden="true" size={17} strokeWidth={2.2} />
+                      ) : null}
+                    </button>
+                  );
+                })}
+                {workspaceSwitchError ? (
+                  <p className="workspace-selector-error" role="alert">
+                    Não foi possível abrir esta empresa.
+                  </p>
+                ) : null}
+              </div>
             </>
           ) : (
             <>
-              <p className="sidebar-workspace-kicker">Workspace</p>
-              <strong className="sidebar-workspace-title">
-                <PresentationMask fallback="Workspace">
-                  {workspace?.title ?? "Workspace ativo"}
+              <span>Workspace</span>
+              <strong>
+                <PresentationMask placeholder="Workspace demonstrativo">
+                  {workspace?.name ?? "Workspace indisponível"}
                 </PresentationMask>
               </strong>
-              <small className="sidebar-workspace-role">
-                <PresentationMask fallback="Acesso ativo">
+              <small>
+                <PresentationMask placeholder="acesso demonstrativo">
                   {workspace
                     ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
                     : "Sessão autenticada"}
@@ -505,59 +482,58 @@ export function AppShell({
           </nav>
         ) : null}
 
-        <section className="sidebar-account-controls" aria-label="Controles da conta">
-          {workspace?.accessMode === "platform_support" ? (
-            <span className="support-access-badge">
-              <span className="support-access-dot" aria-hidden="true" />
-              <button
-                className="support-access-exit-link"
-                type="button"
-                onClick={handleExitPlatformSupport}
-                disabled={isExitSupportPending}
-              >
-                {isExitSupportPending ? "Encerrando..." : "Encerrar acesso"}
-              </button>
+        <section className="health-panel" aria-label="Conta">
+          <p className="nav-label">Conta</p>
+          {workspace ? (
+            <span
+              className={`status-chip${workspace.operationalStatus === "blocked" ? " warn" : ""}`}`
+            >
+              {workspace.operationalStatus === "blocked"
+                ? "bloqueado"
+                : "ativo"}
             </span>
           ) : null}
           <PresentationModeToggle />
           <LogoutButton />
         </section>
+
         <BrandFooter brand={brand} className="sidebar-footer" />
       </aside>
+
       <button
         className="mobile-sidebar-backdrop"
         type="button"
         aria-label="Fechar menu"
+        tabIndex={mobileMenuOpen ? 0 : -1}
         onClick={closeMobileMenu}
       />
 
-      <main className="shell-content">
+      <main className="content">
         {workspace?.accessMode === "platform_support" ? (
-          <aside
-            className="support-access-banner"
-            role="status"
-            aria-live="polite"
-          >
-            <div className="support-access-banner-copy">
-              <span className="support-access-dot" aria-hidden="true" />
-              <strong>Acesso de suporte ativo:</strong> você está visualizando o
-              workspace <code>{workspace.slug}</code> em modo suporte.
+          <div className="support-context-bar" role="status">
+            <div>
+              <span>Acesso de suporte</span>
+              <strong>
+                <PresentationMask placeholder="Workspace demonstrativo">
+                  {workspace.name}
+                </PresentationMask>
+              </strong>
             </div>
-            <button
-              className="button button-ghost button-small support-access-exit-button"
-              type="button"
-              onClick={handleExitPlatformSupport}
-              disabled={isExitSupportPending}
-            >
-              {isExitSupportPending ? "Encerrando acesso..." : "Encerrar acesso"}
-            </button>
-          </aside>
+            <form action={exitPlatformSupportAccess}>
+              <button className="button ghost" type="submit">
+                Encerrar acesso
+              </button>
+            </form>
+          </div>
         ) : null}
+
         {/* The CRM board refreshes itself (counts + first pages only). */}
         {workspace && !pathname.startsWith("/crm") ? (
           <DataAutoRefresh source={dataSource ?? null} />
         ) : null}
+
         {children}
+
         <BrandFooter brand={brand} className="content-footer" />
       </main>
     </div>
