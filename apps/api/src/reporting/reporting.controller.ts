@@ -461,6 +461,7 @@ export class ReportingController {
   async retryRejectedConversionEventAudit(
     @AuthToken() refreshToken: string,
     @Param("eventId") eventId: string,
+    @Body() body?: { conversionDestinationId?: unknown },
   ) {
     const { authenticated, workspace } =
       await this.getCurrentWorkspaceContext(refreshToken);
@@ -475,6 +476,10 @@ export class ReportingController {
       eventId,
       { reason: "Reenvio manual de evento recusado pela Meta" },
       this.rejectedRetryContext(workspace, authenticated.user.id),
+      typeof body?.conversionDestinationId === "string" &&
+        body.conversionDestinationId.trim()
+        ? { conversionDestinationId: body.conversionDestinationId.trim() }
+        : {},
     );
   }
 

@@ -3,6 +3,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   Optional,
 } from "@nestjs/common";
@@ -131,6 +132,8 @@ type ReportingAccountRecord = {
 
 @Injectable()
 export class MetaManualConnectionsService {
+  private readonly logger = new Logger(MetaManualConnectionsService.name);
+
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     private readonly adapter: MetaAdapter,
@@ -1374,7 +1377,10 @@ export class MetaManualConnectionsService {
       reportingAccountId,
     });
 
-    await this.inboundRoutes?.reevaluateWorkspaceOpenEvents(workspaceId);
+    await this.reevaluateOpenInboundEvents(
+      workspaceId,
+      "após alterar o destino da conta",
+    );
 
     return this.listConfigurationForSource(workspaceId, source);
   }
@@ -1648,13 +1654,31 @@ export class MetaManualConnectionsService {
       },
     });
 
-    await this.inboundRoutes?.reevaluateWorkspaceOpenEvents(workspaceId);
+    await this.reevaluateOpenInboundEvents(
+      workspaceId,
+      "após alterar o destino do anúncio",
+    );
 
     return this.getReportingAccountAdRouting(
       workspaceId,
       reportingAccountId,
       source,
     );
+  }
+
+  // Reavaliação é melhor esforço: a alteração principal já foi salva e não
+  // pode virar erro na tela. A próxima sincronização reavalia de novo.
+  private async reevaluateOpenInboundEvents(
+    workspaceId: string,
+    context: string,
+  ): Promise<void> {
+    try {
+      await this.inboundRoutes?.reevaluateWorkspaceOpenEvents(workspaceId);
+    } catch (error) {
+      this.logger.warn(
+        `Falha ao reavaliar eventos abertos do workspace ${workspaceId} ${context}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async setOAuthAdDestination(

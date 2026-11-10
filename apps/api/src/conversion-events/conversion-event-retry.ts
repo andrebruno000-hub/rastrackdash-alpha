@@ -286,3 +286,38 @@ export function fixableMetaRejectionCandidateWhere(
 
 /** Candidatos lidos por clique antes do filtro de código (janela de 7 dias). */
 export const REJECTED_RETRY_CANDIDATE_LIMIT = 1_000;
+
+/**
+ * Chave do sourcePayload com o pixel escolhido no "Reenviar recusado" de um
+ * evento: no envio, vale acima da rota do anúncio, da conta e da conexão.
+ */
+export const RETRY_DESTINATION_PAYLOAD_KEY = "retryConversionDestinationId";
+
+export function retryDestinationIdFromPayload(
+  sourcePayload: unknown,
+): string | null {
+  if (
+    !sourcePayload ||
+    typeof sourcePayload !== "object" ||
+    Array.isArray(sourcePayload)
+  )
+    return null;
+  const id = (sourcePayload as Record<string, unknown>)[
+    RETRY_DESTINATION_PAYLOAD_KEY
+  ];
+  return typeof id === "string" && id ? id : null;
+}
+
+/**
+ * Destino que viaja no próprio evento (página + pixel autorizados do número,
+ * ctwaDestination): o reenvio refaz esse destino com a configuração atual do
+ * número, sem escolha de pixel.
+ */
+export function hasPinnedCtwaDestination(sourcePayload: unknown): boolean {
+  return (
+    !!sourcePayload &&
+    typeof sourcePayload === "object" &&
+    !Array.isArray(sourcePayload) &&
+    !!(sourcePayload as { ctwaDestination?: unknown }).ctwaDestination
+  );
+}

@@ -73,6 +73,75 @@ describe("Reenviar recusados", () => {
   });
 });
 
+describe("Reenviar recusado: Enviar para (pixel escolhido)", () => {
+  const destinations = [
+    {
+      id: "dest_old",
+      pixelId: "900000000000001",
+      pixelName: "Pixel antigo",
+      pageName: "Página A",
+    },
+    {
+      id: "dest_new",
+      pixelId: "900000000000002",
+      pixelName: "Pixel certo",
+      pageName: "Página B",
+    },
+  ];
+
+  it("já vem com o pixel mais recente que não seja o da recusa e marca o da recusa", async () => {
+    const { RejectedRetryForm, defaultRetryDestinationId } = await import(
+      "../src/app/(app)/events/event-audit-details"
+    );
+    expect(defaultRetryDestinationId(destinations, "900000000000001")).toBe(
+      "dest_new",
+    );
+    expect(defaultRetryDestinationId(destinations, "outro")).toBe("dest_old");
+    expect(defaultRetryDestinationId([destinations[0]!], "900000000000001")).toBe(
+      "dest_old",
+    );
+
+    const html = renderToStaticMarkup(
+      createElement(RejectedRetryForm, {
+        destinations,
+        eventId: "evento_1",
+        refusedPixelId: "900000000000001",
+        onSuccess: () => undefined,
+      }),
+    );
+    expect(html).toContain("Enviar para");
+    expect(html).toContain('name="conversionDestinationId" value="dest_new"');
+    expect(html).toContain("Pixel antigo · 900000000000001 (usado na recusa)");
+    expect(html).not.toMatch(/<button[^>]*disabled[^>]*type="submit"/);
+  });
+
+  it("sem pixels para escolher, reenvia pelo destino atual (sem o campo)", async () => {
+    const { RejectedRetryForm } = await import(
+      "../src/app/(app)/events/event-audit-details"
+    );
+    const html = renderToStaticMarkup(
+      createElement(RejectedRetryForm, {
+        destinations: [],
+        eventId: "evento_1",
+        refusedPixelId: null,
+        onSuccess: () => undefined,
+      }),
+    );
+    expect(html).not.toContain("Enviar para");
+    expect(html).not.toContain("conversionDestinationId");
+    expect(html).toContain("Reenviar recusado");
+  });
+
+  it("a ação manda o pixel escolhido no corpo do reenvio do evento", () => {
+    const actions = readFileSync(
+      resolve(__dirname, "../src/app/(app)/events/actions.ts"),
+      "utf8",
+    );
+    expect(actions).toContain('formData.get("conversionDestinationId")');
+    expect(actions).toContain("JSON.stringify({ conversionDestinationId })");
+  });
+});
+
 describe("Reenviar recusados em lote: resumo", () => {
   it("separa os que ficaram de fora por configuração dos já reenviados", async () => {
     const { retryRejectedMessage } = await import(

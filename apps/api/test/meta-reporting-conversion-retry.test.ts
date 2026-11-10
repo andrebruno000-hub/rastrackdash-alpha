@@ -107,6 +107,17 @@ function harness(events: Row[]) {
       groupBy: vi.fn(async () => []),
     },
     externalIngestionRecord: { findFirst: vi.fn(async () => null) },
+    // "Enviar para" do Reenviar recusado: pixels configurados da conta.
+    metaConversionDestination: {
+      findMany: vi.fn(async () => [
+        {
+          id: "destination_new",
+          pixelId: "900000000000002",
+          pixelName: "Pixel certo",
+          pageName: "Página",
+        },
+      ]),
+    },
   };
   const funnel = { getConfiguration: vi.fn(async () => ({ stages: [] })) };
   const service = new MetaReportingService(
@@ -428,6 +439,42 @@ describe("Meta reporting conversion retries", () => {
     });
     expect(detail.reasonCode).toBe("MetaCapiRejected");
     expect(detail.reason).toContain(readable);
+    // Recusa corrigível: o detalhe oferece os pixels da conta ("Enviar para").
+    expect(detail.canRetryRejected).toBe(true);
+    expect(detail.retryDestinations).toEqual([
+      expect.objectContaining({ id: "destination_new", pixelName: "Pixel certo" }),
+    ]);
+  });
+
+  it("não oferece pixels quando a recusa não é corrigível ou o destino é o do número (CTWA)", async () => {
+    const now = Date.now();
+    const { service, prisma } = harness([
+      event({
+        id: "policy_368",
+        status: "error",
+        errorCode: "MetaCapiRejected",
+        sourceTrigger: "keyword",
+        eventOccurredAt: new Date(now - 60_000),
+        providerResponseSummary: { httpStatus: 400, error: { code: 368 } },
+      }),
+      event({
+        id: "ctwa_pinned",
+        status: "error",
+        errorCode: "MetaCapiRejected",
+        sourceTrigger: "keyword",
+        eventOccurredAt: new Date(now - 60_000),
+        providerResponseSummary: { httpStatus: 400, error: { code: 100 } },
+        sourcePayload: { ctwaDestination: { pixelId: "pixel-do-numero" } },
+      }),
+    ]);
+    for (const eventId of ["policy_368", "ctwa_pinned"]) {
+      const detail = await service.getConversionEventAuditDetail({
+        workspaceId: "workspace_1",
+        eventId,
+      });
+      expect(detail.retryDestinations).toBeUndefined();
+    }
+    expect(prisma.metaConversionDestination.findMany).not.toHaveBeenCalled();
   });
 
   it("lets a ready_to_send stuck for more than 10 minutes be retried (7ac17df7)", async () => {

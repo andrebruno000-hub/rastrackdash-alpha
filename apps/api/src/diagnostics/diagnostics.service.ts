@@ -44,10 +44,12 @@ import { CONVERSION_EVENTS_QUEUE } from "../common/queue/queue.constants";
 import {
   BLOCKED_CONVERSION_RETRY_LIMIT,
   canRetryConversionEvent,
+  hasPinnedCtwaDestination,
   isConfigurationBlockedConversionEvent,
   isFixableMetaRejectionConversionEvent,
   isMetaAuthFailureConversionEvent,
-  isOutsideMetaEventTimeWindow
+  isOutsideMetaEventTimeWindow,
+  RETRY_DESTINATION_PAYLOAD_KEY
 } from "../conversion-events/conversion-event-retry";
 import {
   findPriorLeadLifetimeConversion,
@@ -1449,10 +1451,13 @@ export class DiagnosticsService {
   async retryRejectedConversionEvent(
     id: string,
     input: DiagnosticRetryInputDto,
-    context: ConversionEventRetryContext & { workspaceId: string }
+    context: ConversionEventRetryContext & { workspaceId: string },
+    /** Pixel escolhido em "Enviar para": vale acima da rota do anúncio. */
+    options: { conversionDestinationId?: string } = {}
   ): Promise<DiagnosticRetryResultDto> {
     return this.performConversionEventRetry(id, input, context, {
-      fixableRejectionOnly: true
+      fixableRejectionOnly: true,
+      chosenDestinationId: options.conversionDestinationId?.trim() || null
     });
   }
 
@@ -1552,6 +1557,8 @@ export class DiagnosticsService {
       configurationBlockedOnly?: boolean;
       /** 1.3.1: só recusas corrigíveis; rota recalculada no envio. */
       fixableRejectionOnly?: boolean;
+      /** Pixel escolhido no reenvio de uma recusa (só com fixableRejectionOnly). */
+      chosenDestinationId?: string | null;
       onClaimed?: () => void;
       onEnqueued?: () => void;
     } = {}
@@ -1644,22 +1651,81 @@ export class DiagnosticsService {
       throw new Error("ConversionEventsQueueService is required for retries");
     }
 
+    // "Enviar para": pixel escolhido pela pessoa no reenvio de uma recusa.
+    // Precisa ser um destino configurado do workspace; o destino CTWA do
+    // número (ctwaDestination) não tem escolha, ele é refeito abaixo.
+    const chosenDestinationId = fixableRejection
+      ? (progress.chosenDestinationId ?? null)
+      : null;
+    if (chosenDestinationId) {
+      const destination = hasPinnedCtwaDestination(
+        conversionEvent.sourcePayload
+      )
+        ? null
+        : await this.prisma.metaConversionDestination.findFirst({
+            where: {
+              id: chosenDestinationId,
+              workspaceId: conversionEvent.workspaceId,
+              status: "configured"
+            },
+            select: { id: true }
+          });
+      if (!destination) {
+        throw new BadRequestException(
+          "Este pixel não está disponível para o reenvio"
+        );
+      }
+    }
+
     // Recusado e enviado pelo destino CTWA (página + pixel autorizados do
     // número): o destino gravado no evento é refeito com a configuração
     // atual do número, ou o envio recusaria a mesma rota de novo.
-    const refreshedSourcePayload = fixableRejection
-      ? await this.refreshedCtwaSourcePayload(conversionEvent)
-      : undefined;
+    const refreshedSourcePayload =
+      fixableRejection && !chosenDestinationId
+        ? await this.refreshedCtwaSourcePayload(conversionEvent)
+        : undefined;
     // Demais recusados: o destino gravado na tentativa recusada não pode
     // prender o reenvio (o par Página/Pixel é a identidade do destino:
     // corrigir o par cria ou escolhe OUTRO destino). Entradas e regras de
     // URL/número (inbound_webhook:<provedor>) refazem a rota atual; o resto
     // apaga o destino e mantém conta e conexão, e o envio cai no destino
     // atual do anúncio, da conta ou da conexão.
-    const refreshedRoute =
-      fixableRejection && !refreshedSourcePayload
+    // Com pixel escolhido, ele vira o destino do evento (nunca nulo: um log
+    // sem destino bloquearia o lead em todos os pixels) e a conexão sai: o
+    // envio usa a conta autorizada para esse pixel.
+    const refreshedRoute = chosenDestinationId
+      ? {
+          metaBusinessConnectionId: null,
+          metaConversionDestinationId: chosenDestinationId
+        }
+      : fixableRejection && !refreshedSourcePayload
         ? await this.refreshedRejectedRoute(conversionEvent)
         : undefined;
+    // A escolha fica no sourcePayload (sem migration). Um reenvio sem escolha
+    // (botão em lote) apaga a anterior: o destino recusado não é reaproveitado.
+    const currentSource =
+      conversionEvent.sourcePayload &&
+      typeof conversionEvent.sourcePayload === "object" &&
+      !Array.isArray(conversionEvent.sourcePayload)
+        ? (conversionEvent.sourcePayload as Record<string, unknown>)
+        : null;
+    let nextSourcePayload: Record<string, unknown> | undefined =
+      refreshedSourcePayload ?? undefined;
+    if (chosenDestinationId) {
+      nextSourcePayload = {
+        ...(currentSource ?? {}),
+        [RETRY_DESTINATION_PAYLOAD_KEY]: chosenDestinationId
+      };
+    } else if (
+      fixableRejection &&
+      !nextSourcePayload &&
+      currentSource &&
+      RETRY_DESTINATION_PAYLOAD_KEY in currentSource
+    ) {
+      const { [RETRY_DESTINATION_PAYLOAD_KEY]: _previous, ...rest } =
+        currentSource;
+      nextSourcePayload = rest;
+    }
     // O destino mudou: confere de novo a regra de uma conversão por lead e
     // pixel (o guard só roda na criação do evento). Vale também para o CTWA,
     // cujo destino refeito vem no sourcePayload.
@@ -1694,8 +1760,8 @@ export class DiagnosticsService {
         // a configuração atual e grava os novos.
         ...(fixableRejection ? { pixelId: null, pageId: null } : {}),
         ...(refreshedRoute ?? {}),
-        ...(refreshedSourcePayload
-          ? { sourcePayload: refreshedSourcePayload as Prisma.InputJsonValue }
+        ...(nextSourcePayload
+          ? { sourcePayload: nextSourcePayload as Prisma.InputJsonValue }
           : {})
       }
     });
@@ -1743,10 +1809,12 @@ export class DiagnosticsService {
                   conversionEvent.metaConversionDestinationId ?? null
               }
             : {}),
-          ...(refreshedSourcePayload
+          ...(nextSourcePayload
             ? {
                 sourcePayload:
-                  conversionEvent.sourcePayload as Prisma.InputJsonValue
+                  conversionEvent.sourcePayload == null
+                    ? Prisma.DbNull
+                    : (conversionEvent.sourcePayload as Prisma.InputJsonValue)
               }
             : {})
         }
@@ -1789,7 +1857,10 @@ export class DiagnosticsService {
           errorMessage: conversionEvent.errorMessage
         }) as Prisma.InputJsonValue,
         afterSummary: {
-          retryStatus: "queued"
+          retryStatus: "queued",
+          ...(chosenDestinationId
+            ? { chosenConversionDestinationId: chosenDestinationId }
+            : {})
         }
       }
     });

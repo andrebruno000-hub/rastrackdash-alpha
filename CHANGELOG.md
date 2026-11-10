@@ -36,6 +36,25 @@ Upgrade notes for students: [`docs/releases/unreleased.json`](docs/releases/unre
 - Searchable lists (Business Manager, Pixel, Page, credential) open in a
   portal above the page, so dialogs (including the glass ones) no longer clip
   them; long lists render the first 100 items and the rest is found by typing.
+- Eventos Meta > "Reenviar recusado" (single event): new "Enviar para"
+  field (searchable) to pick the pixel of the resend among the workspace's
+  configured destinations; it preselects the most recent one that is not the
+  refused pixel. The chosen pixel wins over the ad routing, keeps the same
+  `event_id` and is sent through the active ad account authorized for it (or
+  the Meta login without BM routing). The API refuses unknown or
+  unconfigured pixels and CTWA events pinned to the number's page + pixel.
+  Still limited to correctable refusals (100, 10, 200-299, old rows without a
+  code). The bulk "Reenviar recusados" has no choice and clears a previous
+  one. Stored in `sourcePayload`, no migration (port of SaaS #233).
+- Sending without BM routing: the fallback destination lookup now uses the
+  pixel chosen on the resend, then the workspace's primary Meta destination,
+  and only without a valid primary the most recently updated one (port of
+  SaaS #234; the resolver path already used the primary).
+- Integrations > Meta: changing an ad account or ad destination no longer
+  fails when re-evaluating open inbound events throws (e.g. an old event of a
+  removed webhook connection); the change stays saved and the failure is
+  logged. The re-evaluation also skips channels of removed connections
+  (general fixes from SaaS #201).
 
 ## [1.3.3] - 2026-11-03
 
