@@ -16,7 +16,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plug,
-  Route,
   Send,
   Settings2,
   ShieldCheck,
@@ -24,12 +23,14 @@ import {
   Target,
   UsersRound,
   X,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState, useTransition } from "react";
+import { BrandMark, BrandName } from "./brand";
 import { LogoutButton } from "./logout-button";
 import { BrandFooter } from "./brand-footer";
 import { DataAutoRefresh } from "./data-auto-refresh";
@@ -53,7 +54,7 @@ const navigationIconById: Record<ClientNavigationId, LucideIcon> = {
   reports: BarChart3,
   events: Send,
   integrations: Plug,
-  conversions: Route,
+  conversions: Zap,
   settings: Settings2,
 };
 
@@ -87,6 +88,7 @@ function workspaceAccessLabel(workspace: CurrentWorkspaceDto): string {
   if (workspace.accessMode === "platform_support") {
     return "acesso de suporte";
   }
+
   return workspaceRoleLabel(workspace.role).toLowerCase();
 }
 
@@ -94,6 +96,7 @@ function workspaceRoleLabel(role: WorkspaceListEntryDto["role"]): string {
   if (role === "owner") {
     return "responsável da conta";
   }
+
   return role === "admin" ? "administrador" : "analista";
 }
 
@@ -110,66 +113,117 @@ export function AppShell({
   workspaces?: WorkspaceListEntryDto[];
   brand?: BrandConfig;
 }) {
-  const pathname = usePathname();
   const router = useRouter();
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
-  const [workspaceSwitchError, setWorkspaceSwitchError] = useState(false);
-  const [isWorkspaceSwitchPending, startWorkspaceSwitch] = useTransition();
+  const pathname = usePathname();
   const presentationMode = usePresentationMode();
-  const workspaceSelectorRef = useRef<HTMLElement | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [isWorkspaceSwitchPending, startWorkspaceTransition] = useTransition();
+  const [isExitSupportPending, startExitSupportTransition] = useTransition();
+  const [workspaceSwitchError, setWorkspaceSwitchError] = useState(false);
+  const workspaceSelectorRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const savedPreference = window.localStorage.getItem(sidebarStorageKey);
-    if (savedPreference === "true") {
-      setSidebarCollapsed(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    function handleDocumentClick(event: MouseEvent) {
-      if (
-        workspaceSelectorRef.current &&
-        !workspaceSelectorRef.current.contains(event.target as Node)
-      ) {
-        setWorkspaceMenuOpen(false);
+    try {
+      const persisted = window.localStorage.getItem(sidebarStorageKey);
+      if (persisted !== null) {
+        setSidebarCollapsed(persisted === "true");
       }
+    } catch {
+      // LocalStorage access can fail in restricted environments; default to expanded.
     }
-
-    document.addEventListener("click", handleDocumentClick);
-    return () => {
-      document.removeEventListener("click", handleDocumentClick);
-    };
   }, []);
 
-  function toggleSidebarCollapse() {
+  const toggleSidebar = () => {
     setSidebarCollapsed((current) => {
       const next = !current;
-      if (typeof window !== "undefined") {
+      try {
         window.localStorage.setItem(sidebarStorageKey, String(next));
+      } catch {
+        // Ignored.
       }
       return next;
     });
-  }
+  };
 
-  function openWorkspaceMenu() {
-    setWorkspaceMenuOpen((current) => !current);
+  const isMobile = typeof window !== "undefined" && window.innerWidth <= 840;
+
+  useEffect(() => {
+    if (!isMobile || !mobileMenuOpen) {
+      return;
+    }
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileMenuOpen(false);
+      }
+    };
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isMobile, mobileMenuOpen]);
+
+  useEffect(() => {
+    if (!workspaceMenuOpen) {
+      return;
+    }
+
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!workspaceSelectorRef.current?.contains(event.target as Node)) {
+        setWorkspaceMenuOpen(false);
+      }
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setWorkspaceMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    window.addEventListener("keydown", closeOnEscape);
+
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [workspaceMenuOpen]);
+
+  const closeMobileMenu = () => setMobileMenuOpen(false);
+  const navigationGroups = visibleNavigationGroups(workspace?.permissions);
+  const canSelectWorkspace =
+    workspace?.accessMode !== "platform_support" &&
+    workspaces.length > 0 &&
+    (workspaces.length > 1 || !workspace);
+
+  const openWorkspaceMenu = () => {
     setWorkspaceSwitchError(false);
-  }
 
-  function selectWorkspace(workspaceId: string) {
-    if (workspaceId === workspace?.id) {
+    if (sidebarCollapsed && !isMobile) {
+      setSidebarCollapsed(false);
+    }
+
+    setWorkspaceMenuOpen((current) => !current);
+  };
+
+  const selectWorkspace = (workspaceId: string) => {
+    if (workspaceId === workspace?.id || isWorkspaceSwitchPending) {
       setWorkspaceMenuOpen(false);
       return;
     }
 
     setWorkspaceSwitchError(false);
-    startWorkspaceSwitch(async () => {
+
+    startWorkspaceTransition(async () => {
       const result = await switchActiveWorkspace(workspaceId);
+
       if (!result.ok) {
         setWorkspaceSwitchError(true);
         return;
@@ -178,202 +232,189 @@ export function AppShell({
       setWorkspaceMenuOpen(false);
       router.refresh();
     });
-  }
+  };
 
-  function closeMobileMenu() {
-    setMobileMenuOpen(false);
-  }
+  const handleExitPlatformSupport = () => {
+    startExitSupportTransition(async () => {
+      const result = await exitPlatformSupportAccess();
 
-  const navigationGroups = visibleNavigationGroups(workspace?.permissions);
-  const canSelectWorkspace = workspaces.length > 1;
+      if (result.ok) {
+        router.push(result.redirectUrl);
+        router.refresh();
+      }
+    });
+  };
 
   return (
     <div
       className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileMenuOpen ? " mobile-menu-open" : ""}`}
+      data-sidebar-state={sidebarCollapsed ? "collapsed" : "expanded"}
     >
-      <header className="mobile-header">
-        <div className="mobile-header-brand">
-          <Link
-            className="brand-link"
-            href="/overview"
-            title={brand.name}
-            onClick={closeMobileMenu}
-          >
-            {brand.logoSvg ? (
-              <span
-                className="brand-logo"
-                dangerouslySetInnerHTML={{ __html: brand.logoSvg }}
-              />
-            ) : null}
-            <span className="brand-copy">
-              <strong>{brand.name}</strong>
-            </span>
-          </Link>
-        </div>
+      <header className="mobile-shell-header">
+        <Link
+          className="brand"
+          href="/overview"
+          aria-label={`${brand.name} - ir para a Visão geral`}
+          onClick={closeMobileMenu}
+        >
+          <BrandMark brand={brand} gradientId="rastrackdash-r-mobile" />
+          <span className="brand-copy">
+            <BrandName brand={brand} />
+          </span>
+        </Link>
         <button
           className="mobile-menu-toggle"
           type="button"
-          aria-label={mobileMenuOpen ? "Fechar navegação" : "Abrir navegação"}
           aria-expanded={mobileMenuOpen}
+          aria-label={mobileMenuOpen ? "Fechar menu de navegação" : "Abrir menu de navegação"}
           onClick={() => setMobileMenuOpen((open) => !open)}
         >
           {mobileMenuOpen ? (
-            <X aria-hidden="true" size={20} strokeWidth={2.2} />
+            <X size={20} strokeWidth={2.2} />
           ) : (
-            <Menu aria-hidden="true" size={20} strokeWidth={2.2} />
+            <Menu size={20} strokeWidth={2.2} />
           )}
         </button>
       </header>
 
-      <aside className="sidebar">
-        <div className="sidebar-header">
+      <aside
+        className={`app-sidebar${sidebarCollapsed ? " collapsed" : ""}${mobileMenuOpen ? " open" : ""}`}
+        aria-hidden={isMobile && !mobileMenuOpen}
+        inert={isMobile && !mobileMenuOpen}
+      >
+        <div className="sidebar-topline">
           <Link
-            className="brand-link"
+            className="brand"
             href="/overview"
-            title={brand.name}
+            aria-label={`${brand.name} - ir para a Visão geral`}
             onClick={closeMobileMenu}
           >
-            {brand.logoSvg ? (
-              <span
-                className="brand-logo"
-                dangerouslySetInnerHTML={{ __html: brand.logoSvg }}
-              />
-            ) : null}
+            <BrandMark brand={brand} gradientId="rastrackdash-r-sidebar" />
             <span className="brand-copy">
-              <strong>{brand.name}</strong>
-              <small>Operação WhatsApp</small>
+              <BrandName brand={brand} />
             </span>
           </Link>
           <button
-            className="sidebar-collapse-toggle"
+            className="sidebar-toggle desktop-sidebar-toggle"
             type="button"
-            aria-label={
-              sidebarCollapsed
-                ? "Expandir barra lateral"
-                : "Recolher barra lateral"
-            }
-            title={
-              sidebarCollapsed
-                ? "Expandir barra lateral"
-                : "Recolher barra lateral"
-            }
-            onClick={toggleSidebarCollapse}
+            aria-label={sidebarCollapsed ? "Expandir barra lateral" : "Recolher barra lateral"}
+            onClick={toggleSidebar}
           >
             {sidebarCollapsed ? (
-              <PanelLeftOpen aria-hidden="true" size={18} strokeWidth={2.2} />
+              <PanelLeftOpen size={18} strokeWidth={2.1} />
             ) : (
-              <PanelLeftClose aria-hidden="true" size={18} strokeWidth={2.2} />
+              <PanelLeftClose size={18} strokeWidth={2.1} />
             )}
-          </button>
-          <button
-            className="sidebar-mobile-close"
-            type="button"
-            aria-label="Fechar menu"
-            onClick={closeMobileMenu}
-          >
-            <X aria-hidden="true" size={20} strokeWidth={2.2} />
           </button>
         </div>
 
         <section
+          className={`sidebar-workspace-card${canSelectWorkspace ? " selectable" : ""}${workspaceMenuOpen ? " menu-open" : ""}`}
           ref={workspaceSelectorRef}
-          className={`workspace-strip${canSelectWorkspace ? " workspace-selector" : ""}`}
-          aria-label="Workspace atual"
         >
           {canSelectWorkspace ? (
             <>
               <button
                 className="workspace-selector-trigger"
                 type="button"
-                aria-label={
-                  presentationMode
-                    ? "Selecionar workspace demonstrativo"
-                    : `Selecionar empresa. Atual: ${workspace?.name ?? "nenhuma"}`
-                }
-                aria-controls="workspace-selector-menu"
                 aria-expanded={workspaceMenuOpen}
+                aria-haspopup="listbox"
+                aria-label="Selecionar workspace"
+                disabled={isWorkspaceSwitchPending}
                 onClick={openWorkspaceMenu}
-                title="Selecionar empresa"
               >
-                <span className="workspace-selector-icon" aria-hidden="true">
-                  <Building2 size={18} strokeWidth={2.1} />
-                </span>
-                <span className="workspace-selector-copy">
-                  <span>Workspace</span>
-                  <strong>
-                    <PresentationMask placeholder="Workspace demonstrativo">
-                      {workspace?.name ?? "Selecionar empresa"}
+                <div className="workspace-selector-trigger-copy">
+                  <p className="sidebar-workspace-kicker">Workspace</p>
+                  <strong className="sidebar-workspace-title">
+                    <PresentationMask fallback="Workspace">
+                      {workspace?.title ?? "Selecione o workspace"}
                     </PresentationMask>
                   </strong>
-                  <small>
-                    <PresentationMask placeholder="acesso demonstrativo">
+                  <small className="sidebar-workspace-role">
+                    <PresentationMask fallback="Acesso ativo">
                       {workspace
                         ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
-                        : `${workspaces.length} ${workspaces.length === 1 ? "empresa disponível" : "empresas disponíveis"}`}
+                        : "Nenhum workspace ativo"}
                     </PresentationMask>
                   </small>
-                </span>
+                </div>
                 <ChevronsUpDown
-                  className="workspace-selector-chevron"
+                  className="workspace-selector-caret"
+                  size={16}
+                  strokeWidth={2.2}
                   aria-hidden="true"
-                  size={17}
-                  strokeWidth={2.1}
                 />
               </button>
 
-              <div
-                id="workspace-selector-menu"
-                className="workspace-selector-menu"
-                role="menu"
-                aria-label="Empresas autorizadas"
-                hidden={!workspaceMenuOpen}
-              >
-                {workspaces.map((availableWorkspace, index) => {
-                  const selected = availableWorkspace.id === workspace?.id;
-                  return (
-                    <button
-                      key={availableWorkspace.id}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={selected}
-                      disabled={selected || isWorkspaceSwitchPending}
-                      onClick={() => selectWorkspace(availableWorkspace.id)}
-                    >
-                      <span>
-                        <strong>
-                          <PresentationMask
-                            placeholder={`Workspace ${index + 1}`}
-                          >
-                            {availableWorkspace.name}
-                          </PresentationMask>
-                        </strong>
-                        <small>
-                          {workspaceRoleLabel(availableWorkspace.role)}
-                        </small>
-                      </span>
-                      {selected ? (
-                        <Check aria-hidden="true" size={17} strokeWidth={2.2} />
-                      ) : null}
-                    </button>
-                  );
-                })}
-                {workspaceSwitchError ? (
-                  <p className="workspace-selector-error" role="alert">
-                    Não foi possível abrir esta empresa.
-                  </p>
-                ) : null}
-              </div>
+              {workspaceMenuOpen ? (
+                <div
+                  className="workspace-dropdown-panel"
+                  role="listbox"
+                  aria-label="Workspaces disponíveis"
+                >
+                  <p className="workspace-dropdown-header">Workspaces</p>
+                  <div className="workspace-dropdown-list">
+                    {workspaces.map((entry) => {
+                      const isSelected = entry.id === workspace?.id;
+
+                      return (
+                        <button
+                          className={`workspace-dropdown-item${isSelected ? " selected" : ""}`}
+                          key={entry.id}
+                          type="button"
+                          role="option"
+                          aria-selected={isSelected}
+                          disabled={isWorkspaceSwitchPending}
+                          onClick={() => selectWorkspace(entry.id)}
+                        >
+                          <Building2
+                            className="workspace-item-icon"
+                            size={16}
+                            strokeWidth={2}
+                            aria-hidden="true"
+                          />
+                          <div className="workspace-item-copy">
+                            <strong className="workspace-item-title">
+                              <PresentationMask fallback="Workspace">
+                                {entry.title}
+                              </PresentationMask>
+                            </strong>
+                            <small className="workspace-item-meta">
+                              <PresentationMask fallback="slug - papel">
+                                {`${entry.slug} - ${workspaceRoleLabel(entry.role).toLowerCase()}`}
+                              </PresentationMask>
+                            </small>
+                          </div>
+                          {isSelected ? (
+                            <Check
+                              className="workspace-item-check"
+                              size={15}
+                              strokeWidth={2.4}
+                              aria-hidden="true"
+                            />
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {workspaceSwitchError ? (
+                    <p className="workspace-switch-error" role="alert">
+                      Não foi possível alternar de workspace. Tente novamente.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </>
           ) : (
             <>
-              <span>Workspace</span>
-              <strong>
-                <PresentationMask placeholder="Workspace demonstrativo">
-                  {workspace?.name ?? "Workspace indisponível"}
+              <p className="sidebar-workspace-kicker">Workspace</p>
+              <strong className="sidebar-workspace-title">
+                <PresentationMask fallback="Workspace">
+                  {workspace?.title ?? "Workspace ativo"}
                 </PresentationMask>
               </strong>
-              <small>
-                <PresentationMask placeholder="acesso demonstrativo">
+              <small className="sidebar-workspace-role">
+                <PresentationMask fallback="Acesso ativo">
                   {workspace
                     ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
                     : "Sessão autenticada"}
@@ -396,6 +437,7 @@ export function AppShell({
                 const active =
                   pathname === href || pathname.startsWith(`${href}/`);
                 const Icon = navigationIconById[item.id];
+
                 return (
                   <Link
                     className={active ? "active" : undefined}
@@ -412,24 +454,30 @@ export function AppShell({
                   </Link>
                 );
               })}
+              {group.label === "Gestão" ? (
+                <Link
+                  className={
+                    pathname === "/google-ads" || pathname.startsWith("/google-ads/")
+                      ? "active"
+                      : undefined
+                  }
+                  href="/google-ads"
+                  aria-current={
+                    pathname === "/google-ads" || pathname.startsWith("/google-ads/")
+                      ? "page"
+                      : undefined
+                  }
+                  title="Google Ads & Roleta"
+                  onClick={closeMobileMenu}
+                >
+                  <span className="nav-icon" aria-hidden="true">
+                    <Target size={17} strokeWidth={2.1} />
+                  </span>
+                  <span className="nav-text">Google Ads</span>
+                </Link>
+              ) : null}
             </nav>
           ))}
-
-          {/* Módulo Oficial Google Ads - Anúncios Alpha */}
-          <nav className="sidebar-nav" aria-label="Google Ads">
-            <p className="nav-label">Google Ads</p>
-            <Link
-              className={pathname === "/google-ads" || pathname.startsWith("/google-ads/") ? "active" : undefined}
-              href="/google-ads"
-              title="Google Ads & Roleta"
-              onClick={closeMobileMenu}
-            >
-              <span className="nav-icon" aria-hidden="true">
-                <Target size={17} strokeWidth={2.1} />
-              </span>
-              <span className="nav-text">Google Ads</span>
-            </Link>
-          </nav>
         </div>
 
         {workspace?.platformRole ? (
@@ -457,57 +505,59 @@ export function AppShell({
           </nav>
         ) : null}
 
-        <section className="health-panel" aria-label="Conta">
-          <p className="nav-label">Conta</p>
-          {workspace ? (
-            <span
-              className={`status-chip${workspace.operationalStatus === "blocked" ? " warn" : ""}`}
-            >
-              {workspace.operationalStatus === "blocked"
-                ? "bloqueado"
-                : "ativo"}
+        <section className="sidebar-account-controls" aria-label="Controles da conta">
+          {workspace?.accessMode === "platform_support" ? (
+            <span className="support-access-badge">
+              <span className="support-access-dot" aria-hidden="true" />
+              <button
+                className="support-access-exit-link"
+                type="button"
+                onClick={handleExitPlatformSupport}
+                disabled={isExitSupportPending}
+              >
+                {isExitSupportPending ? "Encerrando..." : "Encerrar acesso"}
+              </button>
             </span>
           ) : null}
           <PresentationModeToggle />
           <LogoutButton />
         </section>
-
         <BrandFooter brand={brand} className="sidebar-footer" />
       </aside>
-
       <button
         className="mobile-sidebar-backdrop"
         type="button"
         aria-label="Fechar menu"
-        tabIndex={mobileMenuOpen ? 0 : -1}
         onClick={closeMobileMenu}
       />
 
-      <main className="content">
+      <main className="shell-content">
         {workspace?.accessMode === "platform_support" ? (
-          <div className="support-context-bar" role="status">
-            <div>
-              <span>Acesso de suporte</span>
-              <strong>
-                <PresentationMask placeholder="Workspace demonstrativo">
-                  {workspace.name}
-                </PresentationMask>
-              </strong>
+          <aside
+            className="support-access-banner"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="support-access-banner-copy">
+              <span className="support-access-dot" aria-hidden="true" />
+              <strong>Acesso de suporte ativo:</strong> você está visualizando o
+              workspace <code>{workspace.slug}</code> em modo suporte.
             </div>
-            <form action={exitPlatformSupportAccess}>
-              <button className="button ghost" type="submit">
-                Encerrar acesso
-              </button>
-            </form>
-          </div>
+            <button
+              className="button button-ghost button-small support-access-exit-button"
+              type="button"
+              onClick={handleExitPlatformSupport}
+              disabled={isExitSupportPending}
+            >
+              {isExitSupportPending ? "Encerrando acesso..." : "Encerrar acesso"}
+            </button>
+          </aside>
         ) : null}
-
+        {/* The CRM board refreshes itself (counts + first pages only). */}
         {workspace && !pathname.startsWith("/crm") ? (
           <DataAutoRefresh source={dataSource ?? null} />
         ) : null}
-
         {children}
-
         <BrandFooter brand={brand} className="content-footer" />
       </main>
     </div>
