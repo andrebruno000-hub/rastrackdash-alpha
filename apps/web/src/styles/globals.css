@@ -7331,6 +7331,13 @@ button.meta-budget-control:focus-visible {
   color: var(--ink-muted);
 }
 
+.event-audit-retry-pixel {
+  display: grid;
+  gap: 4px;
+  width: min(320px, 100%);
+  margin-bottom: 8px;
+}
+
 .event-audit-dialog {
   width: min(980px, calc(100vw - 28px));
   max-width: calc(100vw - 28px);

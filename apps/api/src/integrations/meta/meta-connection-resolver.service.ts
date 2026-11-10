@@ -269,6 +269,12 @@ export class MetaConnectionResolverService {
     businessConnectionId?: string | null;
     conversionDestinationId?: string | null;
     requireNormalized?: boolean;
+    /**
+     * Pixel escolhido por uma pessoa no reenvio de um evento recusado: vale
+     * acima da rota do anúncio, da conta e da conexão. A autorização do
+     * destino na conta continua sendo conferida.
+     */
+    chosenConversionDestinationId?: string | null;
   }): Promise<ResolvedMetaCapiRoute> {
     const adAccountId =
       input.metaAccountId?.trim() ||
@@ -276,31 +282,44 @@ export class MetaConnectionResolverService {
     const legacy = await this.prisma.metaIntegration.findUnique({
       where: { workspaceId: input.workspaceId },
     });
+    const chosenId = input.chosenConversionDestinationId?.trim() || null;
     const explicitRoute = Boolean(
       input.requireNormalized ||
       input.businessConnectionId ||
-      input.conversionDestinationId,
+      // O reenvio grava o pixel escolhido como destino do evento: sozinho,
+      // ele não obriga o roteamento por BM.
+      (input.conversionDestinationId &&
+        input.conversionDestinationId !== chosenId),
     );
     const normalizedRequired =
       explicitRoute || Boolean(legacy?.advancedRoutingEnabled) || !legacy;
+    const chosenAccount = chosenId
+      ? await this.reportingAccountOfDestination(
+          input.workspaceId,
+          chosenId,
+          adAccountId,
+        )
+      : null;
     // Look up the event's account, including inactive rows. A revoked or paused
     // matching route must block rather than escaping through legacy credentials.
-    const account = adAccountId
-      ? await this.prisma.metaReportingAccount.findFirst({
-          where: { workspaceId: input.workspaceId, adAccountId },
-        })
-      : normalizedRequired
-        ? await this.onlyNormalizedReportingAccount(
-            input.workspaceId,
-            input.businessConnectionId,
-          )
-        : null;
+    const account = chosenAccount
+      ? chosenAccount
+      : adAccountId
+        ? await this.prisma.metaReportingAccount.findFirst({
+            where: { workspaceId: input.workspaceId, adAccountId },
+          })
+        : normalizedRequired
+          ? await this.onlyNormalizedReportingAccount(
+              input.workspaceId,
+              input.businessConnectionId,
+            )
+          : null;
 
     if (account && !account.active)
       throw new ConflictException("Conta Meta inativa");
 
     if (!normalizedRequired && !account?.businessConnectionId) {
-      return this.resolveLegacyCapiRoute(input.workspaceId);
+      return this.resolveLegacyCapiRoute(input.workspaceId, chosenId);
     }
 
     if (account?.businessConnectionId) {
@@ -348,6 +367,7 @@ export class MetaConnectionResolverService {
               .conversionDestinationId
           : null;
       const destinationId =
+        chosenId ??
         currentAdDestinationId ??
         input.conversionDestinationId ??
         account.conversionDestinationId ??
@@ -487,15 +507,17 @@ export class MetaConnectionResolverService {
 
   private async resolveLegacyCapiRoute(
     workspaceId: string,
+    chosenConversionDestinationId?: string | null,
   ): Promise<ResolvedMetaCapiRoute> {
     const legacy = await this.getLegacyIntegration(workspaceId);
     const encryptedAccessToken =
       legacy.capiAccessTokenEncrypted ?? legacy.encryptedAccessToken;
     const tokenIv = legacy.capiTokenIv ?? legacy.tokenIv;
     const tokenTag = legacy.capiTokenTag ?? legacy.tokenTag;
+    // Sem roteamento por BM: o pixel escolhido no reenvio, senão o principal.
     const destination = await this.getLegacyDestination(
       workspaceId,
-      legacy.primaryConversionDestinationId,
+      chosenConversionDestinationId || legacy.primaryConversionDestinationId,
     );
 
     return {
@@ -554,6 +576,59 @@ export class MetaConnectionResolverService {
     });
 
     return accounts.length === 1 ? accounts[0] : null;
+  }
+
+  /**
+   * Conta ativa cuja conexão pode enviar ao pixel escolhido, a do evento
+   * primeiro. Mesma regra de autorização do envio: com lista de destinos
+   * permitidos, só ela vale; sem lista, o destino da conta ou o padrão da
+   * conexão.
+   */
+  private async reportingAccountOfDestination(
+    workspaceId: string,
+    conversionDestinationId: string,
+    adAccountId: string | null,
+  ) {
+    const accounts = await this.prisma.metaReportingAccount.findMany({
+      where: {
+        workspaceId,
+        active: true,
+        businessConnectionId: { not: null },
+      },
+    });
+    const ordered = [
+      ...accounts.filter((account) => account.adAccountId === adAccountId),
+      ...accounts.filter((account) => account.adAccountId !== adAccountId),
+    ];
+
+    for (const account of ordered) {
+      if (!account.active || !account.businessConnectionId) continue;
+      const allowed =
+        await this.prisma.metaReportingAccountDestination.findMany({
+          where: { workspaceId, reportingAccountId: account.id },
+        });
+      if (allowed.length > 0) {
+        if (
+          allowed.some(
+            (binding) =>
+              binding.active &&
+              binding.conversionDestinationId === conversionDestinationId,
+          )
+        )
+          return account;
+        continue;
+      }
+      if (account.conversionDestinationId === conversionDestinationId)
+        return account;
+      const connection = await this.prisma.metaBusinessConnection.findFirst({
+        where: { id: account.businessConnectionId, workspaceId },
+        select: { defaultConversionDestinationId: true },
+      });
+      if (connection?.defaultConversionDestinationId === conversionDestinationId)
+        return account;
+    }
+
+    return null;
   }
 
   private async getLegacyIntegration(

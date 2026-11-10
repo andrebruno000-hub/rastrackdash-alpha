@@ -19,6 +19,7 @@ import { useEffect, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { BackofficeActionForm } from "../../../components/backoffice-action-form";
 import { PresentationMask } from "../../../components/presentation-mask";
+import { SearchableSelect } from "../../../components/searchable-select";
 import { usePresentationMode } from "../../../components/presentation-mode-toggle";
 import { apiFetch } from "../../../lib/api";
 import { retryMetaEventAction, retryRejectedMetaEventAction } from "./actions";
@@ -126,6 +127,84 @@ export function ManualConversionNote({ payload }: { payload: unknown }) {
       {orderRef ? <p>Pedido/venda: {orderRef}</p> : null}
       <p>{note ?? "Sem observação."}</p>
     </section>
+  );
+}
+
+type RetryDestination = NonNullable<
+  ConversionAuditEventDetailDto["retryDestinations"]
+>[number];
+
+/** Pixel já escolhido: o mais recente que não seja o da recusa. */
+export function defaultRetryDestinationId(
+  destinations: RetryDestination[],
+  refusedPixelId: string | null,
+): string {
+  return (
+    destinations.find((destination) => destination.pixelId !== refusedPixelId) ??
+    destinations[0]
+  )?.id ?? "";
+}
+
+/**
+ * "Reenviar recusado" de um evento: o pixel para onde vai o reenvio
+ * ("Enviar para"), com busca. O pixel da recusa aparece marcado.
+ */
+export function RejectedRetryForm({
+  destinations,
+  eventId,
+  refusedPixelId,
+  onSuccess,
+}: {
+  destinations: RetryDestination[];
+  eventId: string;
+  refusedPixelId: string | null;
+  onSuccess: () => void;
+}) {
+  const [destinationId, setDestinationId] = useState(() =>
+    defaultRetryDestinationId(destinations, refusedPixelId),
+  );
+  const choosing = destinations.length > 0;
+
+  return (
+    <BackofficeActionForm
+      action={retryRejectedMetaEventAction}
+      onSuccess={onSuccess}
+    >
+      <input name="eventId" type="hidden" value={eventId} />
+      {choosing ? (
+        <div className="event-audit-retry-pixel">
+          <span className="micro-label">Enviar para</span>
+          <SearchableSelect
+            name="conversionDestinationId"
+            value={destinationId}
+            options={destinations.map((destination) => ({
+              value: destination.id,
+              label: `${destination.pixelName} · ${destination.pixelId}${
+                destination.pixelId === refusedPixelId
+                  ? " (usado na recusa)"
+                  : ""
+              }`,
+              description: destination.pageName || undefined,
+            }))}
+            onValueChange={setDestinationId}
+            ariaLabel="Enviar para"
+            placeholder="Buscar pixel"
+            emptyMessage="Nenhum pixel encontrado"
+            sensitive
+            presentationPlaceholder="Pixel oculto"
+          />
+        </div>
+      ) : null}
+      <button
+        className="button ghost audit-retry-button"
+        disabled={choosing && !destinationId}
+        title={choosing && !destinationId ? "Escolha o pixel" : undefined}
+        type="submit"
+      >
+        <RefreshCw aria-hidden="true" size={16} />
+        Reenviar recusado
+      </button>
+    </BackofficeActionForm>
   );
 }
 
@@ -479,26 +558,26 @@ export function EventAuditDetails({
                         <span>
                           <strong>Recusado pela Meta</strong>
                           <small>{RETRY_REJECTED_WARNING}</small>
-                          <small>
-                            O reenvio usa o mesmo identificador do evento e o
-                            destino atual (do anúncio, do número, da conta ou
-                            da conexão); o destino, o pixel e a página da
-                            tentativa recusada não são reaproveitados.
-                          </small>
+                          {detail.retryDestinations?.length ? (
+                            <small>
+                              Escolha o pixel certo. O reenvio vai para ele,
+                              com o mesmo identificador do evento.
+                            </small>
+                          ) : (
+                            <small>
+                              O reenvio usa o mesmo identificador do evento e
+                              o destino atual (do anúncio, do número, da conta
+                              ou da conexão); o destino, o pixel e a página da
+                              tentativa recusada não são reaproveitados.
+                            </small>
+                          )}
                         </span>
-                        <BackofficeActionForm
-                          action={retryRejectedMetaEventAction}
+                        <RejectedRetryForm
+                          destinations={detail.retryDestinations ?? []}
+                          eventId={eventId}
                           onSuccess={handleRetrySuccess}
-                        >
-                          <input name="eventId" type="hidden" value={eventId} />
-                          <button
-                            className="button ghost audit-retry-button"
-                            type="submit"
-                          >
-                            <RefreshCw aria-hidden="true" size={16} />
-                            Reenviar recusado
-                          </button>
-                        </BackofficeActionForm>
+                          refusedPixelId={detail.pixelId}
+                        />
                       </div>
                     ) : null}
 

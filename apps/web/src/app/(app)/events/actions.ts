@@ -141,6 +141,10 @@ export async function retryRejectedMetaEventAction(
   formData: FormData
 ): Promise<BackofficeActionState> {
   const eventId = String(formData.get("eventId") ?? "").trim();
+  // "Enviar para": pixel escolhido; sem ele, o destino atual da rota.
+  const conversionDestinationId = String(
+    formData.get("conversionDestinationId") ?? ""
+  ).trim();
 
   if (!eventId) {
     return {
@@ -153,21 +157,27 @@ export async function retryRejectedMetaEventAction(
   try {
     await serverApiFetch(
       `/reports/conversions/audit/${encodeURIComponent(eventId)}/retry-rejected`,
-      { method: "POST" }
+      {
+        method: "POST",
+        ...(conversionDestinationId
+          ? { body: JSON.stringify({ conversionDestinationId }) }
+          : {})
+      }
     );
     revalidatePath("/events");
 
     return {
       status: "success",
-      message:
-        "Evento enfileirado com a configuração atual. Se a Meta recusar de novo, ele volta a Falhou com o novo motivo.",
+      message: conversionDestinationId
+        ? "Evento enfileirado para o pixel escolhido. Se a Meta recusar de novo, ele volta a Falhou com o novo motivo."
+        : "Evento enfileirado com a configuração atual. Se a Meta recusar de novo, ele volta a Falhou com o novo motivo.",
       nonce: Date.now()
     };
   } catch {
     return {
       status: "error",
       message:
-        "O evento não pode ser reenviado (já foi reenviado, tem mais de 7 dias ou a recusa não é corrigível). Atualize a página.",
+        "O evento não pode ser reenviado (já foi reenviado, tem mais de 7 dias, a recusa não é corrigível ou o pixel escolhido não está disponível). Atualize a página.",
       nonce: Date.now()
     };
   }

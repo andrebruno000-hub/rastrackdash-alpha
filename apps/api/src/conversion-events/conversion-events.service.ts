@@ -70,6 +70,7 @@ import {
 import {
   CTWA_SEND_SKIPPED_ERROR_CODE,
   RETIRED_LEAD_FORM_CRM_TRIGGER,
+  retryDestinationIdFromPayload,
 } from "./conversion-event-retry";
 import { providerAutomationManualReplayApproved } from "../conversion-rules/provider-manual-replay-approval";
 import {
@@ -3057,6 +3058,8 @@ export class ConversionEventsService {
           this.metaTokenEncryption,
         )
       : this.connectionResolver;
+    // Pixel escolhido no "Reenviar recusado": vale acima da rota do anúncio.
+    const chosenDestinationId = retryDestinationIdFromPayload(log.sourcePayload);
     if (log.workspaceId && resolver) {
       try {
         const route = await resolver.resolveCapiRoute({
@@ -3068,6 +3071,9 @@ export class ConversionEventsService {
           metaAccountId: log.metaAccountId,
           campaignId: log.campaignId,
           adId: log.adId,
+          ...(chosenDestinationId
+            ? { chosenConversionDestinationId: chosenDestinationId }
+            : {}),
           ...(log.metaBusinessConnectionId
             ? { businessConnectionId: log.metaBusinessConnectionId }
             : {}),
@@ -3103,7 +3109,8 @@ export class ConversionEventsService {
       log.sourceTrigger === PIPEDRIVE_STAGE_TRIGGER ||
       log.sourceTrigger === "inbound_webhook:meta_cloud" ||
       log.metaBusinessConnectionId ||
-      log.metaConversionDestinationId
+      (log.metaConversionDestinationId &&
+        log.metaConversionDestinationId !== chosenDestinationId)
     ) {
       return {
         source: "manual",
@@ -3129,6 +3136,7 @@ export class ConversionEventsService {
     const legacyContext = await this.getWorkspaceCapiContext(log.workspaceId);
     const destination = await this.getWorkspaceConversionDestination(
       log.workspaceId,
+      chosenDestinationId,
     );
     const pixelId = destination?.pixelId ?? log.pixelId;
     const pageId = destination?.pageId ?? null;
@@ -3272,20 +3280,45 @@ export class ConversionEventsService {
     }
   }
 
+  /**
+   * Destino do envio sem roteamento por BM: o pixel escolhido no reenvio, o
+   * destino principal da conta (o que o aluno salvou) e, só sem principal
+   * válido, o destino alterado mais recentemente.
+   */
   private async getWorkspaceConversionDestination(
     workspaceId: string | null,
+    chosenDestinationId?: string | null,
   ): Promise<MetaConversionDestinationRecord | null> {
     if (!workspaceId) {
       return null;
     }
 
+    const select = { pixelId: true, pageId: true };
+    if (chosenDestinationId) {
+      return (await this.prisma.metaConversionDestination.findFirst({
+        where: { workspaceId, id: chosenDestinationId },
+        select,
+      })) as MetaConversionDestinationRecord | null;
+    }
+
+    // Outro destino do workspace pode ser mais recente (uma revisão da BM
+    // atualiza as linhas) sem ser o principal.
+    const integration = await this.prisma.metaIntegration.findUnique({
+      where: { workspaceId },
+      select: { primaryConversionDestinationId: true },
+    });
+    const primary = integration?.primaryConversionDestinationId
+      ? await this.prisma.metaConversionDestination.findFirst({
+          where: { workspaceId, id: integration.primaryConversionDestinationId },
+          select,
+        })
+      : null;
+    if (primary) return primary as MetaConversionDestinationRecord;
+
     return (await this.prisma.metaConversionDestination.findFirst({
       where: { workspaceId },
       orderBy: { updatedAt: "desc" },
-      select: {
-        pixelId: true,
-        pageId: true,
-      },
+      select,
     })) as MetaConversionDestinationRecord | null;
   }
 

@@ -465,6 +465,21 @@ export const conversionAuditEventDetailSchema =
     reasonCode: z.string().min(1).nullable(),
     reason: z.string().min(1).nullable(),
     missingFields: z.array(z.string().min(1)),
+    /**
+     * Pixels para onde uma recusa corrigível pode ser reenviada ("Enviar
+     * para"), do alterado mais recentemente ao mais antigo. Opcional para que
+     * uma API mais antiga continue válida.
+     */
+    retryDestinations: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          pixelId: z.string().min(1),
+          pixelName: z.string(),
+          pageName: z.string(),
+        }),
+      )
+      .optional(),
     sourceSnapshot: conversionAuditPayloadSnapshotSchema,
     metaRequest: conversionAuditPayloadSnapshotSchema,
     metaResponse: conversionAuditPayloadSnapshotSchema,

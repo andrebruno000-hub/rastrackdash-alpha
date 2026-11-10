@@ -871,6 +871,19 @@ describe("permissão do Reenviar recusados", () => {
       "rejected_1",
       expect.anything(),
       expect.objectContaining({ workspaceId: "workspace_1" }),
+      {},
+    );
+    // "Enviar para": o pixel escolhido segue para o reenvio.
+    await request(h.app.getHttpServer())
+      .post("/reports/conversions/audit/rejected_1/retry-rejected")
+      .set("Cookie", "wpptrack_session=refresh-token")
+      .send({ conversionDestinationId: "destination-b" })
+      .expect(201);
+    expect(h.diagnostics.retryRejectedConversionEvent).toHaveBeenLastCalledWith(
+      "rejected_1",
+      expect.anything(),
+      expect.objectContaining({ workspaceId: "workspace_1" }),
+      { conversionDestinationId: "destination-b" },
     );
   });
 

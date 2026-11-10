@@ -65,6 +65,7 @@ import {
   canRetryConversionEvent,
   canRetryFixableMetaRejectionConversionEvent,
   fixableMetaRejectionCandidateWhere,
+  hasPinnedCtwaDestination,
   isFixableMetaRejectionResponse,
   REJECTED_RETRY_CANDIDATE_LIMIT,
   retryableMetaAuthFailureConversionEventWhere,
@@ -3432,6 +3433,21 @@ export class MetaReportingService {
       : this.reconstructMetaCapiRequest(event);
     const response = this.conversionAuditObject(event.providerResponseSummary);
     const missingFields = this.conversionAuditMissingFields(event);
+    // "Enviar para" do Reenviar recusado: os pixels configurados da conta.
+    // O destino CTWA do número é refeito no reenvio, sem escolha.
+    const retryDestinations =
+      base.canRetryRejected && !hasPinnedCtwaDestination(event.sourcePayload)
+        ? await this.prisma.metaConversionDestination.findMany({
+            where: { workspaceId: input.workspaceId, status: "configured" },
+            orderBy: { updatedAt: "desc" },
+            select: {
+              id: true,
+              pixelId: true,
+              pixelName: true,
+              pageName: true,
+            },
+          })
+        : undefined;
     const reasonCode =
       event.errorCode ??
       ingestionRecord?.errorCode ??
@@ -3446,6 +3462,7 @@ export class MetaReportingService {
           ? this.conversionAuditMissingFieldsReason(missingFields)
           : null,
       missingFields,
+      ...(retryDestinations ? { retryDestinations } : {}),
       sourceSnapshot,
       valueCorrection: this.conversionAuditValueCorrection(event),
       metaRequest: storedRequest
