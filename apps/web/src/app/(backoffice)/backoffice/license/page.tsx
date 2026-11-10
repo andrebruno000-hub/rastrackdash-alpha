@@ -2,6 +2,7 @@ import { BackofficeNavigation } from "../../../../components/backoffice-navigati
 import { formatDateTime } from "../../../../lib/date-time";
 import {
   fetchLicenseStatus,
+  isLifetimeLicense,
   licenseIntervalLabel,
   licenseLockCopy,
   licenseLockReason,
@@ -99,7 +100,13 @@ function LicenseStatusPanel({ status }: { status: LicenseStatusResponse }) {
         </div>
         <div>
           <dt>Expira em</dt>
-          <dd>{status.expiresAt ? formatDateTime(status.expiresAt) : "—"}</dd>
+          <dd>
+            {isLifetimeLicense(status)
+              ? "Não expira"
+              : status.expiresAt
+                ? formatDateTime(status.expiresAt)
+                : "—"}
+          </dd>
         </div>
         <div>
           <dt>Tolerância até</dt>

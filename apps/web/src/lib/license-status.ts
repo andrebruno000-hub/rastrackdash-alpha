@@ -118,3 +118,11 @@ export function licenseIntervalLabel(status: LicenseStatusResponse): string {
 
   return status.expiresAt ? "Assinatura" : "—";
 }
+
+/**
+ * A lifetime license keeps a far fixed expiresAt on the server (2099); show
+ * that it does not expire instead of the placeholder date.
+ */
+export function isLifetimeLicense(status: LicenseStatusResponse): boolean {
+  return status.interval === "lifetime";
+}
