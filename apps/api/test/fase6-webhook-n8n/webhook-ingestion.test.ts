@@ -204,3 +204,57 @@ describe("Webhook / n8n on the rule's own URL", () => {
     },
   );
 });
+
+describe("Webhook / n8n on the rule's own URL: only a paid lead counts", () => {
+  it("an organic call leaves no mark: the same contact after an ad click sends the Qualified Lead once", async () => {
+    const harness = webhookHarness("QualifiedLead", undefined, "uazapi");
+    // 1st call: the contact did not come from an ad yet (organic).
+    harness.conversionObservation.observeAutomation.mockResolvedValueOnce({
+      decisionId: null,
+      decisionCode: null,
+      reasonCode: "contact_not_paid_lead",
+      disposition: "ignored",
+      executionId: null,
+      eligibleExecutionId: null,
+      reviewId: null,
+      channelId: null,
+      leadResolved: false,
+    });
+    const body = { phone: "5511900000002" };
+
+    const organic = await send(harness, body);
+    expect(organic).toMatchObject({
+      duplicate: false,
+      observationStatus: "ignored",
+    });
+
+    // 2nd call, same body, after the ad click: a first call, not a resend.
+    const paid = await send(harness, body);
+    expect(paid.duplicate).toBe(false);
+    expect(paid.deliveryId).not.toBe(organic.deliveryId);
+    const calls = harness.conversionObservation.observeAutomation.mock.calls;
+    expect(calls).toHaveLength(2);
+    // Evaluated as its own delivery, never as the organic one.
+    expect(calls[1]![0].deliveryId).toBe(paid.deliveryId);
+
+    // A real resend of the paid call is the duplicate, never a second send.
+    const resend = await send(harness, body);
+    expect(resend).toMatchObject({
+      deliveryId: paid.deliveryId,
+      duplicate: true,
+    });
+    // A resend may be observed again, but always on the paid delivery.
+    expect(calls.slice(1).every((call) => call[0].deliveryId === paid.deliveryId)).toBe(true);
+
+    // The organic call stays listed, with nothing that dedupes.
+    const organicDelivery = [...harness.deliveries.values()].find(
+      (delivery) => delivery.id === organic.deliveryId,
+    )!;
+    expect(organicDelivery.ingressKey).toBe(
+      `webhook-organic:${organic.deliveryId}`,
+    );
+    expect(
+      organicDelivery.normalizedSummary.webhookFingerprint ?? null,
+    ).toBeNull();
+  });
+});

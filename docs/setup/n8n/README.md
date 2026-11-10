@@ -71,7 +71,7 @@ clique já está no lead.
 | Situação | Recebimento |
 | --- | --- |
 | Lead do anúncio, número encontrado | Em observação / Na fila de envio / Enviado |
-| Contato sem anúncio (orgânico) | Não atribuído: "Contato não é lead de anúncio". Nada vai à Meta. |
+| Contato sem anúncio (orgânico) | Não atribuído: "Contato não é lead de anúncio". Nada vai à Meta e a chamada não conta como envio nem como repetição: se o mesmo contato chamar de novo depois de clicar num anúncio, essa chamada é a primeira. |
 | Dois leads com o mesmo telefone | Bloqueado: "Mais de um lead com este telefone" |
 | Lead do anúncio sem entrada registrada em nenhum número, sem `phone_number_id` | Bloqueado: "Não deu para saber por qual número o lead chegou" |
 | O mesmo clique registrado em dois números, sem `phone_number_id` | Bloqueado: "Lead com entrada em mais de um número: informe o phone_number_id" |

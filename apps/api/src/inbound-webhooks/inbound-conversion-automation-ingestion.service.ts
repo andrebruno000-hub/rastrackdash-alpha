@@ -56,6 +56,7 @@ import {
   PAYT_PRODUCT_NOT_IN_RULE_REASON,
   WEBHOOK_LEAD_AMBIGUOUS_REASON,
   WEBHOOK_LEAD_MULTIPLE_NUMBERS_REASON,
+  WEBHOOK_NOT_PAID_LEAD_REASON,
   WEBHOOK_ORIGIN_UNRESOLVED_REASON,
   ProviderConversionObservationService,
   type AutomationCallbackOrigin,
@@ -2323,6 +2324,13 @@ export class InboundConversionAutomationIngestionService {
       ...(routedChannelId ? { routedChannelId } : {}),
     });
     const processedAt = new Date();
+    // Webhook / n8n: only a paid lead counts. An organic call leaves no mark
+    // that dedupes: its occurrence key and 12h fingerprint are released, so
+    // the same contact calling again after an ad click is a first call,
+    // evaluated at its own arrival (and sends the Qualified Lead once).
+    const organicWebhook =
+      input.parsed.provider === "webhook" &&
+      observed.reasonCode === WEBHOOK_NOT_PAID_LEAD_REASON;
 
     await this.prisma.inboundWebhookDelivery.updateMany({
       where: {
@@ -2333,6 +2341,9 @@ export class InboundConversionAutomationIngestionService {
         purpose: "conversion_automation",
       },
       data: {
+        ...(organicWebhook
+          ? { ingressKey: `webhook-organic:${input.deliveryId}` }
+          : {}),
         parserVersion: this.automationParserVersion(input.endpoint),
         status: "processed",
         classification: this.automationDeliveryClassification(observed),
@@ -2360,7 +2371,7 @@ export class InboundConversionAutomationIngestionService {
           "fingerprint" in input.parsed
             ? {
                 webhookValueStatus: input.parsed.receivedValue.status,
-                webhookFingerprint: input.parsed.fingerprint,
+                webhookFingerprint: organicWebhook ? null : input.parsed.fingerprint,
                 webhookHasMessageId: input.parsed.hasMessageId,
                 webhookNumberMatch: observed.webhookNumberMatch ?? null,
               }

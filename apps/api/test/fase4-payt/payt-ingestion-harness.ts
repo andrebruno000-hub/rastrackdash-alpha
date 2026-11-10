@@ -407,8 +407,19 @@ export function createHarness(options?: {
       if (data.attemptCount?.increment) {
         delivery.attemptCount += data.attemptCount.increment;
       }
+      const previousIdentity = deliveryByIdentity(
+        delivery.connectionId,
+        delivery.ingressKey,
+      );
       for (const [key, value] of Object.entries(data)) {
         if (key !== "attemptCount") delivery[key] = value;
+      }
+      if (typeof data.ingressKey === "string") {
+        deliveries.delete(previousIdentity);
+        deliveries.set(
+          deliveryByIdentity(delivery.connectionId, delivery.ingressKey),
+          delivery,
+        );
       }
       return { count: 1 };
     }),
