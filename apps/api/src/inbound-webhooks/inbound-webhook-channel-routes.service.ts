@@ -676,6 +676,14 @@ export class InboundWebhookChannelRoutesService {
     const channels = await this.prisma.inboundWebhookChannel.findMany({
       where: {
         workspaceId,
+        // Canais de uma conexão removida não carregam no requireChannel
+        // (404): não entram na reavaliação.
+        connection: {
+          is: {
+            workspaceId,
+            removedAt: null,
+          },
+        },
         events: {
           some: {
             classification: {
