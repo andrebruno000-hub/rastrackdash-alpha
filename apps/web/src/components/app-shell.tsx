@@ -60,11 +60,11 @@ const navigationIconById: Record<ClientNavigationId, LucideIcon> = {
 
 const navigationGroupDefinitions = [
   {
-    label: "Operação",
+    label: "OperaÃ§Ã£o",
     ids: ["overview", "leads", "crm", "reports", "events"],
   },
   {
-    label: "Gestão",
+    label: "GestÃ£o",
     ids: ["integrations", "conversions", "settings"],
   },
 ] as const;
@@ -94,7 +94,7 @@ function workspaceAccessLabel(workspace: CurrentWorkspaceDto): string {
 
 function workspaceRoleLabel(role: WorkspaceListEntryDto["role"]): string {
   if (role === "owner") {
-    return "responsável da conta";
+    return "responsÃ¡vel da conta";
   }
 
   return role === "admin" ? "administrador" : "analista";
@@ -254,7 +254,7 @@ export function AppShell({
         <Link
           className="brand"
           href="/overview"
-          aria-label={`${brand.name} - ir para a Visão geral`}
+          aria-label={`${brand.name} - ir para a VisÃ£o geral`}
           onClick={closeMobileMenu}
         >
           <BrandMark brand={brand} gradientId="rastrackdash-r-mobile" />
@@ -266,7 +266,7 @@ export function AppShell({
           className="mobile-menu-toggle"
           type="button"
           aria-expanded={mobileMenuOpen}
-          aria-label={mobileMenuOpen ? "Fechar menu de navegação" : "Abrir menu de navegação"}
+          aria-label={mobileMenuOpen ? "Fechar menu de navegaÃ§Ã£o" : "Abrir menu de navegaÃ§Ã£o"}
           onClick={() => setMobileMenuOpen((open) => !open)}
         >
           {mobileMenuOpen ? (
@@ -286,7 +286,7 @@ export function AppShell({
           <Link
             className="brand"
             href="/overview"
-            aria-label={`${brand.name} - ir para a Visão geral`}
+            aria-label={`${brand.name} - ir para a VisÃ£o geral`}
             onClick={closeMobileMenu}
           >
             <BrandMark brand={brand} gradientId="rastrackdash-r-sidebar" />
@@ -326,14 +326,14 @@ export function AppShell({
                 <span>Workspace</span>
                 <strong>
                   <PresentationMask placeholder="Workspace demonstrativo">
-                    {workspace?.name ?? "Workspace indisponível"}
+                    {workspace?.name ?? "Workspace indisponÃ­vel"}
                   </PresentationMask>
                 </strong>
                 <small>
                   <PresentationMask placeholder="acesso demonstrativo">
                     {workspace
                       ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
-                      : "Sessão autenticada"}
+                      : "SessÃ£o autenticada"}
                   </PresentationMask>
                 </small>
                 <ChevronsUpDown aria-hidden="true" size={16} strokeWidth={2.2} />
@@ -343,7 +343,7 @@ export function AppShell({
                 className="workspace-selector-menu"
                 hidden={!workspaceMenuOpen}
                 role="listbox"
-                aria-label="Workspaces disponíveis"
+                aria-label="Workspaces disponÃ­veis"
               >
                 {workspaces.map((availableWorkspace) => {
                   const selected = availableWorkspace.id === workspace?.id;
@@ -377,7 +377,7 @@ export function AppShell({
                 })}
                 {workspaceSwitchError ? (
                   <p className="workspace-selector-error" role="alert">
-                    Não foi possível abrir esta empresa.
+                    NÃ£o foi possÃ­vel abrir esta empresa.
                   </p>
                 ) : null}
               </div>
@@ -387,14 +387,14 @@ export function AppShell({
               <span>Workspace</span>
               <strong>
                 <PresentationMask placeholder="Workspace demonstrativo">
-                  {workspace?.name ?? "Workspace indisponível"}
+                  {workspace?.name ?? "Workspace indisponÃ­vel"}
                 </PresentationMask>
               </strong>
               <small>
                 <PresentationMask placeholder="acesso demonstrativo">
                   {workspace
                     ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
-                    : "Sessão autenticada"}
+                    : "SessÃ£o autenticada"}
                 </PresentationMask>
               </small>
             </>
@@ -431,7 +431,7 @@ export function AppShell({
                   </Link>
                 );
               })}
-              {group.label === "Gestão" ? (
+              {group.label === "GestÃ£o" ? (
                 <Link
                   className={
                     pathname === "/google-ads" || pathname.startsWith("/google-ads/")
@@ -460,7 +460,7 @@ export function AppShell({
         {workspace?.platformRole ? (
           <nav
             className="sidebar-nav platform-sidebar-nav"
-            aria-label="Administração da plataforma"
+            aria-label="AdministraÃ§Ã£o da plataforma"
           >
             <p className="nav-label">Plataforma</p>
             <Link
@@ -486,7 +486,7 @@ export function AppShell({
           <p className="nav-label">Conta</p>
           {workspace ? (
             <span
-              className={`status-chip${workspace.operationalStatus === "blocked" ? " warn" : ""}`}`
+              className={`status-chip${workspace.operationalStatus === "blocked" ? " warn" : ""}`}
             >
               {workspace.operationalStatus === "blocked"
                 ? "bloqueado"
