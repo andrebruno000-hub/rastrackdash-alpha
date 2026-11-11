@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
     },
     {
       name: process.env.CNAC_ATTENDANT_2_NAME || "Josi",
-      phone: (process.env.CNAC_ATTENDANT_2_PHONE || "552121980659269").replace(/\D/g, "")
+      phone: (process.env.CNAC_ATTENDANT_2_PHONE || "5521980659269").replace(/\D/g, "")
     }
   ];
 
