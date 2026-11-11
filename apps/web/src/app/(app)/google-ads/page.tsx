@@ -26,7 +26,9 @@ import {
   X,
   Save,
   BarChart3,
+  Calendar,
   Download,
+  Percent,
 } from "lucide-react";
 
 interface Attendant {
@@ -47,7 +49,7 @@ interface GoogleLeadEvent {
   adGroup: string;
   gclid: string;
   conversionType?: "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
-  stage?: "conversa_iniciada" | "em_atendimento" | "orcamento_enviado" | "compra_realizada";
+  stage?: "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
   status: "queued" | "sent" | "failed";
   occurredAt: string;
   firstMessageAt?: string;
@@ -71,6 +73,7 @@ interface ConversionRules {
 export default function GoogleAdsPage() {
   const [currentTab, setCurrentTab] = useState<"leads" | "funil" | "relatorios" | "roleta" | "conversoes">("leads");
 
+  // Roleta de Atendentes
   const [attendants, setAttendants] = useState<Attendant[]>(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("alpha_google_attendants");
@@ -82,13 +85,14 @@ export default function GoogleAdsPage() {
     }
     return [
       { id: "1", name: "Josi", phone: "5521980659269", active: true, leadsCount: 0 },
-      { id: "2", name: "Sérgio", phone: "5521994060206", active: true, leadsCount: 0 },
+      { id: "2", name: "SÃ©rgio", phone: "5521994060206", active: true, leadsCount: 0 },
     ];
   });
 
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
 
+  // Base Real de Leads, Auditoria e RelatÃ³rios
   const [leadEvents, setLeadEvents] = useState<GoogleLeadEvent[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [reportsData, setReportsData] = useState<{
@@ -111,12 +115,12 @@ export default function GoogleAdsPage() {
 
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Filtros Aba 1
+  // Filtros Globais da Aba 1
   const [filterKeyword, setFilterKeyword] = useState("");
   const [filterAttendant, setFilterAttendant] = useState("all");
   const [filterStage, setFilterStage] = useState("all");
 
-  // Filtros Customizáveis Aba de Relatórios
+  // FILTROS CUSTOMIZÃVEIS DA ABA DE RELATÃ“RIOS
   const [reportDatePreset, setReportDatePreset] = useState<"today" | "yesterday" | "7d" | "30d" | "this_month" | "all">("all");
   const [reportStartDate, setReportStartDate] = useState("");
   const [reportEndDate, setReportEndDate] = useState("");
@@ -125,11 +129,11 @@ export default function GoogleAdsPage() {
   const [reportAttendant, setReportAttendant] = useState("all");
   const [reportStage, setReportStage] = useState("all");
 
-  // Regras Dinâmicas de Conversão
+  // Regras DinÃ¢micas de ConversÃ£o
   const [rules, setRules] = useState<ConversionRules>({
     quote: {
-      actionName: "WhatsApp - Orçamento Enviado",
-      phrases: ["orçamento enviado", "orcamento enviado", "segue o orçamento", "proposta enviada", "segue seu orçamento"],
+      actionName: "WhatsApp - OrÃ§amento Enviado",
+      phrases: ["orÃ§amento enviado", "orcamento enviado", "segue o orÃ§amento", "proposta enviada", "segue seu orÃ§amento"],
     },
     purchase: {
       actionName: "WhatsApp - Compra Realizada",
@@ -142,6 +146,81 @@ export default function GoogleAdsPage() {
   const [isSavingRules, setIsSavingRules] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
+  // Modal de RecuperaÃ§Ã£o / InserÃ§Ã£o Manual de Lead
+  const [isRecoverModalOpen, setIsRecoverModalOpen] = useState(false);
+  const [recovName, setRecovName] = useState("");
+  const [recovPhone, setRecovPhone] = useState("");
+  const [recovAttendant, setRecovAttendant] = useState("Josi");
+  const [recovKeyword, setRecovKeyword] = useState("");
+  const [recovCampaign, setRecovCampaign] = useState("Campanha Google Ads");
+  const [recovAdGroup, setRecovAdGroup] = useState("Geral");
+  const [recovStage, setRecovStage] = useState<GoogleLeadEvent["stage"]>("conversa_iniciada");
+  const [recovValue, setRecovValue] = useState("");
+  const [recovNotes, setRecovNotes] = useState("");
+  const [isSubmittingRecov, setIsSubmittingRecov] = useState(false);
+  const [recovSuccessMsg, setRecovSuccessMsg] = useState("");
+
+  const handleSaveRecoveredLead = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanPhone = recovPhone.replace(/\D/g, "");
+    if (!cleanPhone) {
+      alert("Por favor, informe o nÃºmero de WhatsApp do lead.");
+      return;
+    }
+    setIsSubmittingRecov(true);
+    try {
+      const parsedValue = recovValue ? parseFloat(recovValue.replace(/\./g, "").replace(",", ".")) : 0;
+      const res = await fetch("/api/google-ads/leads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "recover_lead",
+          leadName: recovName.trim() || "Cliente WhatsApp",
+          leadPhone: cleanPhone,
+          attendantName: recovAttendant,
+          keyword: recovKeyword.trim() || "Google Ads Search",
+          campaign: recovCampaign.trim() || "Campanha Google Ads",
+          adGroup: recovAdGroup.trim() || "Geral",
+          stage: recovStage || "conversa_iniciada",
+          value: isNaN(parsedValue) ? 0 : parsedValue,
+          notes: recovNotes.trim() || "Lead recuperado/inserido manualmente",
+        }),
+      });
+
+      if (res.ok) {
+        setRecovSuccessMsg("Lead salvo e restaurado com sucesso!");
+        setTimeout(() => {
+          setRecovSuccessMsg("");
+          setIsRecoverModalOpen(false);
+          setRecovName("");
+          setRecovPhone("");
+          setRecovValue("");
+          setRecovNotes("");
+          setRecovKeyword("");
+        }, 1200);
+        await fetchData();
+      } else {
+        alert("Erro ao salvar lead. Verifique se o servidor estÃ¡ ativo.");
+      }
+    } catch (err) {
+      console.error("Erro ao salvar lead recuperado:", err);
+      alert("Falha na comunicaÃ§Ã£o com o servidor.");
+    } finally {
+      setIsSubmittingRecov(false);
+    }
+  };
+
+  const handleDownloadBackup = () => {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(leadEvents, null, 2));
+    const downloadAnchor = document.createElement("a");
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `backup_google_leads_${new Date().toISOString().slice(0, 10)}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+  };
+
+  // Carregar dados
   const fetchData = async () => {
     setIsRefreshing(true);
     try {
@@ -188,6 +267,7 @@ export default function GoogleAdsPage() {
     return () => clearInterval(interval);
   }, [reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant]);
 
+  // Manipulador de Presets de Data
   const handleDatePresetChange = (preset: "today" | "yesterday" | "7d" | "30d" | "this_month" | "all") => {
     setReportDatePreset(preset);
     const today = new Date();
@@ -227,6 +307,7 @@ export default function GoogleAdsPage() {
     }
   }, [attendants]);
 
+  // AÃ§Ãµes de Regras DinÃ¢micas
   const handleAddPhrase = (type: "quote" | "purchase", phrase: string) => {
     const clean = phrase.trim().toLowerCase();
     if (!clean) return;
@@ -273,6 +354,7 @@ export default function GoogleAdsPage() {
     }
   };
 
+  // MovimentaÃ§Ã£o do Funil via PATCH
   const updateLeadStage = async (id: string, newStage: GoogleLeadEvent["stage"], value?: number) => {
     setLeadEvents((prev) =>
       prev.map((l) => (l.id === id ? { ...l, stage: newStage, value: value !== undefined ? value : l.value } : l))
@@ -289,6 +371,7 @@ export default function GoogleAdsPage() {
     }
   };
 
+  // Listas DinÃ¢micas de OpÃ§Ãµes para Filtros
   const uniqueCampaigns = useMemo(() => {
     const set = new Set<string>();
     leadEvents.forEach((l) => l.campaign && set.add(l.campaign));
@@ -301,6 +384,7 @@ export default function GoogleAdsPage() {
     return Array.from(set);
   }, [leadEvents]);
 
+  // Leads filtrados para o RelatÃ³rio CustomizÃ¡vel
   const filteredReportLeads = useMemo(() => {
     return leadEvents.filter((event) => {
       const eventDate = (event.occurredAt || event.firstMessageAt || "").slice(0, 10);
@@ -318,6 +402,7 @@ export default function GoogleAdsPage() {
     });
   }, [leadEvents, reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant, reportStage]);
 
+  // MÃ©tricas Consolidadas do RelatÃ³rio no PerÃ­odo
   const reportMetrics = useMemo(() => {
     const totalLeadsCount = filteredReportLeads.length;
     const quotesCount = filteredReportLeads.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length;
@@ -346,6 +431,7 @@ export default function GoogleAdsPage() {
     };
   }, [filteredReportLeads, reportsData.totalCost]);
 
+  // Exportar RelatÃ³rio para CSV
   const handleExportCSV = () => {
     const headers = ["Data", "Nome", "Telefone", "Campanha", "Conjunto", "Palavra-Chave", "Atendente", "Etapa", "Valor R$"];
     const rows = filteredReportLeads.map((l) => [
@@ -370,9 +456,9 @@ export default function GoogleAdsPage() {
     document.body.removeChild(link);
   };
 
+  // Contadores Globais
   const totalLeads = leadEvents.length;
   const conversasIniciadas = leadEvents.filter((l) => (l.stage || "conversa_iniciada") === "conversa_iniciada").length;
-  const emAtendimento = leadEvents.filter((l) => l.stage === "em_atendimento").length;
   const orcamentosEnviados = leadEvents.filter((l) => l.stage === "orcamento_enviado").length;
   const comprasRealizadas = leadEvents.filter((l) => l.stage === "compra_realizada").length;
   const faturamentoTotal = leadEvents
@@ -411,7 +497,7 @@ export default function GoogleAdsPage() {
   }, [leadEvents, totalLeads]);
 
   const sergioStats = useMemo(() => {
-    const list = leadEvents.filter((l) => l.attendantName.toLowerCase().includes("sergio") || l.attendantName.toLowerCase().includes("sérgio"));
+    const list = leadEvents.filter((l) => l.attendantName.toLowerCase().includes("sergio") || l.attendantName.toLowerCase().includes("sÃ©rgio"));
     const quotes = list.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length;
     const sales = list.filter((l) => l.stage === "compra_realizada").length;
     return {
@@ -491,13 +577,11 @@ export default function GoogleAdsPage() {
           background: #0f172a;
           border: 1px solid #1e293b;
           border-radius: 10px;
-          padding: 6px;
+          padding: 5px;
           display: flex;
           gap: 6px;
           overflow-x: auto;
           -webkit-overflow-scrolling: touch;
-          width: 100%;
-          box-sizing: border-box;
         }
         @media (min-width: 1024px) {
           .gads-tabs-bar {
@@ -728,12 +812,12 @@ export default function GoogleAdsPage() {
             width: auto;
           }
           .kanban-grid {
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(3, 1fr);
           }
         }
       `}</style>
 
-      {/* CABEÇALHO COM ABAS 100% LARGURA NO DESKTOP */}
+      {/* CABEÃ‡ALHO */}
       <div className="gads-header-block">
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
@@ -741,18 +825,18 @@ export default function GoogleAdsPage() {
               <span style={{ background: "#2563eb", borderRadius: "8px", padding: "6px", display: "inline-flex" }}>
                 <Send size={20} color="#fff" />
               </span>
-              <h1 className="gads-title">Google Ads — Inteligência & Funil</h1>
+              <h1 className="gads-title">Google Ads â€” InteligÃªncia & Funil</h1>
             </div>
             <span className="gads-badge-iso">
               <ShieldCheck size={13} /> 100% Isolado da Meta Ads
             </span>
           </div>
           <p className="gads-subtitle">
-            Relatórios customizáveis de ROAS, atribuição de palavras-chave, funil CRM por etapas e roleta justa de WhatsApp.
+            RelatÃ³rios customizÃ¡veis de ROAS, atribuiÃ§Ã£o de palavras-chave, funil CRM por etapas e roleta justa de WhatsApp.
           </p>
         </div>
 
-        {/* BARRA DAS 5 ABAS (100% VISÍVEL NO DESKTOP E MOBILE) */}
+        {/* NAVEGAÃ‡ÃƒO ENTRE AS 5 ABAS */}
         <div className="gads-tabs-bar">
           <button
             onClick={() => setCurrentTab("leads")}
@@ -782,7 +866,7 @@ export default function GoogleAdsPage() {
               color: currentTab === "relatorios" ? "#fff" : "#94a3b8",
             }}
           >
-            <BarChart3 size={15} /> 3. Relatórios & Lucro (BI)
+            <BarChart3 size={15} /> 3. RelatÃ³rios & Lucro (BI)
           </button>
           <button
             onClick={() => setCurrentTab("roleta")}
@@ -804,10 +888,24 @@ export default function GoogleAdsPage() {
           >
             <CheckCheck size={15} /> 5. Regras & Auditoria
           </button>
+
+          <button
+            onClick={() => setIsRecoverModalOpen(true)}
+            className="gads-tab-btn"
+            style={{
+              background: "#059669",
+              color: "#ffffff",
+              border: "1px solid #10b981",
+              fontWeight: 700,
+              marginLeft: "auto",
+            }}
+          >
+            <UserPlus size={15} /> + Recuperar / Inserir Lead
+          </button>
         </div>
       </div>
 
-      {/* CARDS DE MÉTRICAS GLOBAIS */}
+      {/* CARDS DE MÃ‰TRICAS GLOBAIS */}
       <div className="gads-metrics-grid">
         <div className="gads-metric-card">
           <span className="gads-metric-title" style={{ color: "#94a3b8" }}>
@@ -824,14 +922,14 @@ export default function GoogleAdsPage() {
             Conversas Iniciadas <MessageSquare size={14} color="#38bdf8" />
           </span>
           <div className="gads-metric-val" style={{ color: "#38bdf8" }}>
-            {conversasIniciadas + emAtendimento}
+            {conversasIniciadas}
           </div>
           <span className="gads-metric-sub">Mensagem enviada no WhatsApp</span>
         </div>
 
         <div className="gads-metric-card">
           <span className="gads-metric-title" style={{ color: "#a855f7" }}>
-            Orçamentos Enviados <Award size={14} color="#a855f7" />
+            OrÃ§amentos Enviados <Award size={14} color="#a855f7" />
           </span>
           <div className="gads-metric-val" style={{ color: "#a855f7" }}>
             {orcamentosEnviados}
@@ -852,16 +950,18 @@ export default function GoogleAdsPage() {
         </div>
       </div>
 
-      {/* ABA 1: LEADS & PALAVRAS-CHAVE */}
+      {/* =========================================================================
+          ABA 1: LEADS & PALAVRAS-CHAVE
+         ========================================================================= */}
       {currentTab === "leads" && (
         <div className="gads-panel">
           <div className="gads-filter-block">
             <div>
               <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-                Relatório de Leads & Atribuição Google Ads
+                RelatÃ³rio de Leads & AtribuiÃ§Ã£o Google Ads
               </h2>
               <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-                Identificação do contato do WhatsApp, termo de busca no Google, conjunto e atendente responsável.
+                IdentificaÃ§Ã£o do contato do WhatsApp, termo de busca no Google, conjunto e atendente responsÃ¡vel.
               </p>
             </div>
 
@@ -884,7 +984,7 @@ export default function GoogleAdsPage() {
               >
                 <option value="all">Todos Atendentes</option>
                 <option value="Josi">Atendente: Josi</option>
-                <option value="Sérgio">Atendente: Sérgio</option>
+                <option value="SÃ©rgio">Atendente: SÃ©rgio</option>
               </select>
 
               <select
@@ -894,8 +994,7 @@ export default function GoogleAdsPage() {
               >
                 <option value="all">Todas as Etapas</option>
                 <option value="conversa_iniciada">Conversa Iniciada</option>
-                <option value="em_atendimento">Em Atendimento</option>
-                <option value="orcamento_enviado">Orçamento Enviado</option>
+                <option value="orcamento_enviado">OrÃ§amento Enviado</option>
                 <option value="compra_realizada">Compra Realizada</option>
               </select>
 
@@ -928,8 +1027,27 @@ export default function GoogleAdsPage() {
                 Nenhum lead encontrado com os filtros atuais
               </strong>
               <p style={{ maxWidth: "460px", margin: "6px auto 0", fontSize: "13px", lineHeight: "1.5" }}>
-                Os cliques da Landing Page com anúncios do Google Ads entrarão aqui automaticamente com o nome e número do WhatsApp.
+                Os cliques da Landing Page com anÃºncios do Google Ads entrarÃ£o aqui automaticamente com o nome e nÃºmero do WhatsApp.
               </p>
+              <button
+                onClick={() => setIsRecoverModalOpen(true)}
+                style={{
+                  marginTop: "16px",
+                  background: "#059669",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: "8px",
+                  padding: "10px 18px",
+                  fontSize: "13px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                }}
+              >
+                <UserPlus size={15} /> Recuperar / Inserir Lead Manualmente
+              </button>
             </div>
           ) : (
             <div className="gads-table-scroll">
@@ -952,7 +1070,7 @@ export default function GoogleAdsPage() {
                       <tr key={event.id} style={{ borderBottom: "1px solid #0f172a" }}>
                         <td style={{ padding: "10px 12px" }}>
                           <div style={{ fontWeight: 600, color: "#fff", display: "flex", alignItems: "center", gap: "6px" }}>
-                            {event.leadName || "Lead em Identificação"}
+                            {event.leadName || "Lead em IdentificaÃ§Ã£o"}
                             {event.leadPhone && (
                               <a
                                 href={`https://wa.me/${event.leadPhone}`}
@@ -1002,14 +1120,9 @@ export default function GoogleAdsPage() {
                               Conversa Iniciada
                             </span>
                           )}
-                          {stage === "em_atendimento" && (
-                            <span style={{ background: "rgba(234, 179, 8, 0.15)", color: "#facc15", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
-                              Em Atendimento
-                            </span>
-                          )}
                           {stage === "orcamento_enviado" && (
                             <span style={{ background: "rgba(168, 85, 247, 0.15)", color: "#c084fc", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
-                              Orçamento Enviado
+                              OrÃ§amento Enviado
                             </span>
                           )}
                           {stage === "compra_realizada" && (
@@ -1021,7 +1134,7 @@ export default function GoogleAdsPage() {
 
                         <td style={{ padding: "10px 12px" }}>
                           <span style={{ color: "#38bdf8", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px" }}>
-                            <Clock size={12} /> Fila Maturação
+                            <Clock size={12} /> Fila MaturaÃ§Ã£o
                           </span>
                         </td>
 
@@ -1038,15 +1151,17 @@ export default function GoogleAdsPage() {
         </div>
       )}
 
-      {/* ABA 2: FUNIL CRM (KANBAN) */}
+      {/* =========================================================================
+          ABA 2: FUNIL CRM COMPLETO (KANBAN)
+         ========================================================================= */}
       {currentTab === "funil" && (
         <div>
           <div style={{ marginBottom: "16px" }}>
             <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-              Funil de Clientes & Conversões Google Ads
+              Funil de Clientes & ConversÃµes Google Ads
             </h2>
             <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-              Acompanhe a jornada do cliente desde o clique na pesquisa até o fechamento da compra no WhatsApp.
+              Acompanhe a jornada do cliente desde o clique na pesquisa atÃ© o fechamento da compra no WhatsApp.
             </p>
           </div>
 
@@ -1065,7 +1180,7 @@ export default function GoogleAdsPage() {
                     <div key={lead.id} className="kanban-card">
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                         <strong style={{ color: "#fff", fontSize: "13px" }}>
-                          {lead.leadName || "Lead em Identificação"}
+                          {lead.leadName || "Lead em IdentificaÃ§Ã£o"}
                         </strong>
                         <span style={{ fontSize: "11px", color: "#64748b" }}>{lead.attendantName}</span>
                       </div>
@@ -1078,62 +1193,6 @@ export default function GoogleAdsPage() {
                         {lead.keyword || "Pesquisa Google"}
                       </div>
                       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
-                        <button
-                          onClick={() => updateLeadStage(lead.id, "em_atendimento")}
-                          style={{
-                            background: "#1e293b",
-                            border: "1px solid #334155",
-                            color: "#facc15",
-                            borderRadius: "6px",
-                            padding: "4px 8px",
-                            fontSize: "11px",
-                            fontWeight: 600,
-                            cursor: "pointer",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: "4px",
-                          }}
-                        >
-                          Atender <ArrowRight size={11} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </div>
-
-            <div className="kanban-col">
-              <div className="kanban-col-header">
-                <span className="kanban-col-title" style={{ color: "#facc15" }}>
-                  <Users size={15} /> 2. Em Atendimento
-                </span>
-                <span className="kanban-col-count">{emAtendimento}</span>
-              </div>
-              <div className="kanban-cards-wrap">
-                {leadEvents
-                  .filter((l) => l.stage === "em_atendimento")
-                  .map((lead) => (
-                    <div key={lead.id} className="kanban-card">
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                        <strong style={{ color: "#fff", fontSize: "13px" }}>
-                          {lead.leadName || "Lead"}
-                        </strong>
-                        <span style={{ fontSize: "11px", color: "#64748b" }}>{lead.attendantName}</span>
-                      </div>
-                      <div style={{ color: "#94a3b8", fontSize: "12px", marginTop: "4px" }}>
-                        <Phone size={11} style={{ display: "inline", marginRight: "4px" }} />
-                        {lead.leadPhone}
-                      </div>
-                      <div style={{ background: "#090f20", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#38bdf8" }}>
-                        {lead.keyword || "Pesquisa Google"}
-                      </div>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10px" }}>
-                        <button
-                          onClick={() => updateLeadStage(lead.id, "conversa_iniciada")}
-                          style={{ background: "transparent", border: "none", color: "#64748b", fontSize: "11px", cursor: "pointer" }}
-                        >
-                          <ArrowLeft size={11} /> Voltar
-                        </button>
                         <button
                           onClick={() => updateLeadStage(lead.id, "orcamento_enviado")}
                           style={{
@@ -1150,7 +1209,7 @@ export default function GoogleAdsPage() {
                             gap: "4px",
                           }}
                         >
-                          Orçar <ArrowRight size={11} />
+                          OrÃ§ar <ArrowRight size={11} />
                         </button>
                       </div>
                     </div>
@@ -1161,7 +1220,7 @@ export default function GoogleAdsPage() {
             <div className="kanban-col">
               <div className="kanban-col-header">
                 <span className="kanban-col-title" style={{ color: "#c084fc" }}>
-                  <Award size={15} /> 3. Orçamento Enviado
+                  <Award size={15} /> 2. OrÃ§amento Enviado
                 </span>
                 <span className="kanban-col-count">{orcamentosEnviados}</span>
               </div>
@@ -1181,14 +1240,14 @@ export default function GoogleAdsPage() {
                         {lead.leadPhone}
                       </div>
                       <div style={{ background: "#090f20", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#c084fc" }}>
-                        Proposta enviada
+                        Proposta / OrÃ§amento Enviado
                       </div>
                       <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10px" }}>
                         <button
-                          onClick={() => updateLeadStage(lead.id, "em_atendimento")}
+                          onClick={() => updateLeadStage(lead.id, "conversa_iniciada")}
                           style={{ background: "transparent", border: "none", color: "#64748b", fontSize: "11px", cursor: "pointer" }}
                         >
-                          <ArrowLeft size={11} />
+                          <ArrowLeft size={11} /> Voltar
                         </button>
                         <button
                           onClick={() => {
@@ -1223,7 +1282,7 @@ export default function GoogleAdsPage() {
             <div className="kanban-col">
               <div className="kanban-col-header">
                 <span className="kanban-col-title" style={{ color: "#34d399" }}>
-                  <CheckCircle2 size={15} /> 4. Compra Realizada
+                  <CheckCircle2 size={15} /> 3. Compra Realizada
                 </span>
                 <span className="kanban-col-count">{comprasRealizadas}</span>
               </div>
@@ -1245,7 +1304,15 @@ export default function GoogleAdsPage() {
                         {lead.leadPhone}
                       </div>
                       <div style={{ background: "rgba(16, 185, 129, 0.1)", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#34d399" }}>
-                        Conversão de Compra Registrada no Google Ads OCI
+                        ConversÃ£o de Compra Registrada no Google Ads OCI
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "flex-start", marginTop: "8px" }}>
+                        <button
+                          onClick={() => updateLeadStage(lead.id, "orcamento_enviado")}
+                          style={{ background: "transparent", border: "none", color: "#64748b", fontSize: "11px", cursor: "pointer" }}
+                        >
+                          <ArrowLeft size={11} /> Voltar para OrÃ§amento
+                        </button>
                       </div>
                     </div>
                   ))}
@@ -1255,16 +1322,19 @@ export default function GoogleAdsPage() {
         </div>
       )}
 
-      {/* ABA 3: RELATÓRIOS & ANALYTICS CUSTOMIZÁVEL */}
+      {/* =========================================================================
+          ABA 3: RELATÃ“RIOS & ANALYTICS CUSTOMIZÃVEL (BI COMPLETO)
+         ========================================================================= */}
       {currentTab === "relatorios" && (
         <div className="gads-panel">
+          {/* CabeÃ§alho dos RelatÃ³rios */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", marginBottom: "20px" }}>
             <div>
               <h2 style={{ fontSize: "18px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-                Relatórios Customizáveis & Inteligência Financeira
+                RelatÃ³rios CustomizÃ¡veis & InteligÃªncia Financeira
               </h2>
               <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-                Filtre por períodos, campanhas, conjuntos e atendentes para analisar gastos, faturamento, lucro e ROAS real.
+                Filtre por perÃ­odos, campanhas, conjuntos e atendentes para analisar gastos, faturamento, lucro e ROAS real.
               </p>
             </div>
 
@@ -1288,14 +1358,16 @@ export default function GoogleAdsPage() {
             </button>
           </div>
 
+          {/* PAINEL DE FILTROS AVANÃ‡ADOS */}
           <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "16px", marginBottom: "24px" }}>
+            {/* Presets RÃ¡pidos de Data */}
             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "16px" }}>
               <button
                 type="button"
                 onClick={() => handleDatePresetChange("all")}
                 className={`date-preset-btn ${reportDatePreset === "all" ? "active" : ""}`}
               >
-                Todo o Período
+                Todo o PerÃ­odo
               </button>
               <button
                 type="button"
@@ -1316,24 +1388,25 @@ export default function GoogleAdsPage() {
                 onClick={() => handleDatePresetChange("7d")}
                 className={`date-preset-btn ${reportDatePreset === "7d" ? "active" : ""}`}
               >
-                Últimos 7 dias
+                Ãšltimos 7 dias
               </button>
               <button
                 type="button"
                 onClick={() => handleDatePresetChange("30d")}
                 className={`date-preset-btn ${reportDatePreset === "30d" ? "active" : ""}`}
               >
-                Últimos 30 dias
+                Ãšltimos 30 dias
               </button>
               <button
                 type="button"
                 onClick={() => handleDatePresetChange("this_month")}
                 className={`date-preset-btn ${reportDatePreset === "this_month" ? "active" : ""}`}
               >
-                Este Mês
+                Este MÃªs
               </button>
             </div>
 
+            {/* Linha com Seletores Personalizados */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "10px" }}>
               <div>
                 <label style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", display: "block", marginBottom: "4px" }}>
@@ -1388,7 +1461,7 @@ export default function GoogleAdsPage() {
 
               <div>
                 <label style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", display: "block", marginBottom: "4px" }}>
-                  Conjunto de Anúncios:
+                  Conjunto de AnÃºncios:
                 </label>
                 <select
                   value={reportAdGroup}
@@ -1417,7 +1490,7 @@ export default function GoogleAdsPage() {
                 >
                   <option value="all">Todos Atendentes</option>
                   <option value="Josi">Josi</option>
-                  <option value="Sérgio">Sérgio</option>
+                  <option value="SÃ©rgio">SÃ©rgio</option>
                 </select>
               </div>
 
@@ -1433,14 +1506,14 @@ export default function GoogleAdsPage() {
                 >
                   <option value="all">Todas as Etapas</option>
                   <option value="conversa_iniciada">Conversa Iniciada</option>
-                  <option value="em_atendimento">Em Atendimento</option>
-                  <option value="orcamento_enviado">Orçamento Enviado</option>
+                  <option value="orcamento_enviado">OrÃ§amento Enviado</option>
                   <option value="compra_realizada">Compra Realizada</option>
                 </select>
               </div>
             </div>
           </div>
 
+          {/* PLACAR CONSOLIDADO DE MÃ‰TRICAS DO PERÃODO */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px", marginBottom: "28px" }}>
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
               <span style={{ fontSize: "11px", color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Gasto Google Ads</span>
@@ -1459,7 +1532,7 @@ export default function GoogleAdsPage() {
             </div>
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
-              <span style={{ fontSize: "11px", color: "#c084fc", fontWeight: 700, textTransform: "uppercase" }}>Orçamentos</span>
+              <span style={{ fontSize: "11px", color: "#c084fc", fontWeight: 700, textTransform: "uppercase" }}>OrÃ§amentos</span>
               <div style={{ fontSize: "22px", fontWeight: 800, color: "#c084fc", marginTop: "4px" }}>
                 {reportMetrics.quotesCount}
               </div>
@@ -1471,7 +1544,7 @@ export default function GoogleAdsPage() {
               <div style={{ fontSize: "22px", fontWeight: 800, color: "#10b981", marginTop: "4px" }}>
                 {reportMetrics.salesCount}
               </div>
-              <small style={{ color: "#34d399", fontSize: "11px" }}>Conversão: {reportMetrics.conversionRate}%</small>
+              <small style={{ color: "#34d399", fontSize: "11px" }}>ConversÃ£o: {reportMetrics.conversionRate}%</small>
             </div>
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
@@ -1479,11 +1552,11 @@ export default function GoogleAdsPage() {
               <div style={{ fontSize: "22px", fontWeight: 800, color: "#10b981", marginTop: "4px" }}>
                 R$ {reportMetrics.totalRevenue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
               </div>
-              <small style={{ color: "#64748b", fontSize: "11px" }}>Ticket Médio: R$ {reportMetrics.averageTicket.toFixed(2)}</small>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>Ticket MÃ©dio: R$ {reportMetrics.averageTicket.toFixed(2)}</small>
             </div>
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
-              <span style={{ fontSize: "11px", color: "#fbbf24", fontWeight: 700, textTransform: "uppercase" }}>Lucro Líquido Real</span>
+              <span style={{ fontSize: "11px", color: "#fbbf24", fontWeight: 700, textTransform: "uppercase" }}>Lucro LÃ­quido Real</span>
               <div style={{ fontSize: "22px", fontWeight: 800, color: reportMetrics.profit >= 0 ? "#34d399" : "#f87171", marginTop: "4px" }}>
                 R$ {reportMetrics.profit.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
               </div>
@@ -1495,13 +1568,14 @@ export default function GoogleAdsPage() {
               <div style={{ fontSize: "22px", fontWeight: 800, color: "#38bdf8", marginTop: "4px" }}>
                 {reportMetrics.roas}x
               </div>
-              <small style={{ color: "#64748b", fontSize: "11px" }}>Retorno s/ anúncio</small>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>Retorno s/ anÃºncio</small>
             </div>
           </div>
 
+          {/* TABELA 1: DESEMPENHO POR CONJUNTO DE ANÃšNCIOS NO PERÃODO */}
           <div style={{ marginBottom: "28px" }}>
             <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#fff", marginBottom: "10px" }}>
-              Resultado Financeiro por Conjunto de Anúncios no Período
+              Resultado Financeiro por Conjunto de AnÃºncios no PerÃ­odo
             </h3>
 
             <div className="gads-table-scroll">
@@ -1509,12 +1583,12 @@ export default function GoogleAdsPage() {
                 <thead>
                   <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
                     <th style={{ padding: "10px 12px" }}>Campanha Google</th>
-                    <th style={{ padding: "10px 12px" }}>Conjunto de Anúncios</th>
+                    <th style={{ padding: "10px 12px" }}>Conjunto de AnÃºncios</th>
                     <th style={{ padding: "10px 12px" }}>Gasto (R$)</th>
                     <th style={{ padding: "10px 12px" }}>Leads WhatsApp</th>
-                    <th style={{ padding: "10px 12px" }}>Orçamentos</th>
+                    <th style={{ padding: "10px 12px" }}>OrÃ§amentos</th>
                     <th style={{ padding: "10px 12px" }}>Vendas (R$)</th>
-                    <th style={{ padding: "10px 12px" }}>Lucro Líquido (R$)</th>
+                    <th style={{ padding: "10px 12px" }}>Lucro LÃ­quido (R$)</th>
                     <th style={{ padding: "10px 12px" }}>ROAS</th>
                   </tr>
                 </thead>
@@ -1563,9 +1637,10 @@ export default function GoogleAdsPage() {
             </div>
           </div>
 
+          {/* TABELA 2: LISTAGEM ANALÃTICA DOS LEADS FILTRADOS */}
           <div>
             <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#fff", marginBottom: "10px" }}>
-              Leads Analíticos do Período ({filteredReportLeads.length} leads)
+              Leads AnalÃ­ticos do PerÃ­odo ({filteredReportLeads.length} leads)
             </h3>
 
             <div className="gads-table-scroll">
@@ -1609,15 +1684,13 @@ export default function GoogleAdsPage() {
                           {l.stage === "compra_realizada" ? (
                             <span style={{ color: "#34d399", fontWeight: 700 }}>Compra Realizada</span>
                           ) : l.stage === "orcamento_enviado" ? (
-                            <span style={{ color: "#c084fc", fontWeight: 600 }}>Orçamento</span>
-                          ) : l.stage === "em_atendimento" ? (
-                            <span style={{ color: "#facc15" }}>Em Atendimento</span>
+                            <span style={{ color: "#c084fc", fontWeight: 600 }}>OrÃ§amento</span>
                           ) : (
                             <span style={{ color: "#60a5fa" }}>Conversa</span>
                           )}
                         </td>
                         <td style={{ padding: "10px 12px", color: l.value ? "#34d399" : "#64748b", fontWeight: l.value ? 700 : 400 }}>
-                          {l.value ? `R$ ${l.value.toLocaleString("pt-BR")}` : "—"}
+                          {l.value ? `R$ ${l.value.toLocaleString("pt-BR")}` : "â€”"}
                         </td>
                         <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
                           {l.occurredAt}
@@ -1632,15 +1705,17 @@ export default function GoogleAdsPage() {
         </div>
       )}
 
-      {/* ABA 4: ROLETA DE ATENDENTES */}
+      {/* =========================================================================
+          ABA 4: ROLETA DE ATENDENTES
+         ========================================================================= */}
       {currentTab === "roleta" && (
         <div className="gads-panel">
           <div style={{ marginBottom: "20px" }}>
             <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-              Equilíbrio da Roleta & Desempenho dos Atendentes
+              EquilÃ­brio da Roleta & Desempenho dos Atendentes
             </h2>
             <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-              Divisão 50% / 50% entre Josi e Sérgio com métricas individuais de orçamentos e vendas geradas.
+              DivisÃ£o 50% / 50% entre Josi e SÃ©rgio com mÃ©tricas individuais de orÃ§amentos e vendas geradas.
             </p>
           </div>
 
@@ -1662,7 +1737,7 @@ export default function GoogleAdsPage() {
                   <small style={{ color: "#38bdf8", fontSize: "11px" }}>{josiStats.percentage}%</small>
                 </div>
                 <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>Orçamentos</span>
+                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>OrÃ§amentos</span>
                   <div style={{ fontSize: "20px", fontWeight: 800, color: "#c084fc" }}>{josiStats.quotes}</div>
                 </div>
                 <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
@@ -1675,7 +1750,7 @@ export default function GoogleAdsPage() {
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div>
-                  <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>Sérgio</h3>
+                  <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>SÃ©rgio</h3>
                   <span style={{ color: "#64748b", fontSize: "12px" }}>5521994060206</span>
                 </div>
                 <span style={{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399", padding: "3px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: 700 }}>
@@ -1689,7 +1764,7 @@ export default function GoogleAdsPage() {
                   <small style={{ color: "#38bdf8", fontSize: "11px" }}>{sergioStats.percentage}%</small>
                 </div>
                 <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>Orçamentos</span>
+                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>OrÃ§amentos</span>
                   <div style={{ fontSize: "20px", fontWeight: 800, color: "#c084fc" }}>{sergioStats.quotes}</div>
                 </div>
                 <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
@@ -1703,8 +1778,8 @@ export default function GoogleAdsPage() {
           <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "16px", marginBottom: "24px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", fontWeight: 600, marginBottom: "8px" }}>
               <span>Josi ({josiStats.percentage}%)</span>
-              <span>Distribuição Atual de Leads</span>
-              <span>Sérgio ({sergioStats.percentage}%)</span>
+              <span>DistribuiÃ§Ã£o Atual de Leads</span>
+              <span>SÃ©rgio ({sergioStats.percentage}%)</span>
             </div>
             <div style={{ width: "100%", height: "10px", background: "#1e293b", borderRadius: "5px", overflow: "hidden", display: "flex" }}>
               <div style={{ width: `${josiStats.percentage}%`, background: "#ec4899", transition: "width 0.3s" }} />
@@ -1757,7 +1832,7 @@ export default function GoogleAdsPage() {
                   <th style={{ padding: "10px 12px" }}>WhatsApp</th>
                   <th style={{ padding: "10px 12px" }}>Status</th>
                   <th style={{ padding: "10px 12px" }}>Leads Recebidos</th>
-                  <th style={{ padding: "10px 12px", textAlign: "right" }}>Ações</th>
+                  <th style={{ padding: "10px 12px", textAlign: "right" }}>AÃ§Ãµes</th>
                 </tr>
               </thead>
               <tbody>
@@ -1802,16 +1877,18 @@ export default function GoogleAdsPage() {
         </div>
       )}
 
-      {/* ABA 5: CONFIGURAÇÃO DE REGRAS DINÂMICAS & AUDITORIA */}
+      {/* =========================================================================
+          ABA 5: CONFIGURAÃ‡ÃƒO DE REGRAS DINÃ‚MICAS & AUDITORIA
+         ========================================================================= */}
       {currentTab === "conversoes" && (
         <div className="gads-panel">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "10px", marginBottom: "20px" }}>
             <div>
               <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-                Configuração Dinâmica de Frases & Regras Google Ads
+                ConfiguraÃ§Ã£o DinÃ¢mica de Frases & Regras Google Ads
               </h2>
               <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-                Edite as frases que disparam as conversões no WhatsApp em tempo real, sem precisar mexer em código.
+                Edite as frases que disparam as conversÃµes no WhatsApp em tempo real, sem precisar mexer em cÃ³digo.
               </p>
             </div>
 
@@ -1834,17 +1911,17 @@ export default function GoogleAdsPage() {
               }}
             >
               {saveSuccess ? <CheckCircle2 size={16} /> : <Save size={16} />}
-              {isSavingRules ? "Salvando..." : saveSuccess ? "Regras Salvas!" : "Salvar Regras de Conversão"}
+              {isSavingRules ? "Salvando..." : saveSuccess ? "Regras Salvas!" : "Salvar Regras de ConversÃ£o"}
             </button>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px", marginBottom: "28px" }}>
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#c084fc", fontWeight: 700, fontSize: "14px", marginBottom: "6px" }}>
-                <Award size={16} /> Conversão: Orçamento Enviado
+                <Award size={16} /> ConversÃ£o: OrÃ§amento Enviado
               </div>
               <small style={{ color: "#64748b", display: "block", marginBottom: "14px" }}>
-                Ação Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.quote.actionName}</strong>
+                AÃ§Ã£o Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.quote.actionName}</strong>
               </small>
 
               <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px", minHeight: "65px" }}>
@@ -1901,10 +1978,10 @@ export default function GoogleAdsPage() {
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#34d399", fontWeight: 700, fontSize: "14px", marginBottom: "6px" }}>
-                <CheckCircle2 size={16} /> Conversão: Compra Realizada (com R$)
+                <CheckCircle2 size={16} /> ConversÃ£o: Compra Realizada (com R$)
               </div>
               <small style={{ color: "#64748b", display: "block", marginBottom: "14px" }}>
-                Ação Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.purchase.actionName}</strong>
+                AÃ§Ã£o Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.purchase.actionName}</strong>
               </small>
 
               <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px", minHeight: "65px" }}>
@@ -1962,20 +2039,20 @@ export default function GoogleAdsPage() {
 
           <div style={{ borderTop: "1px solid #1e293b", paddingTop: "20px" }}>
             <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#ffffff", marginBottom: "4px" }}>
-              Auditoria de Disparos de Conversão Pelos Atendentes
+              Auditoria de Disparos de ConversÃ£o Pelos Atendentes
             </h3>
             <p style={{ color: "#64748b", fontSize: "12px", marginBottom: "14px" }}>
-              Registro exato de quando a Josi ou o Sérgio usaram as palavras-chave na conversa para acionar a conversão.
+              Registro exato de quando a Josi ou o SÃ©rgio usaram as palavras-chave na conversa para acionar a conversÃ£o.
             </p>
 
             {auditLogs.length === 0 ? (
               <div style={{ textAlign: "center", padding: "36px 16px", color: "#64748b", background: "#090f20", borderRadius: "10px" }}>
                 <Clock size={32} color="#334155" style={{ margin: "0 auto 8px", display: "block" }} />
                 <strong style={{ display: "block", color: "#94a3b8", fontSize: "13px" }}>
-                  Nenhum disparo de conversão registrado ainda
+                  Nenhum disparo de conversÃ£o registrado ainda
                 </strong>
                 <p style={{ fontSize: "12px", margin: "6px auto 0", maxWidth: "420px" }}>
-                  Quando o atendente responder um cliente no WhatsApp com qualquer uma das frases cadastradas acima, o registro auditado aparecerá aqui.
+                  Quando o atendente responder um cliente no WhatsApp com qualquer uma das frases cadastradas acima, o registro auditado aparecerÃ¡ aqui.
                 </p>
               </div>
             ) : (
@@ -1985,7 +2062,7 @@ export default function GoogleAdsPage() {
                     <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
                       <th style={{ padding: "10px 12px" }}>Atendente</th>
                       <th style={{ padding: "10px 12px" }}>Cliente / Telefone</th>
-                      <th style={{ padding: "10px 12px" }}>Ação Disparada</th>
+                      <th style={{ padding: "10px 12px" }}>AÃ§Ã£o Disparada</th>
                       <th style={{ padding: "10px 12px" }}>Frase Detectada no Chat</th>
                       <th style={{ padding: "10px 12px" }}>Valor Registrado</th>
                       <th style={{ padding: "10px 12px" }}>Status Google OCI</th>
@@ -2003,7 +2080,7 @@ export default function GoogleAdsPage() {
                         </td>
                         <td style={{ padding: "10px 12px" }}>
                           {item.action === "orcamento_enviado" ? (
-                            <span style={{ color: "#c084fc", fontWeight: 600 }}>Orçamento Enviado</span>
+                            <span style={{ color: "#c084fc", fontWeight: 600 }}>OrÃ§amento Enviado</span>
                           ) : item.action === "compra_realizada" ? (
                             <span style={{ color: "#34d399", fontWeight: 600 }}>Compra Realizada</span>
                           ) : (
@@ -2014,7 +2091,7 @@ export default function GoogleAdsPage() {
                           "{item.detectedPhrase}"
                         </td>
                         <td style={{ padding: "10px 12px", color: "#fff" }}>
-                          {item.value ? `R$ ${item.value.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}` : "—"}
+                          {item.value ? `R$ ${item.value.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}` : "â€”"}
                         </td>
                         <td style={{ padding: "10px 12px" }}>
                           <span style={{ color: "#10b981", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px" }}>
@@ -2022,7 +2099,7 @@ export default function GoogleAdsPage() {
                           </span>
                         </td>
                         <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
-                          {item.timestamp ? new Date(item.timestamp).toLocaleString("pt-BR") : "—"}
+                          {item.timestamp ? new Date(item.timestamp).toLocaleString("pt-BR") : "â€”"}
                         </td>
                       </tr>
                     ))}
@@ -2030,6 +2107,319 @@ export default function GoogleAdsPage() {
                 </table>
               </div>
             )}
+          </div>
+
+          {/* ARMAZENAMENTO PERSISTENTE & BACKUPS */}
+          <div style={{ marginTop: "24px", padding: "18px", background: "#0f172a", border: "1px solid #1e293b", borderRadius: "10px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px" }}>
+              <div>
+                <h4 style={{ color: "#38bdf8", fontSize: "14px", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
+                  <ShieldCheck size={16} /> Armazenamento Persistente & Backup de Leads
+                </h4>
+                <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
+                  Os dados do Google Ads sÃ£o armazenados com redundÃ¢ncia. Para garantir persistÃªncia total entre deploys no Dokploy, certifique-se de mapear o volume para <code>/data</code>.
+                </p>
+              </div>
+
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={handleDownloadBackup}
+                  style={{
+                    background: "#1e293b",
+                    border: "1px solid #334155",
+                    color: "#fff",
+                    borderRadius: "8px",
+                    padding: "8px 14px",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                >
+                  <Download size={14} /> Baixar Backup JSON ({leadEvents.length} Leads)
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsRecoverModalOpen(true)}
+                  style={{
+                    background: "#059669",
+                    border: "none",
+                    color: "#fff",
+                    borderRadius: "8px",
+                    padding: "8px 14px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                >
+                  <UserPlus size={14} /> + Recuperar / Inserir Lead
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL PARA RECUPERAR / INSERIR LEAD MANUALMENTE */}
+      {isRecoverModalOpen && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.75)",
+            backdropFilter: "blur(4px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+            padding: "16px",
+          }}
+        >
+          <div
+            style={{
+              background: "#0b1329",
+              border: "1px solid #334155",
+              borderRadius: "14px",
+              width: "100%",
+              maxWidth: "520px",
+              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5)",
+              overflow: "hidden",
+            }}
+          >
+            {/* CabeÃ§alho do Modal */}
+            <div
+              style={{
+                padding: "16px 20px",
+                borderBottom: "1px solid #1e293b",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                background: "#0f172a",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ background: "#059669", borderRadius: "8px", padding: "6px", display: "inline-flex" }}>
+                  <UserPlus size={18} color="#fff" />
+                </span>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 700, color: "#fff" }}>
+                    Recuperar / Inserir Lead
+                  </h3>
+                  <p style={{ margin: 0, fontSize: "11px", color: "#94a3b8" }}>
+                    Insira o lead que conversou no WhatsApp para que ele apareÃ§a no Funil e nos RelatÃ³rios.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsRecoverModalOpen(false)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "#94a3b8",
+                  cursor: "pointer",
+                  padding: "4px",
+                }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* FormulÃ¡rio do Modal */}
+            <form onSubmit={handleSaveRecoveredLead} style={{ padding: "20px" }}>
+              {recovSuccessMsg && (
+                <div
+                  style={{
+                    background: "#064e3b",
+                    border: "1px solid #10b981",
+                    color: "#a7f3d0",
+                    padding: "10px 14px",
+                    borderRadius: "8px",
+                    marginBottom: "16px",
+                    fontSize: "13px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                >
+                  <CheckCircle2 size={16} /> {recovSuccessMsg}
+                </div>
+              )}
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
+                <div>
+                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                    Nome do Cliente:
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: Carlos Silva"
+                    value={recovName}
+                    onChange={(e) => setRecovName(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 12px", fontSize: "13px" }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                    WhatsApp do Cliente <span style={{ color: "#ef4444" }}>*</span>:
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Ex: 21999998888"
+                    value={recovPhone}
+                    onChange={(e) => setRecovPhone(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 12px", fontSize: "13px" }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
+                <div>
+                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                    Atendente ResponsÃ¡vel:
+                  </label>
+                  <select
+                    value={recovAttendant}
+                    onChange={(e) => setRecovAttendant(e.target.value)}
+                    className="gads-select-field"
+                    style={{ padding: "8px 12px", fontSize: "13px" }}
+                  >
+                    <option value="Josi">Josi (5521980659269)</option>
+                    <option value="SÃ©rgio">SÃ©rgio (5521994060206)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                    Etapa Atual no Funil:
+                  </label>
+                  <select
+                    value={recovStage}
+                    onChange={(e) => setRecovStage(e.target.value as any)}
+                    className="gads-select-field"
+                    style={{ padding: "8px 12px", fontSize: "13px" }}
+                  >
+                    <option value="conversa_iniciada">1. Conversa Iniciada</option>
+                    <option value="orcamento_enviado">2. OrÃ§amento Enviado</option>
+                    <option value="compra_realizada">3. Compra Realizada</option>
+                  </select>
+                </div>
+              </div>
+
+              {recovStage === "compra_realizada" && (
+                <div style={{ marginBottom: "14px" }}>
+                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#34d399", marginBottom: "4px" }}>
+                    Valor da Venda (R$):
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: 1500,00"
+                    value={recovValue}
+                    onChange={(e) => setRecovValue(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 12px", fontSize: "13px", borderColor: "#10b981" }}
+                  />
+                </div>
+              )}
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
+                <div>
+                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                    Palavra-Chave Google:
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: tapete sob medida"
+                    value={recovKeyword}
+                    onChange={(e) => setRecovKeyword(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 12px", fontSize: "13px" }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                    Campanha:
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: Campanha Search Rio"
+                    value={recovCampaign}
+                    onChange={(e) => setRecovCampaign(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 12px", fontSize: "13px" }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginBottom: "18px" }}>
+                <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                  ObservaÃ§Ãµes / Notas:
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ex: Lead entrou hoje Ã s 11h pedindo orÃ§amento de tapete geomÃ©trico"
+                  value={recovNotes}
+                  onChange={(e) => setRecovNotes(e.target.value)}
+                  className="gads-input-field"
+                  style={{ padding: "8px 12px", fontSize: "13px" }}
+                />
+              </div>
+
+              {/* BotÃµes de AÃ§Ã£o */}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", borderTop: "1px solid #1e293b", paddingTop: "14px" }}>
+                <button
+                  type="button"
+                  onClick={() => setIsRecoverModalOpen(false)}
+                  style={{
+                    background: "#1e293b",
+                    border: "1px solid #334155",
+                    color: "#94a3b8",
+                    borderRadius: "8px",
+                    padding: "9px 16px",
+                    fontSize: "13px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingRecov}
+                  style={{
+                    background: "#059669",
+                    border: "none",
+                    color: "#fff",
+                    borderRadius: "8px",
+                    padding: "9px 20px",
+                    fontSize: "13px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    opacity: isSubmittingRecov ? 0.7 : 1,
+                  }}
+                >
+                  <Save size={15} /> {isSubmittingRecov ? "Salvando..." : "Salvar Lead no Painel"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
