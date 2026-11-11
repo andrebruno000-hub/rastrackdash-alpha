@@ -125,7 +125,7 @@ export default function GoogleAdsPage() {
   const [reportAttendant, setReportAttendant] = useState("all");
   const [reportStage, setReportStage] = useState("all");
 
-  // Regras
+  // Regras Dinâmicas de Conversão
   const [rules, setRules] = useState<ConversionRules>({
     quote: {
       actionName: "WhatsApp - Orçamento Enviado",
@@ -491,19 +491,23 @@ export default function GoogleAdsPage() {
           background: #0f172a;
           border: 1px solid #1e293b;
           border-radius: 10px;
-          padding: 4px;
+          padding: 6px;
           display: flex;
-          gap: 4px;
+          gap: 6px;
           overflow-x: auto;
           -webkit-overflow-scrolling: touch;
-          scrollbar-width: none;
+          width: 100%;
+          box-sizing: border-box;
         }
-        .gads-tabs-bar::-webkit-scrollbar {
-          display: none;
+        @media (min-width: 1024px) {
+          .gads-tabs-bar {
+            flex-wrap: wrap;
+            overflow-x: visible;
+          }
         }
         .gads-tab-btn {
           border: none;
-          padding: 9px 14px;
+          padding: 9px 15px;
           border-radius: 8px;
           cursor: pointer;
           font-size: 13px;
@@ -696,9 +700,9 @@ export default function GoogleAdsPage() {
             padding: 24px 32px;
           }
           .gads-header-block {
-            flex-direction: row;
-            justify-content: space-between;
-            align-items: flex-start;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 16px;
             margin-bottom: 24px;
           }
           .gads-title {
@@ -729,7 +733,7 @@ export default function GoogleAdsPage() {
         }
       `}</style>
 
-      {/* CABEÇALHO */}
+      {/* CABEÇALHO COM ABAS 100% LARGURA NO DESKTOP */}
       <div className="gads-header-block">
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
@@ -748,7 +752,7 @@ export default function GoogleAdsPage() {
           </p>
         </div>
 
-        {/* NAVEGAÇÃO ENTRE AS 5 ABAS */}
+        {/* BARRA DAS 5 ABAS (100% VISÍVEL NO DESKTOP E MOBILE) */}
         <div className="gads-tabs-bar">
           <button
             onClick={() => setCurrentTab("leads")}
