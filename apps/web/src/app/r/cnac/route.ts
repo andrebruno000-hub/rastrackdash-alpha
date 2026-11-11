@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import fs from "fs";
 
-// Contador em memória para alternância 50/50 justa
 let requestCounter = 0;
+const LEADS_FILE = "/tmp/alpha_google_leads.json";
 
 // Tabela de caracteres Unicode 100% invisíveis (largura zero)
 const ZW = ["\u200B", "\u200C", "\u200D", "\u2060"];
@@ -15,10 +16,23 @@ function encodeZeroWidth(text: string): string {
   return result;
 }
 
+function recordLead(lead: any) {
+  try {
+    let leads: any[] = [];
+    if (fs.existsSync(LEADS_FILE)) {
+      leads = JSON.parse(fs.readFileSync(LEADS_FILE, "utf8"));
+    }
+    leads.unshift(lead);
+    if (leads.length > 500) leads = leads.slice(0, 500);
+    fs.writeFileSync(LEADS_FILE, JSON.stringify(leads, null, 2));
+  } catch (err) {
+    console.error("Erro ao registrar lead:", err);
+  }
+}
+
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
 
-  // 1. Atendentes com números reais (Josi e Sérgio)
   const attendants = [
     {
       name: process.env.CNAC_ATTENDANT_1_NAME || "Josi",
@@ -30,25 +44,36 @@ export async function GET(request: NextRequest) {
     }
   ];
 
-  // 2. Roleta 50% / 50%
+  // Roleta 50% / 50%
   requestCounter = (requestCounter + 1) % attendants.length;
   const chosen = attendants[requestCounter];
 
-  // 3. Captura parâmetros do Google Ads
   const gclid = searchParams.get("gclid") || searchParams.get("wbraid") || searchParams.get("gbraid") || "";
   const keyword = searchParams.get("utm_term") || "";
+  const campaign = searchParams.get("utm_campaign") || "Pesquisa Google";
 
-  // 4. Mensagem 100% limpa visível para o cliente
+  // Grava o lead no servidor para aparecer no painel imediatamente
+  recordLead({
+    id: gclid ? `g_${gclid.slice(0, 15)}_${Date.now()}` : `lead_${Date.now()}`,
+    leadPhone: chosen.phone,
+    attendantName: chosen.name,
+    keyword: keyword || "Direto (Sem palavra-chave)",
+    campaign: campaign,
+    adGroup: "Grupo de Pesquisa",
+    gclid: gclid || "sem_gclid",
+    conversionType: "conversa_iniciada",
+    status: "queued",
+    occurredAt: new Date().toISOString(),
+  });
+
+  // Mensagem invisível
   let text = "Olá! Vim pelo site da CNAC Tapetes e gostaria de um orçamento.";
-
-  // 5. Injeta a tag invisível (o cliente não vê nada, mas os dados viajam na mensagem)
   if (gclid) {
     let tag = `ref:${gclid}`;
     if (keyword) tag += `|kw:${keyword.trim()}`;
     text += encodeZeroWidth(tag);
   }
 
-  // 6. Redirecionamento instantâneo (< 10ms)
   const whatsappUrl = `https://api.whatsapp.com/send?phone=${chosen.phone}&text=${encodeURIComponent(text)}`;
 
   return NextResponse.redirect(whatsappUrl, {
