@@ -10,11 +10,11 @@ export async function GET(request: NextRequest) {
   const attendants = [
     {
       name: process.env.CNAC_ATTENDANT_1_NAME || "Sergio",
-      phone: (process.env.CNAC_ATTENDANT_1_PHONE || "5521999998888").replace(/\D/g, "")
+      phone: (process.env.CNAC_ATTENDANT_1_PHONE || "5521994060206").replace(/\D/g, "")
     },
     {
-      name: process.env.CNAC_ATTENDANT_2_NAME || "Jose",
-      phone: (process.env.CNAC_ATTENDANT_2_PHONE || "5521977776666").replace(/\D/g, "")
+      name: process.env.CNAC_ATTENDANT_2_NAME || "Josi",
+      phone: (process.env.CNAC_ATTENDANT_2_PHONE || "552121980659269").replace(/\D/g, "")
     }
   ];
 
