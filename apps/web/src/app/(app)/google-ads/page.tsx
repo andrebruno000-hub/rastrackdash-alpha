@@ -25,6 +25,8 @@ import {
   Plus,
   X,
   Save,
+  BarChart3,
+  Download,
 } from "lucide-react";
 
 interface Attendant {
@@ -67,9 +69,8 @@ interface ConversionRules {
 }
 
 export default function GoogleAdsPage() {
-  const [currentTab, setCurrentTab] = useState<"leads" | "funil" | "roleta" | "conversoes">("leads");
+  const [currentTab, setCurrentTab] = useState<"leads" | "funil" | "relatorios" | "roleta" | "conversoes">("leads");
 
-  // Roleta de Atendentes
   const [attendants, setAttendants] = useState<Attendant[]>(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("alpha_google_attendants");
@@ -88,15 +89,43 @@ export default function GoogleAdsPage() {
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
 
-  // Base Real de Leads e Auditoria
   const [leadEvents, setLeadEvents] = useState<GoogleLeadEvent[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [reportsData, setReportsData] = useState<{
+    apiConnected: boolean;
+    customerId: string;
+    reports: any[];
+    totalCost: number;
+    totalRevenue: number;
+    totalProfit: number;
+    overallRoas: number;
+  }>({
+    apiConnected: false,
+    customerId: "3228136878",
+    reports: [],
+    totalCost: 0,
+    totalRevenue: 0,
+    totalProfit: 0,
+    overallRoas: 0,
+  });
+
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Filtros Aba 1
   const [filterKeyword, setFilterKeyword] = useState("");
   const [filterAttendant, setFilterAttendant] = useState("all");
   const [filterStage, setFilterStage] = useState("all");
 
-  // Regras Dinâmicas de Conversão
+  // Filtros Customizáveis Aba de Relatórios
+  const [reportDatePreset, setReportDatePreset] = useState<"today" | "yesterday" | "7d" | "30d" | "this_month" | "all">("all");
+  const [reportStartDate, setReportStartDate] = useState("");
+  const [reportEndDate, setReportEndDate] = useState("");
+  const [reportCampaign, setReportCampaign] = useState("all");
+  const [reportAdGroup, setReportAdGroup] = useState("all");
+  const [reportAttendant, setReportAttendant] = useState("all");
+  const [reportStage, setReportStage] = useState("all");
+
+  // Regras
   const [rules, setRules] = useState<ConversionRules>({
     quote: {
       actionName: "WhatsApp - Orçamento Enviado",
@@ -113,14 +142,21 @@ export default function GoogleAdsPage() {
   const [isSavingRules, setIsSavingRules] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Carregar Leads, Auditorias e Regras
-  const fetchLeadsAndAudits = async () => {
+  const fetchData = async () => {
     setIsRefreshing(true);
     try {
-      const [leadsRes, auditsRes, rulesRes] = await Promise.all([
+      const queryParams = new URLSearchParams();
+      if (reportStartDate) queryParams.set("startDate", reportStartDate);
+      if (reportEndDate) queryParams.set("endDate", reportEndDate);
+      if (reportCampaign !== "all") queryParams.set("campaign", reportCampaign);
+      if (reportAdGroup !== "all") queryParams.set("adGroup", reportAdGroup);
+      if (reportAttendant !== "all") queryParams.set("attendant", reportAttendant);
+
+      const [leadsRes, auditsRes, rulesRes, reportsRes] = await Promise.all([
         fetch("/api/google-ads/leads"),
         fetch("/api/google-ads/leads?type=audits"),
         fetch("/api/google-ads/leads?type=rules"),
+        fetch(`/api/google-ads/reports?${queryParams.toString()}`),
       ]);
 
       if (leadsRes.ok) {
@@ -135,6 +171,10 @@ export default function GoogleAdsPage() {
         const data = await rulesRes.json();
         if (data && data.quote && data.purchase) setRules(data);
       }
+      if (reportsRes.ok) {
+        const data = await reportsRes.json();
+        if (data) setReportsData(data);
+      }
     } catch (e) {
       console.error("Erro ao carregar dados:", e);
     } finally {
@@ -143,10 +183,43 @@ export default function GoogleAdsPage() {
   };
 
   useEffect(() => {
-    fetchLeadsAndAudits();
-    const interval = setInterval(fetchLeadsAndAudits, 4000);
+    fetchData();
+    const interval = setInterval(fetchData, 4000);
     return () => clearInterval(interval);
-  }, []);
+  }, [reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant]);
+
+  const handleDatePresetChange = (preset: "today" | "yesterday" | "7d" | "30d" | "this_month" | "all") => {
+    setReportDatePreset(preset);
+    const today = new Date();
+    const formatDate = (d: Date) => d.toISOString().split("T")[0];
+
+    if (preset === "today") {
+      setReportStartDate(formatDate(today));
+      setReportEndDate(formatDate(today));
+    } else if (preset === "yesterday") {
+      const yest = new Date(today);
+      yest.setDate(yest.getDate() - 1);
+      setReportStartDate(formatDate(yest));
+      setReportEndDate(formatDate(yest));
+    } else if (preset === "7d") {
+      const past7 = new Date(today);
+      past7.setDate(past7.getDate() - 7);
+      setReportStartDate(formatDate(past7));
+      setReportEndDate(formatDate(today));
+    } else if (preset === "30d") {
+      const past30 = new Date(today);
+      past30.setDate(past30.getDate() - 30);
+      setReportStartDate(formatDate(past30));
+      setReportEndDate(formatDate(today));
+    } else if (preset === "this_month") {
+      const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+      setReportStartDate(formatDate(startOfMonth));
+      setReportEndDate(formatDate(today));
+    } else if (preset === "all") {
+      setReportStartDate("");
+      setReportEndDate("");
+    }
+  };
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -154,7 +227,6 @@ export default function GoogleAdsPage() {
     }
   }, [attendants]);
 
-  // Ações de Regras Dinâmicas
   const handleAddPhrase = (type: "quote" | "purchase", phrase: string) => {
     const clean = phrase.trim().toLowerCase();
     if (!clean) return;
@@ -201,7 +273,6 @@ export default function GoogleAdsPage() {
     }
   };
 
-  // Movimentação do Funil via PATCH
   const updateLeadStage = async (id: string, newStage: GoogleLeadEvent["stage"], value?: number) => {
     setLeadEvents((prev) =>
       prev.map((l) => (l.id === id ? { ...l, stage: newStage, value: value !== undefined ? value : l.value } : l))
@@ -216,6 +287,87 @@ export default function GoogleAdsPage() {
     } catch (err) {
       console.error("Falha ao atualizar etapa do lead:", err);
     }
+  };
+
+  const uniqueCampaigns = useMemo(() => {
+    const set = new Set<string>();
+    leadEvents.forEach((l) => l.campaign && set.add(l.campaign));
+    return Array.from(set);
+  }, [leadEvents]);
+
+  const uniqueAdGroups = useMemo(() => {
+    const set = new Set<string>();
+    leadEvents.forEach((l) => l.adGroup && set.add(l.adGroup));
+    return Array.from(set);
+  }, [leadEvents]);
+
+  const filteredReportLeads = useMemo(() => {
+    return leadEvents.filter((event) => {
+      const eventDate = (event.occurredAt || event.firstMessageAt || "").slice(0, 10);
+      const matchesDate =
+        (!reportStartDate || eventDate >= reportStartDate) &&
+        (!reportEndDate || eventDate <= reportEndDate);
+
+      const matchesCampaign = reportCampaign === "all" || event.campaign === reportCampaign;
+      const matchesAdGroup = reportAdGroup === "all" || event.adGroup === reportAdGroup;
+      const matchesAttendant = reportAttendant === "all" || event.attendantName === reportAttendant;
+      const currentLeadStage = event.stage || "conversa_iniciada";
+      const matchesStage = reportStage === "all" || currentLeadStage === reportStage;
+
+      return matchesDate && matchesCampaign && matchesAdGroup && matchesAttendant && matchesStage;
+    });
+  }, [leadEvents, reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant, reportStage]);
+
+  const reportMetrics = useMemo(() => {
+    const totalLeadsCount = filteredReportLeads.length;
+    const quotesCount = filteredReportLeads.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length;
+    const salesCount = filteredReportLeads.filter((l) => l.stage === "compra_realizada").length;
+    const totalRevenue = filteredReportLeads
+      .filter((l) => l.stage === "compra_realizada" && l.value)
+      .reduce((acc, curr) => acc + (curr.value || 0), 0);
+    const totalCost = reportsData.totalCost || 0;
+    const profit = totalRevenue - totalCost;
+    const roas = totalCost > 0 ? Number((totalRevenue / totalCost).toFixed(2)) : totalRevenue > 0 ? 99 : 0;
+    const cpl = totalLeadsCount > 0 && totalCost > 0 ? Number((totalCost / totalLeadsCount).toFixed(2)) : 0;
+    const averageTicket = salesCount > 0 ? Number((totalRevenue / salesCount).toFixed(2)) : 0;
+    const conversionRate = totalLeadsCount > 0 ? Number(((salesCount / totalLeadsCount) * 100).toFixed(1)) : 0;
+
+    return {
+      totalLeadsCount,
+      quotesCount,
+      salesCount,
+      totalRevenue,
+      totalCost,
+      profit,
+      roas,
+      cpl,
+      averageTicket,
+      conversionRate,
+    };
+  }, [filteredReportLeads, reportsData.totalCost]);
+
+  const handleExportCSV = () => {
+    const headers = ["Data", "Nome", "Telefone", "Campanha", "Conjunto", "Palavra-Chave", "Atendente", "Etapa", "Valor R$"];
+    const rows = filteredReportLeads.map((l) => [
+      l.occurredAt,
+      `"${l.leadName || "Cliente"}"`,
+      l.leadPhone,
+      `"${l.campaign}"`,
+      `"${l.adGroup}"`,
+      `"${l.keyword}"`,
+      `"${l.attendantName}"`,
+      l.stage || "conversa_iniciada",
+      l.value || 0,
+    ]);
+
+    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map((e) => e.join(","))].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `relatorio_google_ads_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const totalLeads = leadEvents.length;
@@ -499,7 +651,6 @@ export default function GoogleAdsPage() {
           transform: translateY(-2px);
         }
 
-        /* Tag Pill Style */
         .phrase-pill {
           display: inline-flex;
           align-items: center;
@@ -521,6 +672,23 @@ export default function GoogleAdsPage() {
         }
         .phrase-remove-btn:hover {
           opacity: 1;
+        }
+
+        .date-preset-btn {
+          background: #0f172a;
+          border: 1px solid #1e293b;
+          color: #94a3b8;
+          border-radius: 6px;
+          padding: 6px 12px;
+          font-size: 12px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.15s;
+        }
+        .date-preset-btn.active {
+          background: #2563eb;
+          color: #fff;
+          border-color: #2563eb;
         }
 
         @media (min-width: 768px) {
@@ -576,11 +744,11 @@ export default function GoogleAdsPage() {
             </span>
           </div>
           <p className="gads-subtitle">
-            Atribuição precisa de palavras-chave, funil CRM por etapas, roleta justa de WhatsApp e regras dinâmicas de conversão.
+            Relatórios customizáveis de ROAS, atribuição de palavras-chave, funil CRM por etapas e roleta justa de WhatsApp.
           </p>
         </div>
 
-        {/* NAVEGAÇÃO ENTRE AS 4 ABAS */}
+        {/* NAVEGAÇÃO ENTRE AS 5 ABAS */}
         <div className="gads-tabs-bar">
           <button
             onClick={() => setCurrentTab("leads")}
@@ -603,6 +771,16 @@ export default function GoogleAdsPage() {
             <TrendingUp size={15} /> 2. Funil CRM (Kanban)
           </button>
           <button
+            onClick={() => setCurrentTab("relatorios")}
+            className="gads-tab-btn"
+            style={{
+              background: currentTab === "relatorios" ? "#2563eb" : "transparent",
+              color: currentTab === "relatorios" ? "#fff" : "#94a3b8",
+            }}
+          >
+            <BarChart3 size={15} /> 3. Relatórios & Lucro (BI)
+          </button>
+          <button
             onClick={() => setCurrentTab("roleta")}
             className="gads-tab-btn"
             style={{
@@ -610,7 +788,7 @@ export default function GoogleAdsPage() {
               color: currentTab === "roleta" ? "#fff" : "#94a3b8",
             }}
           >
-            <RefreshCw size={15} /> 3. Roleta de Atendentes
+            <RefreshCw size={15} /> 4. Roleta de Atendentes
           </button>
           <button
             onClick={() => setCurrentTab("conversoes")}
@@ -620,7 +798,7 @@ export default function GoogleAdsPage() {
               color: currentTab === "conversoes" ? "#fff" : "#94a3b8",
             }}
           >
-            <CheckCheck size={15} /> 4. Regras & Auditoria de Frases
+            <CheckCheck size={15} /> 5. Regras & Auditoria
           </button>
         </div>
       </div>
@@ -718,7 +896,7 @@ export default function GoogleAdsPage() {
               </select>
 
               <button
-                onClick={fetchLeadsAndAudits}
+                onClick={fetchData}
                 disabled={isRefreshing}
                 style={{
                   background: "#1e293b",
@@ -856,7 +1034,7 @@ export default function GoogleAdsPage() {
         </div>
       )}
 
-      {/* ABA 2: FUNIL CRM COMPLETO (KANBAN) */}
+      {/* ABA 2: FUNIL CRM (KANBAN) */}
       {currentTab === "funil" && (
         <div>
           <div style={{ marginBottom: "16px" }}>
@@ -1073,7 +1251,384 @@ export default function GoogleAdsPage() {
         </div>
       )}
 
-      {/* ABA 3: ROLETA DE ATENDENTES */}
+      {/* ABA 3: RELATÓRIOS & ANALYTICS CUSTOMIZÁVEL */}
+      {currentTab === "relatorios" && (
+        <div className="gads-panel">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", marginBottom: "20px" }}>
+            <div>
+              <h2 style={{ fontSize: "18px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
+                Relatórios Customizáveis & Inteligência Financeira
+              </h2>
+              <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
+                Filtre por períodos, campanhas, conjuntos e atendentes para analisar gastos, faturamento, lucro e ROAS real.
+              </p>
+            </div>
+
+            <button
+              onClick={handleExportCSV}
+              style={{
+                background: "#1e293b",
+                border: "1px solid #334155",
+                color: "#38bdf8",
+                borderRadius: "8px",
+                padding: "8px 16px",
+                fontSize: "13px",
+                fontWeight: 600,
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              <Download size={15} /> Exportar CSV (Excel)
+            </button>
+          </div>
+
+          <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "16px", marginBottom: "24px" }}>
+            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "16px" }}>
+              <button
+                type="button"
+                onClick={() => handleDatePresetChange("all")}
+                className={`date-preset-btn ${reportDatePreset === "all" ? "active" : ""}`}
+              >
+                Todo o Período
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDatePresetChange("today")}
+                className={`date-preset-btn ${reportDatePreset === "today" ? "active" : ""}`}
+              >
+                Hoje
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDatePresetChange("yesterday")}
+                className={`date-preset-btn ${reportDatePreset === "yesterday" ? "active" : ""}`}
+              >
+                Ontem
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDatePresetChange("7d")}
+                className={`date-preset-btn ${reportDatePreset === "7d" ? "active" : ""}`}
+              >
+                Últimos 7 dias
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDatePresetChange("30d")}
+                className={`date-preset-btn ${reportDatePreset === "30d" ? "active" : ""}`}
+              >
+                Últimos 30 dias
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDatePresetChange("this_month")}
+                className={`date-preset-btn ${reportDatePreset === "this_month" ? "active" : ""}`}
+              >
+                Este Mês
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "10px" }}>
+              <div>
+                <label style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", display: "block", marginBottom: "4px" }}>
+                  Data Inicial:
+                </label>
+                <input
+                  type="date"
+                  value={reportStartDate}
+                  onChange={(e) => {
+                    setReportDatePreset("all");
+                    setReportStartDate(e.target.value);
+                  }}
+                  className="gads-select-field"
+                  style={{ padding: "8px 10px" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", display: "block", marginBottom: "4px" }}>
+                  Data Final:
+                </label>
+                <input
+                  type="date"
+                  value={reportEndDate}
+                  onChange={(e) => {
+                    setReportDatePreset("all");
+                    setReportEndDate(e.target.value);
+                  }}
+                  className="gads-select-field"
+                  style={{ padding: "8px 10px" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", display: "block", marginBottom: "4px" }}>
+                  Campanha:
+                </label>
+                <select
+                  value={reportCampaign}
+                  onChange={(e) => setReportCampaign(e.target.value)}
+                  className="gads-select-field"
+                  style={{ padding: "8px 10px" }}
+                >
+                  <option value="all">Todas as Campanhas</option>
+                  {uniqueCampaigns.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", display: "block", marginBottom: "4px" }}>
+                  Conjunto de Anúncios:
+                </label>
+                <select
+                  value={reportAdGroup}
+                  onChange={(e) => setReportAdGroup(e.target.value)}
+                  className="gads-select-field"
+                  style={{ padding: "8px 10px" }}
+                >
+                  <option value="all">Todos os Conjuntos</option>
+                  {uniqueAdGroups.map((ad) => (
+                    <option key={ad} value={ad}>
+                      {ad}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", display: "block", marginBottom: "4px" }}>
+                  Atendente:
+                </label>
+                <select
+                  value={reportAttendant}
+                  onChange={(e) => setReportAttendant(e.target.value)}
+                  className="gads-select-field"
+                  style={{ padding: "8px 10px" }}
+                >
+                  <option value="all">Todos Atendentes</option>
+                  <option value="Josi">Josi</option>
+                  <option value="Sérgio">Sérgio</option>
+                </select>
+              </div>
+
+              <div>
+                <label style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", display: "block", marginBottom: "4px" }}>
+                  Etapa do Funil:
+                </label>
+                <select
+                  value={reportStage}
+                  onChange={(e) => setReportStage(e.target.value)}
+                  className="gads-select-field"
+                  style={{ padding: "8px 10px" }}
+                >
+                  <option value="all">Todas as Etapas</option>
+                  <option value="conversa_iniciada">Conversa Iniciada</option>
+                  <option value="em_atendimento">Em Atendimento</option>
+                  <option value="orcamento_enviado">Orçamento Enviado</option>
+                  <option value="compra_realizada">Compra Realizada</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px", marginBottom: "28px" }}>
+            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
+              <span style={{ fontSize: "11px", color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Gasto Google Ads</span>
+              <div style={{ fontSize: "22px", fontWeight: 800, color: "#ffffff", marginTop: "4px" }}>
+                R$ {reportMetrics.totalCost.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+              </div>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>API Google v17</small>
+            </div>
+
+            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
+              <span style={{ fontSize: "11px", color: "#38bdf8", fontWeight: 700, textTransform: "uppercase" }}>Leads WhatsApp</span>
+              <div style={{ fontSize: "22px", fontWeight: 800, color: "#38bdf8", marginTop: "4px" }}>
+                {reportMetrics.totalLeadsCount}
+              </div>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>CPL: R$ {reportMetrics.cpl.toFixed(2)}</small>
+            </div>
+
+            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
+              <span style={{ fontSize: "11px", color: "#c084fc", fontWeight: 700, textTransform: "uppercase" }}>Orçamentos</span>
+              <div style={{ fontSize: "22px", fontWeight: 800, color: "#c084fc", marginTop: "4px" }}>
+                {reportMetrics.quotesCount}
+              </div>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>Propostas ativas</small>
+            </div>
+
+            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
+              <span style={{ fontSize: "11px", color: "#10b981", fontWeight: 700, textTransform: "uppercase" }}>Vendas Fechadas</span>
+              <div style={{ fontSize: "22px", fontWeight: 800, color: "#10b981", marginTop: "4px" }}>
+                {reportMetrics.salesCount}
+              </div>
+              <small style={{ color: "#34d399", fontSize: "11px" }}>Conversão: {reportMetrics.conversionRate}%</small>
+            </div>
+
+            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
+              <span style={{ fontSize: "11px", color: "#10b981", fontWeight: 700, textTransform: "uppercase" }}>Faturamento Total</span>
+              <div style={{ fontSize: "22px", fontWeight: 800, color: "#10b981", marginTop: "4px" }}>
+                R$ {reportMetrics.totalRevenue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+              </div>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>Ticket Médio: R$ {reportMetrics.averageTicket.toFixed(2)}</small>
+            </div>
+
+            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
+              <span style={{ fontSize: "11px", color: "#fbbf24", fontWeight: 700, textTransform: "uppercase" }}>Lucro Líquido Real</span>
+              <div style={{ fontSize: "22px", fontWeight: 800, color: reportMetrics.profit >= 0 ? "#34d399" : "#f87171", marginTop: "4px" }}>
+                R$ {reportMetrics.profit.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+              </div>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>Receita - Gasto</small>
+            </div>
+
+            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
+              <span style={{ fontSize: "11px", color: "#38bdf8", fontWeight: 700, textTransform: "uppercase" }}>ROAS Real</span>
+              <div style={{ fontSize: "22px", fontWeight: 800, color: "#38bdf8", marginTop: "4px" }}>
+                {reportMetrics.roas}x
+              </div>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>Retorno s/ anúncio</small>
+            </div>
+          </div>
+
+          <div style={{ marginBottom: "28px" }}>
+            <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#fff", marginBottom: "10px" }}>
+              Resultado Financeiro por Conjunto de Anúncios no Período
+            </h3>
+
+            <div className="gads-table-scroll">
+              <table className="gads-table">
+                <thead>
+                  <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                    <th style={{ padding: "10px 12px" }}>Campanha Google</th>
+                    <th style={{ padding: "10px 12px" }}>Conjunto de Anúncios</th>
+                    <th style={{ padding: "10px 12px" }}>Gasto (R$)</th>
+                    <th style={{ padding: "10px 12px" }}>Leads WhatsApp</th>
+                    <th style={{ padding: "10px 12px" }}>Orçamentos</th>
+                    <th style={{ padding: "10px 12px" }}>Vendas (R$)</th>
+                    <th style={{ padding: "10px 12px" }}>Lucro Líquido (R$)</th>
+                    <th style={{ padding: "10px 12px" }}>ROAS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {reportsData.reports.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} style={{ textAlign: "center", padding: "24px", color: "#64748b" }}>
+                        Nenhum conjunto com dados no filtro selecionado
+                      </td>
+                    </tr>
+                  ) : (
+                    reportsData.reports.map((item, idx) => (
+                      <tr key={idx} style={{ borderBottom: "1px solid #0f172a" }}>
+                        <td style={{ padding: "10px 12px", color: "#cbd5e1", fontWeight: 600 }}>{item.campaign}</td>
+                        <td style={{ padding: "10px 12px", color: "#38bdf8", fontWeight: 600 }}>{item.adGroup}</td>
+                        <td style={{ padding: "10px 12px", color: "#fff" }}>
+                          R$ {item.cost.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                        </td>
+                        <td style={{ padding: "10px 12px", color: "#fff", fontWeight: 700 }}>{item.whatsappLeads}</td>
+                        <td style={{ padding: "10px 12px", color: "#c084fc" }}>{item.whatsappQuotes}</td>
+                        <td style={{ padding: "10px 12px", color: "#34d399", fontWeight: 700 }}>
+                          R$ {item.whatsappRevenue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                        </td>
+                        <td style={{ padding: "10px 12px", color: item.profit >= 0 ? "#34d399" : "#f87171", fontWeight: 700 }}>
+                          R$ {item.profit.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                        </td>
+                        <td style={{ padding: "10px 12px" }}>
+                          <span
+                            style={{
+                              background: item.roas >= 4 ? "rgba(16, 185, 129, 0.2)" : "rgba(59, 130, 246, 0.2)",
+                              color: item.roas >= 4 ? "#34d399" : "#60a5fa",
+                              padding: "3px 8px",
+                              borderRadius: "6px",
+                              fontWeight: 800,
+                              fontSize: "12px",
+                            }}
+                          >
+                            {item.roas}x
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div>
+            <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#fff", marginBottom: "10px" }}>
+              Leads Analíticos do Período ({filteredReportLeads.length} leads)
+            </h3>
+
+            <div className="gads-table-scroll">
+              <table className="gads-table">
+                <thead>
+                  <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                    <th style={{ padding: "10px 12px" }}>Contato</th>
+                    <th style={{ padding: "10px 12px" }}>Palavra-Chave</th>
+                    <th style={{ padding: "10px 12px" }}>Campanha / Conjunto</th>
+                    <th style={{ padding: "10px 12px" }}>Atendente</th>
+                    <th style={{ padding: "10px 12px" }}>Etapa</th>
+                    <th style={{ padding: "10px 12px" }}>Valor Venda</th>
+                    <th style={{ padding: "10px 12px" }}>Data / Hora</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredReportLeads.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} style={{ textAlign: "center", padding: "24px", color: "#64748b" }}>
+                        Nenhum lead encontrado com estes filtros
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredReportLeads.map((l) => (
+                      <tr key={l.id} style={{ borderBottom: "1px solid #0f172a" }}>
+                        <td style={{ padding: "10px 12px" }}>
+                          <strong style={{ color: "#fff" }}>{l.leadName || "Cliente"}</strong>
+                          <div style={{ color: "#64748b", fontSize: "11px" }}>{l.leadPhone}</div>
+                        </td>
+                        <td style={{ padding: "10px 12px", color: "#38bdf8" }}>{l.keyword || "Pesquisa Direta"}</td>
+                        <td style={{ padding: "10px 12px", color: "#cbd5e1" }}>
+                          <div>{l.campaign}</div>
+                          <small style={{ color: "#64748b" }}>{l.adGroup}</small>
+                        </td>
+                        <td style={{ padding: "10px 12px" }}>
+                          <span style={{ background: "#1e293b", padding: "2px 6px", borderRadius: "4px", fontSize: "11px" }}>
+                            {l.attendantName}
+                          </span>
+                        </td>
+                        <td style={{ padding: "10px 12px" }}>
+                          {l.stage === "compra_realizada" ? (
+                            <span style={{ color: "#34d399", fontWeight: 700 }}>Compra Realizada</span>
+                          ) : l.stage === "orcamento_enviado" ? (
+                            <span style={{ color: "#c084fc", fontWeight: 600 }}>Orçamento</span>
+                          ) : l.stage === "em_atendimento" ? (
+                            <span style={{ color: "#facc15" }}>Em Atendimento</span>
+                          ) : (
+                            <span style={{ color: "#60a5fa" }}>Conversa</span>
+                          )}
+                        </td>
+                        <td style={{ padding: "10px 12px", color: l.value ? "#34d399" : "#64748b", fontWeight: l.value ? 700 : 400 }}>
+                          {l.value ? `R$ ${l.value.toLocaleString("pt-BR")}` : "—"}
+                        </td>
+                        <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
+                          {l.occurredAt}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ABA 4: ROLETA DE ATENDENTES */}
       {currentTab === "roleta" && (
         <div className="gads-panel">
           <div style={{ marginBottom: "20px" }}>
@@ -1243,9 +1798,7 @@ export default function GoogleAdsPage() {
         </div>
       )}
 
-      {/* =========================================================================
-          ABA 4 INTERATIVA: CONFIGURAÇÃO DE REGRAS DINÂMICAS & AUDITORIA
-         ========================================================================= */}
+      {/* ABA 5: CONFIGURAÇÃO DE REGRAS DINÂMICAS & AUDITORIA */}
       {currentTab === "conversoes" && (
         <div className="gads-panel">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "10px", marginBottom: "20px" }}>
@@ -1281,10 +1834,7 @@ export default function GoogleAdsPage() {
             </button>
           </div>
 
-          {/* Cards de Edição das Duas Etapas */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px", marginBottom: "28px" }}>
-            
-            {/* CARD 1: REGRAS DE ORÇAMENTO */}
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#c084fc", fontWeight: 700, fontSize: "14px", marginBottom: "6px" }}>
                 <Award size={16} /> Conversão: Orçamento Enviado
@@ -1293,7 +1843,6 @@ export default function GoogleAdsPage() {
                 Ação Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.quote.actionName}</strong>
               </small>
 
-              {/* Lista de Frases Atuais */}
               <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px", minHeight: "65px" }}>
                 {rules.quote.phrases.map((phrase) => (
                   <span
@@ -1313,7 +1862,6 @@ export default function GoogleAdsPage() {
                 ))}
               </div>
 
-              {/* Input para Adicionar Nova Frase */}
               <div style={{ display: "flex", gap: "8px" }}>
                 <input
                   type="text"
@@ -1347,7 +1895,6 @@ export default function GoogleAdsPage() {
               </div>
             </div>
 
-            {/* CARD 2: REGRAS DE COMPRA */}
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#34d399", fontWeight: 700, fontSize: "14px", marginBottom: "6px" }}>
                 <CheckCircle2 size={16} /> Conversão: Compra Realizada (com R$)
@@ -1356,7 +1903,6 @@ export default function GoogleAdsPage() {
                 Ação Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.purchase.actionName}</strong>
               </small>
 
-              {/* Lista de Frases Atuais */}
               <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px", minHeight: "65px" }}>
                 {rules.purchase.phrases.map((phrase) => (
                   <span
@@ -1376,7 +1922,6 @@ export default function GoogleAdsPage() {
                 ))}
               </div>
 
-              {/* Input para Adicionar Nova Frase */}
               <div style={{ display: "flex", gap: "8px" }}>
                 <input
                   type="text"
@@ -1411,7 +1956,6 @@ export default function GoogleAdsPage() {
             </div>
           </div>
 
-          {/* TABELA DE AUDITORIA DE FRASES DISPARADAS */}
           <div style={{ borderTop: "1px solid #1e293b", paddingTop: "20px" }}>
             <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#ffffff", marginBottom: "4px" }}>
               Auditoria de Disparos de Conversão Pelos Atendentes
