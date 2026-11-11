@@ -117,11 +117,11 @@ export function AppShell({
   const presentationMode = usePresentationMode();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
-  const [isWorkspaceSwitchPending, startWorkspaceTransition] = useTransition();
-  const [isExitSupportPending, startExitSupportTransition] = useTransition();
   const [workspaceSwitchError, setWorkspaceSwitchError] = useState(false);
-  const workspaceSelectorRef = useRef<HTMLDivElement | null>(null);
+  const [isWorkspaceSwitchPending, startWorkspaceTransition] = useTransition();
+  const workspaceSelectorRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     try {
@@ -130,23 +130,22 @@ export function AppShell({
         setSidebarCollapsed(persisted === "true");
       }
     } catch {
-      // LocalStorage access can fail in restricted environments; default to expanded.
+      // LocalStorage access can fail in private windows or restrictive environments.
     }
   }, []);
 
-  const toggleSidebar = () => {
-    setSidebarCollapsed((current) => {
-      const next = !current;
-      try {
-        window.localStorage.setItem(sidebarStorageKey, String(next));
-      } catch {
-        // Ignored.
-      }
-      return next;
-    });
-  };
+  useEffect(() => {
+    const updateViewport = () => {
+      setIsMobile(window.innerWidth <= 840);
+    };
 
-  const isMobile = typeof window !== "undefined" && window.innerWidth <= 840;
+    updateViewport();
+    window.addEventListener("resize", updateViewport);
+
+    return () => {
+      window.removeEventListener("resize", updateViewport);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isMobile || !mobileMenuOpen) {
@@ -233,17 +232,6 @@ export function AppShell({
     });
   };
 
-  const handleExitPlatformSupport = () => {
-    startExitSupportTransition(async () => {
-      const result = await exitPlatformSupportAccess();
-
-      if (result.ok) {
-        router.push(result.redirectUrl);
-        router.refresh();
-      }
-    });
-  };
-
   return (
     <div
       className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileMenuOpen ? " mobile-menu-open" : ""}`}
@@ -264,20 +252,22 @@ export function AppShell({
         <button
           className="mobile-menu-toggle"
           type="button"
+          aria-label={mobileMenuOpen ? "Fechar menu" : "Abrir menu"}
+          aria-controls="app-sidebar"
           aria-expanded={mobileMenuOpen}
-          aria-label={mobileMenuOpen ? "Fechar menu de navegação" : "Abrir menu de navegação"}
-          onClick={() => setMobileMenuOpen((open) => !open)}
+          onClick={() => setMobileMenuOpen((current) => !current)}
         >
           {mobileMenuOpen ? (
-            <X size={20} strokeWidth={2.2} />
+            <X aria-hidden="true" size={20} strokeWidth={2.2} />
           ) : (
-            <Menu size={20} strokeWidth={2.2} />
+            <Menu aria-hidden="true" size={20} strokeWidth={2.2} />
           )}
         </button>
       </header>
 
       <aside
-        className={`app-sidebar${sidebarCollapsed ? " collapsed" : ""}${mobileMenuOpen ? " open" : ""}`}
+        id="app-sidebar"
+        className="sidebar"
         aria-hidden={isMobile && !mobileMenuOpen}
         inert={isMobile && !mobileMenuOpen}
       >
@@ -296,71 +286,101 @@ export function AppShell({
           <button
             className="sidebar-toggle desktop-sidebar-toggle"
             type="button"
-            aria-label={sidebarCollapsed ? "Expandir barra lateral" : "Recolher barra lateral"}
-            onClick={toggleSidebar}
+            aria-label={sidebarCollapsed ? "Expandir menu" : "Recolher menu"}
+            aria-expanded={!sidebarCollapsed}
+            onClick={() => setSidebarCollapsed((current) => !current)}
+            title={sidebarCollapsed ? "Expandir menu" : "Recolher menu"}
           >
             {sidebarCollapsed ? (
-              <PanelLeftOpen size={18} strokeWidth={2.1} />
+              <PanelLeftOpen aria-hidden="true" size={18} strokeWidth={2.2} />
             ) : (
-              <PanelLeftClose size={18} strokeWidth={2.1} />
+              <PanelLeftClose aria-hidden="true" size={18} strokeWidth={2.2} />
             )}
+            <span className="sidebar-toggle-label">
+              {sidebarCollapsed ? "Expandir menu" : "Recolher menu"}
+            </span>
+          </button>
+          <button
+            className="sidebar-toggle mobile-sidebar-close"
+            type="button"
+            aria-label="Fechar menu"
+            onClick={closeMobileMenu}
+          >
+            <X aria-hidden="true" size={20} strokeWidth={2.2} />
           </button>
         </div>
 
         <section
-          className={`sidebar-workspace-card${canSelectWorkspace ? " selectable" : ""}${workspaceMenuOpen ? " menu-open" : ""}`}
           ref={workspaceSelectorRef}
+          className={`workspace-strip${canSelectWorkspace ? " workspace-selector" : ""}`}
+          aria-label="Workspace atual"
         >
           {canSelectWorkspace ? (
             <>
               <button
                 className="workspace-selector-trigger"
                 type="button"
+                aria-label={
+                  presentationMode
+                    ? "Selecionar workspace demonstrativo"
+                    : `Selecionar empresa. Atual: ${workspace?.name ?? "nenhuma"}`
+                }
+                aria-controls="workspace-selector-menu"
                 aria-expanded={workspaceMenuOpen}
-                aria-haspopup="listbox"
-                aria-label="Selecionar workspace"
                 disabled={isWorkspaceSwitchPending}
                 onClick={openWorkspaceMenu}
+                title="Selecionar empresa"
               >
-                <span>Workspace</span>
-                <strong>
-                  <PresentationMask placeholder="Workspace demonstrativo">
-                    {workspace?.name ?? "Workspace indisponível"}
-                  </PresentationMask>
-                </strong>
-                <small>
-                  <PresentationMask placeholder="acesso demonstrativo">
-                    {workspace
-                      ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
-                      : "Sessão autenticada"}
-                </PresentationMask>
-                </small>
-                <ChevronsUpDown aria-hidden="true" size={16} strokeWidth={2.2} />
+                <span className="workspace-selector-icon" aria-hidden="true">
+                  <Building2 size={18} strokeWidth={2.1} />
+                </span>
+                <span className="workspace-selector-copy">
+                  <span>Workspace</span>
+                  <strong>
+                    <PresentationMask placeholder="Workspace demonstrativo">
+                      {workspace?.name ?? "Selecionar empresa"}
+                    </PresentationMask>
+                  </strong>
+                  <small>
+                    <PresentationMask placeholder="acesso demonstrativo">
+                      {workspace
+                        ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
+                        : `${workspaces.length} ${workspaces.length === 1 ? "empresa disponível" : "empresas disponíveis"}`}
+                    </PresentationMask>
+                  </small>
+                </span>
+                <ChevronsUpDown
+                  className="workspace-selector-chevron"
+                  aria-hidden="true"
+                  size={17}
+                  strokeWidth={2.1}
+                />
               </button>
 
               <div
+                id="workspace-selector-menu"
                 className="workspace-selector-menu"
+                role="menu"
+                aria-label="Empresas autorizadas"
                 hidden={!workspaceMenuOpen}
-                role="listbox"
-                aria-label="Workspaces disponíveis"
               >
-                {workspaces.map((availableWorkspace) => {
+                {workspaces.map((availableWorkspace, index) => {
                   const selected = availableWorkspace.id === workspace?.id;
 
                   return (
                     <button
-                      className={`workspace-selector-option${selected ? " selected" : ""}`}
                       key={availableWorkspace.id}
                       type="button"
-                      role="option"
-                      aria-selected={selected}
-                      disabled={isWorkspaceSwitchPending}
+                      role="menuitemradio"
+                      aria-checked={selected}
+                      disabled={selected || isWorkspaceSwitchPending}
                       onClick={() => selectWorkspace(availableWorkspace.id)}
                     >
-                      <Building2 aria-hidden="true" size={17} strokeWidth={2.1} />
-                      <span className="workspace-selector-option-copy">
+                      <span>
                         <strong>
-                          <PresentationMask placeholder="Workspace demonstrativo">
+                          <PresentationMask
+                            placeholder={`Workspace ${index + 1}`}
+                          >
                             {availableWorkspace.name}
                           </PresentationMask>
                         </strong>
@@ -382,21 +402,26 @@ export function AppShell({
               </div>
             </>
           ) : (
-            <>
-              <span>Workspace</span>
-              <strong>
-                <PresentationMask placeholder="Workspace demonstrativo">
-                  {workspace?.name ?? "Workspace indisponível"}
-                </PresentationMask>
-              </strong>
-              <small>
-                <PresentationMask placeholder="acesso demonstrativo">
-                  {workspace
-                    ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
-                    : "Sessão autenticada"}
-                </PresentationMask>
-              </small>
-            </>
+            <div className="workspace-strip-copy">
+              <span className="workspace-selector-icon" aria-hidden="true">
+                <Building2 size={18} strokeWidth={2.1} />
+              </span>
+              <span className="workspace-selector-copy">
+                <span>Workspace</span>
+                <strong>
+                  <PresentationMask placeholder="Workspace demonstrativo">
+                    {workspace?.name ?? "Nenhum workspace selecionado"}
+                  </PresentationMask>
+                </strong>
+                <small>
+                  <PresentationMask placeholder="acesso demonstrativo">
+                    {workspace
+                      ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
+                      : "Acesso de suporte"}
+                  </PresentationMask>
+                </small>
+              </span>
+            </div>
           )}
         </section>
 
