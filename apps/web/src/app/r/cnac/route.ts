@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
-
+export const dynamic = "force-dynamic";
 /**
  * Rota de Redirecionamento, Roleta e Registro de Leads (CNAC Tapetes)
  * Caminho: apps/web/src/app/r/cnac/route.ts
