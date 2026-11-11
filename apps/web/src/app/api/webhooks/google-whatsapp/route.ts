@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 
+export const dynamic = "force-dynamic";
+
 /**
- * Webhook Oficial do WhatsApp para o Módulo Google Ads
+ * Webhook Oficial do WhatsApp para o Módulo Google Ads (Uazapi / Evolution)
  * Caminho: apps/web/src/app/api/webhooks/google-whatsapp/route.ts
  */
 
@@ -34,7 +36,7 @@ function extractTrackingTag(text: string): { gclid?: string; keyword?: string; c
   const invisible = decodeZeroWidth(text);
   if (invisible && invisible.includes("ref:")) {
     const parts = invisible.split("|");
-    const result: any = {};
+    const result: Record<string, string> = {};
     for (const p of parts) {
       if (p.startsWith("ref:")) result.gclid = p.replace("ref:", "");
       if (p.startsWith("kw:")) result.keyword = p.replace("kw:", "");
@@ -60,8 +62,8 @@ function extractTrackingTag(text: string): { gclid?: string; keyword?: string; c
 function extractMonetaryValue(text: string): number | null {
   const match = text.match(/(?:r\$|reais)\s*([\d\.,]+)/i) || text.match(/([\d\.,]+)\s*(?:reais)/i);
   if (match) {
-    let clean = match[1].replace(/\./g, "").replace(",", ".");
-    let val = parseFloat(clean);
+    const clean = match[1].replace(/\./g, "").replace(",", ".");
+    const val = parseFloat(clean);
     return isNaN(val) ? null : val;
   }
   return null;
@@ -117,10 +119,11 @@ export async function POST(request: NextRequest) {
     // =========================================================================
     if (!fromMe) {
       const tracking = extractTrackingTag(messageText);
+      const gclid = tracking?.gclid;
 
-      if (tracking?.gclid) {
+      if (gclid) {
         // Procura se já existe o lead registrado no clique da roleta
-        let leadIndex = leads.findIndex((l) => l.gclid === tracking.gclid || l.id.includes(tracking.gclid.slice(0, 15)));
+        const leadIndex = leads.findIndex((l: any) => l.gclid === gclid || (l.id && l.id.includes(gclid.slice(0, 15))));
 
         if (leadIndex !== -1) {
           // Atualiza com o Nome e Telefone REAIS do WhatsApp!
@@ -128,20 +131,20 @@ export async function POST(request: NextRequest) {
           leads[leadIndex].leadPhone = cleanPhone;
           leads[leadIndex].stage = "conversa_iniciada";
           leads[leadIndex].firstMessageAt = new Date().toISOString();
-          if (tracking.keyword) leads[leadIndex].keyword = tracking.keyword;
-          if (tracking.campaign) leads[leadIndex].campaign = tracking.campaign;
-          if (tracking.adGroup) leads[leadIndex].adGroup = tracking.adGroup;
+          if (tracking?.keyword) leads[leadIndex].keyword = tracking.keyword;
+          if (tracking?.campaign) leads[leadIndex].campaign = tracking.campaign;
+          if (tracking?.adGroup) leads[leadIndex].adGroup = tracking.adGroup;
         } else {
           // Cria novo lead completo
           leads.unshift({
-            id: `g_${tracking.gclid.slice(0, 15)}_${Date.now()}`,
+            id: `g_${gclid.slice(0, 15)}_${Date.now()}`,
             leadName: pushName,
             leadPhone: cleanPhone,
             attendantName: "Roleta CNAC",
-            keyword: tracking.keyword || "Pesquisa Google",
-            campaign: tracking.campaign || "Campanha Pesquisa",
-            adGroup: tracking.adGroup || "Geral",
-            gclid: tracking.gclid,
+            keyword: tracking?.keyword || "Pesquisa Google",
+            campaign: tracking?.campaign || "Campanha Pesquisa",
+            adGroup: tracking?.adGroup || "Geral",
+            gclid: gclid,
             conversionType: "conversa_iniciada",
             stage: "conversa_iniciada",
             status: "queued",
@@ -156,7 +159,7 @@ export async function POST(request: NextRequest) {
           action: "lead_identified",
           leadName: pushName,
           leadPhone: cleanPhone,
-          gclid: tracking.gclid,
+          gclid: gclid,
         });
       }
     }
@@ -166,7 +169,7 @@ export async function POST(request: NextRequest) {
     // =========================================================================
     if (fromMe && cleanPhone) {
       const lowerText = messageText.toLowerCase();
-      const leadIndex = leads.findIndex((l) => l.leadPhone === cleanPhone);
+      const leadIndex = leads.findIndex((l: any) => l.leadPhone === cleanPhone);
 
       if (leadIndex !== -1) {
         // Gatilho: Orçamento Enviado
@@ -212,6 +215,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, action: "ignored" });
   } catch (error: any) {
     console.error("Erro no processamento do webhook Google WhatsApp:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error?.message || "Internal error" }, { status: 500 });
   }
 }
