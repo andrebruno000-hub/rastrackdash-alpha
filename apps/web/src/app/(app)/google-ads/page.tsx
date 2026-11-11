@@ -22,6 +22,9 @@ import {
   Award,
   CheckCheck,
   ExternalLink,
+  Plus,
+  X,
+  Save,
 } from "lucide-react";
 
 interface Attendant {
@@ -52,6 +55,17 @@ interface GoogleLeadEvent {
   triggerPhrase?: string;
 }
 
+interface ConversionRules {
+  quote: {
+    actionName: string;
+    phrases: string[];
+  };
+  purchase: {
+    actionName: string;
+    phrases: string[];
+  };
+}
+
 export default function GoogleAdsPage() {
   const [currentTab, setCurrentTab] = useState<"leads" | "funil" | "roleta" | "conversoes">("leads");
 
@@ -74,33 +88,63 @@ export default function GoogleAdsPage() {
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
 
-  // Base Real de Leads
+  // Base Real de Leads e Auditoria
   const [leadEvents, setLeadEvents] = useState<GoogleLeadEvent[]>([]);
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [filterKeyword, setFilterKeyword] = useState("");
   const [filterAttendant, setFilterAttendant] = useState("all");
   const [filterStage, setFilterStage] = useState("all");
 
-  const fetchLeads = async () => {
+  // Regras Dinâmicas de Conversão
+  const [rules, setRules] = useState<ConversionRules>({
+    quote: {
+      actionName: "WhatsApp - Orçamento Enviado",
+      phrases: ["orçamento enviado", "orcamento enviado", "segue o orçamento", "proposta enviada", "segue seu orçamento"],
+    },
+    purchase: {
+      actionName: "WhatsApp - Compra Realizada",
+      phrases: ["pedido fechado", "compra realizada", "venda confirmada", "pedido confirmado", "segue copia do pedido"],
+    },
+  });
+
+  const [newQuotePhrase, setNewQuotePhrase] = useState("");
+  const [newPurchasePhrase, setNewPurchasePhrase] = useState("");
+  const [isSavingRules, setIsSavingRules] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  // Carregar Leads, Auditorias e Regras
+  const fetchLeadsAndAudits = async () => {
     setIsRefreshing(true);
     try {
-      const res = await fetch("/api/google-ads/leads");
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          setLeadEvents(data);
-        }
+      const [leadsRes, auditsRes, rulesRes] = await Promise.all([
+        fetch("/api/google-ads/leads"),
+        fetch("/api/google-ads/leads?type=audits"),
+        fetch("/api/google-ads/leads?type=rules"),
+      ]);
+
+      if (leadsRes.ok) {
+        const data = await leadsRes.json();
+        if (Array.isArray(data)) setLeadEvents(data);
+      }
+      if (auditsRes.ok) {
+        const data = await auditsRes.json();
+        if (Array.isArray(data)) setAuditLogs(data);
+      }
+      if (rulesRes.ok) {
+        const data = await rulesRes.json();
+        if (data && data.quote && data.purchase) setRules(data);
       }
     } catch (e) {
-      console.error("Erro ao carregar leads:", e);
+      console.error("Erro ao carregar dados:", e);
     } finally {
       setTimeout(() => setIsRefreshing(false), 300);
     }
   };
 
   useEffect(() => {
-    fetchLeads();
-    const interval = setInterval(fetchLeads, 4000);
+    fetchLeadsAndAudits();
+    const interval = setInterval(fetchLeadsAndAudits, 4000);
     return () => clearInterval(interval);
   }, []);
 
@@ -110,6 +154,54 @@ export default function GoogleAdsPage() {
     }
   }, [attendants]);
 
+  // Ações de Regras Dinâmicas
+  const handleAddPhrase = (type: "quote" | "purchase", phrase: string) => {
+    const clean = phrase.trim().toLowerCase();
+    if (!clean) return;
+    if (rules[type].phrases.includes(clean)) return;
+
+    setRules({
+      ...rules,
+      [type]: {
+        ...rules[type],
+        phrases: [...rules[type].phrases, clean],
+      },
+    });
+
+    if (type === "quote") setNewQuotePhrase("");
+    if (type === "purchase") setNewPurchasePhrase("");
+  };
+
+  const handleRemovePhrase = (type: "quote" | "purchase", phraseToRemove: string) => {
+    setRules({
+      ...rules,
+      [type]: {
+        ...rules[type],
+        phrases: rules[type].phrases.filter((p) => p !== phraseToRemove),
+      },
+    });
+  };
+
+  const handleSaveRules = async () => {
+    setIsSavingRules(true);
+    try {
+      const res = await fetch("/api/google-ads/leads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "save_rules", rules }),
+      });
+      if (res.ok) {
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 3000);
+      }
+    } catch (e) {
+      console.error("Erro ao salvar regras:", e);
+    } finally {
+      setIsSavingRules(false);
+    }
+  };
+
+  // Movimentação do Funil via PATCH
   const updateLeadStage = async (id: string, newStage: GoogleLeadEvent["stage"], value?: number) => {
     setLeadEvents((prev) =>
       prev.map((l) => (l.id === id ? { ...l, stage: newStage, value: value !== undefined ? value : l.value } : l))
@@ -407,6 +499,30 @@ export default function GoogleAdsPage() {
           transform: translateY(-2px);
         }
 
+        /* Tag Pill Style */
+        .phrase-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 5px 10px;
+          border-radius: 6px;
+          font-size: 12px;
+          font-weight: 600;
+        }
+        .phrase-remove-btn {
+          background: transparent;
+          border: none;
+          color: inherit;
+          opacity: 0.7;
+          cursor: pointer;
+          display: inline-flex;
+          align-items: center;
+          padding: 0;
+        }
+        .phrase-remove-btn:hover {
+          opacity: 1;
+        }
+
         @media (min-width: 768px) {
           .gads-wrapper {
             padding: 24px 32px;
@@ -460,7 +576,7 @@ export default function GoogleAdsPage() {
             </span>
           </div>
           <p className="gads-subtitle">
-            Atribuição precisa de palavras-chave, funil CRM por etapas, roleta justa de WhatsApp e auditoria de conversões.
+            Atribuição precisa de palavras-chave, funil CRM por etapas, roleta justa de WhatsApp e regras dinâmicas de conversão.
           </p>
         </div>
 
@@ -602,7 +718,7 @@ export default function GoogleAdsPage() {
               </select>
 
               <button
-                onClick={fetchLeads}
+                onClick={fetchLeadsAndAudits}
                 disabled={isRefreshing}
                 style={{
                   background: "#1e293b",
@@ -753,7 +869,6 @@ export default function GoogleAdsPage() {
           </div>
 
           <div className="kanban-grid">
-            {/* COLUNA 1 */}
             <div className="kanban-col">
               <div className="kanban-col-header">
                 <span className="kanban-col-title" style={{ color: "#38bdf8" }}>
@@ -805,7 +920,6 @@ export default function GoogleAdsPage() {
               </div>
             </div>
 
-            {/* COLUNA 2 */}
             <div className="kanban-col">
               <div className="kanban-col-header">
                 <span className="kanban-col-title" style={{ color: "#facc15" }}>
@@ -862,7 +976,6 @@ export default function GoogleAdsPage() {
               </div>
             </div>
 
-            {/* COLUNA 3 */}
             <div className="kanban-col">
               <div className="kanban-col-header">
                 <span className="kanban-col-title" style={{ color: "#c084fc" }}>
@@ -925,7 +1038,6 @@ export default function GoogleAdsPage() {
               </div>
             </div>
 
-            {/* COLUNA 4 */}
             <div className="kanban-col">
               <div className="kanban-col-header">
                 <span className="kanban-col-title" style={{ color: "#34d399" }}>
@@ -1131,100 +1243,227 @@ export default function GoogleAdsPage() {
         </div>
       )}
 
-      {/* ABA 4: REGRAS DE CONVERSÃO & AUDITORIA DE FRASES */}
+      {/* =========================================================================
+          ABA 4 INTERATIVA: CONFIGURAÇÃO DE REGRAS DINÂMICAS & AUDITORIA
+         ========================================================================= */}
       {currentTab === "conversoes" && (
         <div className="gads-panel">
-          <div style={{ marginBottom: "20px" }}>
-            <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-              Regras de Conversão & Auditoria de Frases do WhatsApp
-            </h2>
-            <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-              Verifique com 100% de certeza se o atendente utilizou as palavras-chave de conversão dentro da conversa.
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "10px", marginBottom: "20px" }}>
+            <div>
+              <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
+                Configuração Dinâmica de Frases & Regras Google Ads
+              </h2>
+              <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
+                Edite as frases que disparam as conversões no WhatsApp em tempo real, sem precisar mexer em código.
+              </p>
+            </div>
+
+            <button
+              onClick={handleSaveRules}
+              disabled={isSavingRules}
+              style={{
+                background: saveSuccess ? "#10b981" : "#2563eb",
+                color: "#fff",
+                border: "none",
+                borderRadius: "8px",
+                padding: "10px 18px",
+                fontSize: "13px",
+                fontWeight: 700,
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+                transition: "background 0.2s",
+              }}
+            >
+              {saveSuccess ? <CheckCircle2 size={16} /> : <Save size={16} />}
+              {isSavingRules ? "Salvando..." : saveSuccess ? "Regras Salvas!" : "Salvar Regras de Conversão"}
+            </button>
+          </div>
+
+          {/* Cards de Edição das Duas Etapas */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px", marginBottom: "28px" }}>
+            
+            {/* CARD 1: REGRAS DE ORÇAMENTO */}
+            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#c084fc", fontWeight: 700, fontSize: "14px", marginBottom: "6px" }}>
+                <Award size={16} /> Conversão: Orçamento Enviado
+              </div>
+              <small style={{ color: "#64748b", display: "block", marginBottom: "14px" }}>
+                Ação Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.quote.actionName}</strong>
+              </small>
+
+              {/* Lista de Frases Atuais */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px", minHeight: "65px" }}>
+                {rules.quote.phrases.map((phrase) => (
+                  <span
+                    key={phrase}
+                    className="phrase-pill"
+                    style={{ background: "rgba(192, 132, 252, 0.15)", color: "#c084fc", border: "1px solid rgba(192, 132, 252, 0.3)" }}
+                  >
+                    "{phrase}"
+                    <button
+                      onClick={() => handleRemovePhrase("quote", phrase)}
+                      className="phrase-remove-btn"
+                      title="Remover frase"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+
+              {/* Input para Adicionar Nova Frase */}
+              <div style={{ display: "flex", gap: "8px" }}>
+                <input
+                  type="text"
+                  placeholder="Nova frase (ex: proposta enviada)"
+                  value={newQuotePhrase}
+                  onChange={(e) => setNewQuotePhrase(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleAddPhrase("quote", newQuotePhrase)}
+                  className="gads-input-field"
+                  style={{ padding: "8px 12px", fontSize: "12px" }}
+                />
+                <button
+                  type="button"
+                  onClick={() => handleAddPhrase("quote", newQuotePhrase)}
+                  style={{
+                    background: "#1e293b",
+                    border: "1px solid #334155",
+                    color: "#c084fc",
+                    borderRadius: "8px",
+                    padding: "8px 12px",
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "4px",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  <Plus size={13} /> Adicionar
+                </button>
+              </div>
+            </div>
+
+            {/* CARD 2: REGRAS DE COMPRA */}
+            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#34d399", fontWeight: 700, fontSize: "14px", marginBottom: "6px" }}>
+                <CheckCircle2 size={16} /> Conversão: Compra Realizada (com R$)
+              </div>
+              <small style={{ color: "#64748b", display: "block", marginBottom: "14px" }}>
+                Ação Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.purchase.actionName}</strong>
+              </small>
+
+              {/* Lista de Frases Atuais */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px", minHeight: "65px" }}>
+                {rules.purchase.phrases.map((phrase) => (
+                  <span
+                    key={phrase}
+                    className="phrase-pill"
+                    style={{ background: "rgba(52, 211, 153, 0.15)", color: "#34d399", border: "1px solid rgba(52, 211, 153, 0.3)" }}
+                  >
+                    "{phrase}"
+                    <button
+                      onClick={() => handleRemovePhrase("purchase", phrase)}
+                      className="phrase-remove-btn"
+                      title="Remover frase"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+
+              {/* Input para Adicionar Nova Frase */}
+              <div style={{ display: "flex", gap: "8px" }}>
+                <input
+                  type="text"
+                  placeholder="Nova frase (ex: pix confirmado)"
+                  value={newPurchasePhrase}
+                  onChange={(e) => setNewPurchasePhrase(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleAddPhrase("purchase", newPurchasePhrase)}
+                  className="gads-input-field"
+                  style={{ padding: "8px 12px", fontSize: "12px" }}
+                />
+                <button
+                  type="button"
+                  onClick={() => handleAddPhrase("purchase", newPurchasePhrase)}
+                  style={{
+                    background: "#1e293b",
+                    border: "1px solid #334155",
+                    color: "#34d399",
+                    borderRadius: "8px",
+                    padding: "8px 12px",
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "4px",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  <Plus size={13} /> Adicionar
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* TABELA DE AUDITORIA DE FRASES DISPARADAS */}
+          <div style={{ borderTop: "1px solid #1e293b", paddingTop: "20px" }}>
+            <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#ffffff", marginBottom: "4px" }}>
+              Auditoria de Disparos de Conversão Pelos Atendentes
+            </h3>
+            <p style={{ color: "#64748b", fontSize: "12px", marginBottom: "14px" }}>
+              Registro exato de quando a Josi ou o Sérgio usaram as palavras-chave na conversa para acionar a conversão.
             </p>
-          </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "14px", marginBottom: "28px" }}>
-            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "16px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#38bdf8", fontWeight: 700, fontSize: "13px" }}>
-                <MessageSquare size={15} /> Regra 1: Conversa Iniciada
+            {auditLogs.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "36px 16px", color: "#64748b", background: "#090f20", borderRadius: "10px" }}>
+                <Clock size={32} color="#334155" style={{ margin: "0 auto 8px", display: "block" }} />
+                <strong style={{ display: "block", color: "#94a3b8", fontSize: "13px" }}>
+                  Nenhum disparo de conversão registrado ainda
+                </strong>
+                <p style={{ fontSize: "12px", margin: "6px auto 0", maxWidth: "420px" }}>
+                  Quando o atendente responder um cliente no WhatsApp com qualquer uma das frases cadastradas acima, o registro auditado aparecerá aqui.
+                </p>
               </div>
-              <p style={{ color: "#94a3b8", fontSize: "12px", margin: "8px 0" }}>
-                Acionada quando o cliente clica no anúncio e envia a primeira mensagem com a tag invisível Unicode.
-              </p>
-              <div style={{ background: "#0f172a", padding: "6px 8px", borderRadius: "6px", fontSize: "11px", color: "#64748b" }}>
-                Evento Google OCI: <strong style={{ color: "#e2e8f0" }}>WhatsApp - Conversa Iniciada</strong>
-              </div>
-            </div>
-
-            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "16px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#c084fc", fontWeight: 700, fontSize: "13px" }}>
-                <Award size={15} /> Regra 2: Orçamento Enviado
-              </div>
-              <p style={{ color: "#94a3b8", fontSize: "12px", margin: "8px 0" }}>
-                Acionada quando o atendente digita na conversa: <code style={{ color: "#e2e8f0" }}>"orçamento enviado"</code> ou <code style={{ color: "#e2e8f0" }}>"segue o orçamento"</code>.
-              </p>
-              <div style={{ background: "#0f172a", padding: "6px 8px", borderRadius: "6px", fontSize: "11px", color: "#64748b" }}>
-                Evento Google OCI: <strong style={{ color: "#e2e8f0" }}>WhatsApp - Orçamento Enviado</strong>
-              </div>
-            </div>
-
-            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "16px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#34d399", fontWeight: 700, fontSize: "13px" }}>
-                <CheckCircle2 size={15} /> Regra 3: Compra Realizada
-              </div>
-              <p style={{ color: "#94a3b8", fontSize: "12px", margin: "8px 0" }}>
-                Acionada quando o atendente digita: <code style={{ color: "#e2e8f0" }}>"pedido fechado R$ 1500"</code> ou <code style={{ color: "#e2e8f0" }}>"compra realizada"</code>.
-              </p>
-              <div style={{ background: "#0f172a", padding: "6px 8px", borderRadius: "6px", fontSize: "11px", color: "#64748b" }}>
-                Evento Google OCI: <strong style={{ color: "#e2e8f0" }}>WhatsApp - Compra Realizada</strong> (com valor monetário)
-              </div>
-            </div>
-          </div>
-
-          <h3 style={{ fontSize: "14px", fontWeight: 700, color: "#fff", marginBottom: "10px" }}>
-            Auditoria de Disparos de Conversão Pelos Atendentes
-          </h3>
-
-          {leadEvents.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length === 0 ? (
-            <div style={{ textAlign: "center", padding: "36px 16px", color: "#64748b", background: "#090f20", borderRadius: "10px" }}>
-              <Clock size={32} color="#334155" style={{ margin: "0 auto 8px", display: "block" }} />
-              <strong style={{ display: "block", color: "#94a3b8", fontSize: "13px" }}>
-                Nenhuma frase gatilho acionada ainda
-              </strong>
-              <p style={{ fontSize: "12px", margin: "6px auto 0", maxWidth: "420px" }}>
-                Quando a Josi ou o Sérgio responderem um cliente digitando as palavras-chave de conversão no WhatsApp, o registro auditado aparecerá aqui.
-              </p>
-            </div>
-          ) : (
-            <div className="gads-table-scroll">
-              <table className="gads-table">
-                <thead>
-                  <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
-                    <th style={{ padding: "10px 12px" }}>Atendente</th>
-                    <th style={{ padding: "10px 12px" }}>Cliente / Telefone</th>
-                    <th style={{ padding: "10px 12px" }}>Conversão Acionada</th>
-                    <th style={{ padding: "10px 12px" }}>Valor Registrado</th>
-                    <th style={{ padding: "10px 12px" }}>Status Google OCI</th>
-                    <th style={{ padding: "10px 12px" }}>Data / Hora</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {leadEvents
-                    .filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada")
-                    .map((item) => (
+            ) : (
+              <div className="gads-table-scroll">
+                <table className="gads-table">
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                      <th style={{ padding: "10px 12px" }}>Atendente</th>
+                      <th style={{ padding: "10px 12px" }}>Cliente / Telefone</th>
+                      <th style={{ padding: "10px 12px" }}>Ação Disparada</th>
+                      <th style={{ padding: "10px 12px" }}>Frase Detectada no Chat</th>
+                      <th style={{ padding: "10px 12px" }}>Valor Registrado</th>
+                      <th style={{ padding: "10px 12px" }}>Status Google OCI</th>
+                      <th style={{ padding: "10px 12px" }}>Data / Hora</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditLogs.map((item) => (
                       <tr key={item.id} style={{ borderBottom: "1px solid #0f172a" }}>
                         <td style={{ padding: "10px 12px", fontWeight: 600, color: "#fff" }}>
-                          {item.attendantName}
+                          {item.attendant || "Atendente"}
                         </td>
                         <td style={{ padding: "10px 12px", color: "#94a3b8" }}>
                           {item.leadName || item.leadPhone}
                         </td>
                         <td style={{ padding: "10px 12px" }}>
-                          {item.stage === "orcamento_enviado" ? (
+                          {item.action === "orcamento_enviado" ? (
                             <span style={{ color: "#c084fc", fontWeight: 600 }}>Orçamento Enviado</span>
-                          ) : (
+                          ) : item.action === "compra_realizada" ? (
                             <span style={{ color: "#34d399", fontWeight: 600 }}>Compra Realizada</span>
+                          ) : (
+                            <span style={{ color: "#38bdf8", fontWeight: 600 }}>Conversa Iniciada</span>
                           )}
+                        </td>
+                        <td style={{ padding: "10px 12px", color: "#e2e8f0", fontStyle: "italic", maxWidth: "250px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          "{item.detectedPhrase}"
                         </td>
                         <td style={{ padding: "10px 12px", color: "#fff" }}>
                           {item.value ? `R$ ${item.value.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}` : "—"}
@@ -1234,15 +1473,16 @@ export default function GoogleAdsPage() {
                             <CheckCircle2 size={12} /> Fila OCI Ativa
                           </span>
                         </td>
-                        <td style={{ padding: "10px 12px", color: "#64748b" }}>
-                          {item.purchasedAt || item.quotedAt || item.occurredAt}
+                        <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
+                          {item.timestamp ? new Date(item.timestamp).toLocaleString("pt-BR") : "—"}
                         </td>
                       </tr>
                     ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
