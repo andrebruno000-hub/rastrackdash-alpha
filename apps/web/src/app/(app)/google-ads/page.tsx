@@ -46,7 +46,9 @@ interface GoogleLeadEvent {
   attendantName: string;
   keyword: string;
   campaign: string;
+  campaignName?: string;
   adGroup: string;
+  adGroupName?: string;
   gclid: string;
   conversionType?: "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
   stage?: "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
@@ -220,6 +222,62 @@ export default function GoogleAdsPage() {
     downloadAnchor.remove();
   };
 
+  const handleDeleteLead = async (id: string) => {
+    if (!confirm("Deseja realmente remover este lead?")) return;
+    try {
+      const res = await fetch(`/api/google-ads/leads?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (res.ok) {
+        await fetchData();
+      }
+    } catch (err) {
+      console.error("Erro ao deletar lead:", err);
+    }
+  };
+
+  const handleCleanAttendantLeads = async () => {
+    if (!confirm("Remover os registros que possuem os nÃºmeros dos prÃ³prios atendentes (Josi e SÃ©rgio)?")) return;
+    try {
+      const res = await fetch("/api/google-ads/leads?action=clean_attendants", { method: "DELETE" });
+      if (res.ok) {
+        await fetchData();
+      }
+    } catch (err) {
+      console.error("Erro ao limpar leads:", err);
+    }
+  };
+
+  // VerificaÃ§Ã£o de nÃºmeros de atendentes (Josi e SÃ©rgio) para nunca exibir como leads
+  const ATTENDANT_PHONES = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
+  const isAttendantLead = (phone: string): boolean => {
+    const p = String(phone || "").replace(/\D/g, "");
+    if (!p) return false;
+    return ATTENDANT_PHONES.some(
+      (att) => p === att || (p.length >= 8 && att.length >= 8 && p.slice(-8) === att.slice(-8))
+    );
+  };
+
+  // SincronizaÃ§Ã£o & Reenvio de ConversÃµes OCI para o Google Ads
+  const [isSyncingOci, setIsSyncingOci] = useState(false);
+  const [ociSyncResult, setOciSyncResult] = useState<any>(null);
+
+  const handleTriggerOciSync = async (force: boolean = true, id?: string) => {
+    setIsSyncingOci(true);
+    try {
+      const res = await fetch("/api/google-ads/oci", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force, id }),
+      });
+      const data = await res.json();
+      setOciSyncResult(data);
+      await fetchData();
+    } catch (err) {
+      console.error("Erro ao sincronizar OCI:", err);
+    } finally {
+      setIsSyncingOci(false);
+    }
+  };
+
   // Carregar dados
   const fetchData = async () => {
     setIsRefreshing(true);
@@ -240,7 +298,10 @@ export default function GoogleAdsPage() {
 
       if (leadsRes.ok) {
         const data = await leadsRes.json();
-        if (Array.isArray(data)) setLeadEvents(data);
+        if (Array.isArray(data)) {
+          // Garante que leads com nÃºmeros dos atendentes sejam 100% filtrados
+          setLeadEvents(data.filter((l: any) => !isAttendantLead(l.leadPhone)));
+        }
       }
       if (auditsRes.ok) {
         const data = await auditsRes.json();
@@ -1017,6 +1078,32 @@ export default function GoogleAdsPage() {
               >
                 <RefreshCw size={13} style={{ transform: isRefreshing ? "rotate(180deg)" : "none", transition: "transform 0.4s" }} />
               </button>
+
+              {leadEvents.some((l) => {
+                const p = String(l.leadPhone || "").replace(/\D/g, "");
+                return p.includes("980659269") || p.includes("994060206");
+              }) && (
+                <button
+                  type="button"
+                  onClick={handleCleanAttendantLeads}
+                  style={{
+                    background: "rgba(239, 68, 68, 0.15)",
+                    border: "1px solid rgba(239, 68, 68, 0.4)",
+                    color: "#f87171",
+                    borderRadius: "8px",
+                    padding: "9px 12px",
+                    fontSize: "12px",
+                    fontWeight: "600",
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                  title="Remove os registros com telefones da Josi e do SÃ©rgio criados por acessos diretos"
+                >
+                  <Trash2 size={13} /> Limpar Leads com Telefones dos Atendentes
+                </button>
+              )}
             </div>
           </div>
 
@@ -1061,6 +1148,7 @@ export default function GoogleAdsPage() {
                     <th style={{ padding: "10px 12px" }}>Etapa do Funil</th>
                     <th style={{ padding: "10px 12px" }}>GCLID / OCI</th>
                     <th style={{ padding: "10px 12px" }}>Data / Hora</th>
+                    <th style={{ padding: "10px 12px", textAlign: "right" }}>AÃ§Ãµes</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1093,8 +1181,8 @@ export default function GoogleAdsPage() {
                         </td>
 
                         <td style={{ padding: "10px 12px", color: "#cbd5e1" }}>
-                          <div><strong>{event.campaign || "Campanha Pesquisa"}</strong></div>
-                          <small style={{ color: "#64748b" }}>{event.adGroup || "Geral"}</small>
+                          <div><strong style={{ color: "#fff" }}>{event.campaignName || event.campaign || "Campanha Pesquisa"}</strong></div>
+                          <div style={{ color: "#94a3b8", fontSize: "12px" }}>{event.adGroupName || event.adGroup || "Conjunto Geral"}</div>
                         </td>
 
                         <td style={{ padding: "10px 12px" }}>
@@ -1133,13 +1221,77 @@ export default function GoogleAdsPage() {
                         </td>
 
                         <td style={{ padding: "10px 12px" }}>
-                          <span style={{ color: "#38bdf8", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px" }}>
-                            <Clock size={12} /> Fila MaturaÃ§Ã£o
-                          </span>
+                          {event.status === "sent" ? (
+                            <span style={{ color: "#34d399", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px", fontWeight: 700 }}>
+                              <CheckCircle2 size={13} /> Enviado Google
+                            </span>
+                          ) : event.status === "failed" ? (
+                            <button
+                              type="button"
+                              onClick={() => handleTriggerOciSync(true, event.id)}
+                              style={{
+                                background: "rgba(239, 68, 68, 0.15)",
+                                border: "1px solid rgba(239, 68, 68, 0.3)",
+                                color: "#f87171",
+                                padding: "3px 8px",
+                                borderRadius: "6px",
+                                fontSize: "11px",
+                                fontWeight: 600,
+                                cursor: "pointer",
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "4px",
+                              }}
+                            >
+                              <RefreshCw size={11} /> Reenviar
+                            </button>
+                          ) : (
+                            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                              <span style={{ color: "#38bdf8", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px" }}>
+                                <Clock size={12} /> Fila MaturaÃ§Ã£o
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleTriggerOciSync(true, event.id)}
+                                title="ForÃ§ar envio para o Google Ads agora"
+                                style={{
+                                  background: "#1e293b",
+                                  border: "1px solid #334155",
+                                  color: "#38bdf8",
+                                  borderRadius: "4px",
+                                  padding: "2px 6px",
+                                  fontSize: "10px",
+                                  fontWeight: 600,
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Enviar
+                              </button>
+                            </div>
+                          )}
                         </td>
 
                         <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
                           {event.occurredAt}
+                        </td>
+                        <td style={{ padding: "10px 12px", textAlign: "right" }}>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteLead(event.id)}
+                            title="Excluir este lead"
+                            style={{
+                              background: "rgba(239, 68, 68, 0.1)",
+                              border: "1px solid rgba(239, 68, 68, 0.2)",
+                              color: "#f87171",
+                              cursor: "pointer",
+                              padding: "4px 8px",
+                              borderRadius: "6px",
+                              display: "inline-flex",
+                              alignItems: "center",
+                            }}
+                          >
+                            <Trash2 size={13} />
+                          </button>
                         </td>
                       </tr>
                     );
@@ -2163,6 +2315,66 @@ export default function GoogleAdsPage() {
                 </button>
               </div>
             </div>
+          </div>
+
+          {/* CENTRAL OCI â€” ENVIO E REENVIO PARA GOOGLE ADS API (ESTILO META ADS) */}
+          <div style={{ marginTop: "20px", padding: "18px", background: "#0b1329", border: "1px solid #1e293b", borderRadius: "10px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px", marginBottom: "12px" }}>
+              <div>
+                <h4 style={{ color: "#38bdf8", fontSize: "14px", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
+                  <Send size={16} /> Disparo & SincronizaÃ§Ã£o Google Ads OCI (Offline Conversions v17)
+                </h4>
+                <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
+                  Controle de envio para a API do Google Ads. Envie conversÃµes maturadas (&gt;4h) ou force o reenvio manual a qualquer momento (como no Meta Ads).
+                </p>
+              </div>
+
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={() => handleTriggerOciSync(true)}
+                  disabled={isSyncingOci}
+                  style={{
+                    background: "#2563eb",
+                    border: "none",
+                    color: "#fff",
+                    borderRadius: "8px",
+                    padding: "9px 16px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    opacity: isSyncingOci ? 0.6 : 1,
+                  }}
+                >
+                  <RefreshCw size={14} style={{ transform: isSyncingOci ? "rotate(180deg)" : "none", transition: "transform 0.4s" }} />
+                  {isSyncingOci ? "Enviando..." : "âš¡ Disparar / Reenviar ConversÃµes para o Google Ads Agora"}
+                </button>
+              </div>
+            </div>
+
+            {ociSyncResult && (
+              <div
+                style={{
+                  background: ociSyncResult.hasApiCredentials ? "rgba(16, 185, 129, 0.15)" : "rgba(234, 179, 8, 0.15)",
+                  border: `1px solid ${ociSyncResult.hasApiCredentials ? "#10b981" : "#facc15"}`,
+                  color: ociSyncResult.hasApiCredentials ? "#34d399" : "#fde047",
+                  padding: "10px 14px",
+                  borderRadius: "8px",
+                  fontSize: "12px",
+                  marginTop: "10px",
+                }}
+              >
+                <strong>Resultado do Disparo OCI:</strong> {ociSyncResult.uploadedCount} conversÃ£o(Ãµes) processada(s).
+                {!ociSyncResult.hasApiCredentials && (
+                  <span style={{ display: "block", marginTop: "4px", color: "#facc15" }}>
+                    âš ï¸ Nota: Credenciais diretas do Google Ads API ainda nÃ£o estÃ£o no Dokploy (as conversÃµes estÃ£o maturadas e validadas no painel local).
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
