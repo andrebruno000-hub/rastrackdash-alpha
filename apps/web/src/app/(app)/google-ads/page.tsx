@@ -447,7 +447,7 @@ export default function GoogleAdsPage() {
 
   // Leads filtrados para o RelatÃ³rio CustomizÃ¡vel
   const filteredReportLeads = useMemo(() => {
-    return leadEvents.filter((event) => {
+    return realLeadEvents.filter((event) => {
       const eventDate = (event.occurredAt || event.firstMessageAt || "").slice(0, 10);
       const matchesDate =
         (!reportStartDate || eventDate >= reportStartDate) &&
@@ -517,17 +517,22 @@ export default function GoogleAdsPage() {
     document.body.removeChild(link);
   };
 
-  // Contadores Globais
-  const totalLeads = leadEvents.length;
-  const conversasIniciadas = leadEvents.filter((l) => (l.stage || "conversa_iniciada") === "conversa_iniciada").length;
-  const orcamentosEnviados = leadEvents.filter((l) => l.stage === "orcamento_enviado").length;
-  const comprasRealizadas = leadEvents.filter((l) => l.stage === "compra_realizada").length;
-  const faturamentoTotal = leadEvents
+  // Filtro InfalÃ­vel: Exclui Josi e SÃ©rgio de qualquer contagem ou tabela
+  const realLeadEvents = useMemo(() => {
+    return leadEvents.filter((l) => !isAttendantLead(l.leadPhone));
+  }, [leadEvents]);
+
+  // Contadores Globais (apenas leads reais)
+  const totalLeads = realLeadEvents.length;
+  const conversasIniciadas = realLeadEvents.filter((l) => (l.stage || "conversa_iniciada") === "conversa_iniciada").length;
+  const orcamentosEnviados = realLeadEvents.filter((l) => l.stage === "orcamento_enviado").length;
+  const comprasRealizadas = realLeadEvents.filter((l) => l.stage === "compra_realizada").length;
+  const faturamentoTotal = realLeadEvents
     .filter((l) => l.stage === "compra_realizada" && l.value)
     .reduce((acc, curr) => acc + (curr.value || 0), 0);
 
   const filteredEvents = useMemo(() => {
-    return leadEvents.filter((event) => {
+    return realLeadEvents.filter((event) => {
       const term = filterKeyword.toLowerCase().trim();
       const matchesSearch =
         !term ||
@@ -543,10 +548,10 @@ export default function GoogleAdsPage() {
 
       return matchesSearch && matchesAttendant && matchesStage;
     });
-  }, [leadEvents, filterKeyword, filterAttendant, filterStage]);
+  }, [realLeadEvents, filterKeyword, filterAttendant, filterStage]);
 
   const josiStats = useMemo(() => {
-    const list = leadEvents.filter((l) => l.attendantName.toLowerCase().includes("josi"));
+    const list = realLeadEvents.filter((l) => l.attendantName.toLowerCase().includes("josi"));
     const quotes = list.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length;
     const sales = list.filter((l) => l.stage === "compra_realizada").length;
     return {
@@ -555,10 +560,10 @@ export default function GoogleAdsPage() {
       quotes,
       sales,
     };
-  }, [leadEvents, totalLeads]);
+  }, [realLeadEvents, totalLeads]);
 
   const sergioStats = useMemo(() => {
-    const list = leadEvents.filter((l) => l.attendantName.toLowerCase().includes("sergio") || l.attendantName.toLowerCase().includes("sÃ©rgio"));
+    const list = realLeadEvents.filter((l) => l.attendantName.toLowerCase().includes("sergio") || l.attendantName.toLowerCase().includes("sÃ©rgio"));
     const quotes = list.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length;
     const sales = list.filter((l) => l.stage === "compra_realizada").length;
     return {
@@ -567,7 +572,7 @@ export default function GoogleAdsPage() {
       quotes,
       sales,
     };
-  }, [leadEvents, totalLeads]);
+  }, [realLeadEvents, totalLeads]);
 
   const handleAddAttendant = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1326,7 +1331,7 @@ export default function GoogleAdsPage() {
                 <span className="kanban-col-count">{conversasIniciadas}</span>
               </div>
               <div className="kanban-cards-wrap">
-                {leadEvents
+                {realLeadEvents
                   .filter((l) => (l.stage || "conversa_iniciada") === "conversa_iniciada")
                   .map((lead) => (
                     <div key={lead.id} className="kanban-card">
@@ -1377,7 +1382,7 @@ export default function GoogleAdsPage() {
                 <span className="kanban-col-count">{orcamentosEnviados}</span>
               </div>
               <div className="kanban-cards-wrap">
-                {leadEvents
+                {realLeadEvents
                   .filter((l) => l.stage === "orcamento_enviado")
                   .map((lead) => (
                     <div key={lead.id} className="kanban-card">
@@ -1439,7 +1444,7 @@ export default function GoogleAdsPage() {
                 <span className="kanban-col-count">{comprasRealizadas}</span>
               </div>
               <div className="kanban-cards-wrap">
-                {leadEvents
+                {realLeadEvents
                   .filter((l) => l.stage === "compra_realizada")
                   .map((lead) => (
                     <div key={lead.id} className="kanban-card" style={{ borderColor: "rgba(16, 185, 129, 0.4)" }}>
