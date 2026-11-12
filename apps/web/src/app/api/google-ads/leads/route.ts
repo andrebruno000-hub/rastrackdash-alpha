@@ -47,6 +47,125 @@ function getRulesFilePath(): string {
   return path.join(dir, "alpha_google_conversion_rules.json");
 }
 
+function getEntitiesFilePath(): string {
+  const dir = getStorageDir();
+  return path.join(dir, "alpha_google_entities_map.json");
+}
+
+function readEntitiesMap(): Record<string, string> {
+  try {
+    const file = getEntitiesFilePath();
+    if (fs.existsSync(file)) {
+      return JSON.parse(fs.readFileSync(file, "utf8"));
+    } else if (fs.existsSync("/tmp/alpha_google_entities_map.json")) {
+      return JSON.parse(fs.readFileSync("/tmp/alpha_google_entities_map.json", "utf8"));
+    }
+  } catch {}
+  return {};
+}
+
+function writeEntitiesMap(map: Record<string, string>): void {
+  try {
+    const file = getEntitiesFilePath();
+    fs.writeFileSync(file, JSON.stringify(map, null, 2), "utf8");
+    try {
+      fs.writeFileSync("/tmp/alpha_google_entities_map.json", JSON.stringify(map, null, 2), "utf8");
+    } catch {}
+  } catch (err) {
+    console.error("Erro ao salvar mapa de entidades:", err);
+  }
+}
+
+async function getGoogleAdsAccessToken(): Promise<string | null> {
+  const clientId = process.env.GOOGLE_ADS_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_ADS_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_ADS_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken) return null;
+
+  try {
+    const res = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        grant_type: "refresh_token",
+      }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.access_token || null;
+    }
+  } catch (err) {
+    console.error("Erro ao renovar token Google Ads:", err);
+  }
+  return null;
+}
+
+// AUTO-DISCOVERY: Busca todas as Campanhas e Conjuntos na conta Google Ads sem intervenÃ§Ã£o humana
+async function autoSyncEntitiesFromGoogleAds(): Promise<Record<string, string>> {
+  const map = readEntitiesMap();
+  const customerId = (process.env.GOOGLE_ADS_CUSTOMER_ID || "3228136878").replace(/\D/g, "");
+  const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
+  const accessToken = await getGoogleAdsAccessToken();
+
+  if (!devToken || !accessToken) {
+    return map;
+  }
+
+  try {
+    const gaqlQuery = `
+      SELECT
+        campaign.id,
+        campaign.name,
+        ad_group.id,
+        ad_group.name,
+        campaign.status,
+        ad_group.status
+      FROM ad_group
+      WHERE campaign.status != 'REMOVED'
+    `;
+
+    const res = await fetch(
+      `https://googleads.googleapis.com/v17/customers/${customerId}/googleAds:searchStream`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "developer-token": devToken,
+          "login-customer-id": customerId,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: gaqlQuery }),
+      }
+    );
+
+    if (res.ok) {
+      const gadsData = await res.json();
+      if (Array.isArray(gadsData)) {
+        gadsData.forEach((batch: any) => {
+          if (Array.isArray(batch.results)) {
+            batch.results.forEach((row: any) => {
+              const cId = String(row.campaign?.id || "");
+              const cName = row.campaign?.name;
+              const aId = String(row.adGroup?.id || "");
+              const aName = row.adGroup?.name;
+              if (cId && cName) map[cId] = cName;
+              if (aId && aName) map[aId] = aName;
+            });
+          }
+        });
+        writeEntitiesMap(map);
+      }
+    }
+  } catch (err) {
+    console.error("Erro na auto-sincronizaÃ§Ã£o do catÃ¡logo Google Ads:", err);
+  }
+
+  return map;
+}
+
 const ATTENDANT_PHONES = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
 
 function isAttendantPhone(phone: string): boolean {
@@ -154,16 +273,61 @@ export async function GET(request: NextRequest) {
     });
   }
 
+  if (type === "entities") {
+    return NextResponse.json(readEntitiesMap(), {
+      headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
+    });
+  }
+
   const leads = readLeads();
-  return NextResponse.json(leads, {
+  let entities = readEntitiesMap();
+
+  // AUTO-RESOLVIMENTO: Se houver IDs numÃ©ricos nÃ£o mapeados, busca automaticamente na API do Google Ads
+  const hasUnmapped = leads.some((l: any) =>
+    (l.campaign && /^\d+$/.test(l.campaign) && !entities[l.campaign]) ||
+    (l.adGroup && /^\d+$/.test(l.adGroup) && !entities[l.adGroup])
+  );
+
+  if (hasUnmapped) {
+    try {
+      entities = await autoSyncEntitiesFromGoogleAds();
+    } catch {}
+  }
+
+  const enriched = leads.map((l: any) => ({
+    ...l,
+    campaignName: entities[l.campaign] || l.campaign,
+    adGroupName: entities[l.adGroup] || l.adGroup,
+  }));
+
+  return NextResponse.json(enriched, {
     headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
   });
 }
 
-// POST: Recuperar ou Inserir Lead Manualmente, ou Salvar Regras
+// POST: Recuperar ou Inserir Lead Manualmente, Salvar Regras ou Sincronizar CatÃ¡logo
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+
+    // 0. Auto-SincronizaÃ§Ã£o do CatÃ¡logo Completo via Google Ads API
+    if (body.action === "sync_catalog" || body.action === "sync_entities_api") {
+      const updated = await autoSyncEntitiesFromGoogleAds();
+      return NextResponse.json({
+        success: true,
+        entities: updated,
+        count: Object.keys(updated).length,
+        message: "CatÃ¡logo de Campanhas e Conjuntos sincronizado com sucesso via Google Ads API!",
+      });
+    }
+
+    // 1. Salvar ou Atualizar Mapeamento de Nomes Reais (ID Google Ads -> Nome Real)
+    if (body.action === "save_entities" || body.type === "save_entities") {
+      const current = readEntitiesMap();
+      const updated = { ...current, ...(body.entities || {}) };
+      writeEntitiesMap(updated);
+      return NextResponse.json({ success: true, entities: updated, message: "Nomes reais vinculados com sucesso!" });
+    }
 
     // 1. Salvar Regras DinÃ¢micas de ConversÃ£o
     if (body.type === "save_rules" && body.rules) {
