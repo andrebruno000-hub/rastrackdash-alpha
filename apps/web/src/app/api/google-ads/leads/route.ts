@@ -5,8 +5,10 @@ import path from "path";
 export const dynamic = "force-dynamic";
 
 /**
- * API para listar, gerenciar, salvar regras e LIMPAR LEADS FANTASMAS
+ * API para listar, gerenciar, salvar regras e RECUPERAR LEADS do Google Ads
  * apps/web/src/app/api/google-ads/leads/route.ts
+ *
+ * Suporta armazenamento persistente (/data montado no Dokploy ou /tmp com fallback).
  */
 
 function getStorageDir(): string {
@@ -18,45 +20,77 @@ function getStorageDir(): string {
       return process.env.GOOGLE_ADS_DATA_DIR;
     } catch {}
   }
+
+  // Tenta pasta persistente montada no Dokploy
   try {
     if (fs.existsSync("/data")) {
       return "/data";
     }
   } catch {}
+
+  // Fallback padrÃ£o
   return "/tmp";
 }
 
 function getLeadsFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_leads.json");
+  const dir = getStorageDir();
+  return path.join(dir, "alpha_google_leads.json");
 }
 
 function getAuditsFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_conversion_audits.json");
+  const dir = getStorageDir();
+  return path.join(dir, "alpha_google_conversion_audits.json");
 }
 
 function getRulesFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_conversion_rules.json");
+  const dir = getStorageDir();
+  return path.join(dir, "alpha_google_conversion_rules.json");
+}
+
+const ATTENDANT_PHONES = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
+
+function isAttendantPhone(phone: string): boolean {
+  const p = String(phone || "").replace(/\D/g, "");
+  if (!p) return false;
+  return ATTENDANT_PHONES.some(
+    (att) => p === att || (p.length >= 8 && att.length >= 8 && p.slice(-8) === att.slice(-8))
+  );
 }
 
 function readLeads(): any[] {
+  let leads: any[] = [];
   try {
     const file = getLeadsFilePath();
     if (fs.existsSync(file)) {
-      return JSON.parse(fs.readFileSync(file, "utf8"));
-    }
-    if (fs.existsSync("/tmp/alpha_google_leads.json")) {
-      return JSON.parse(fs.readFileSync("/tmp/alpha_google_leads.json", "utf8"));
+      leads = JSON.parse(fs.readFileSync(file, "utf8"));
+    } else if (fs.existsSync("/tmp/alpha_google_leads.json")) {
+      leads = JSON.parse(fs.readFileSync("/tmp/alpha_google_leads.json", "utf8"));
     }
   } catch (error) {
     console.error("Erro ao ler leads:", error);
   }
-  return [];
+
+  // AUTO-HIGIENIZAÃ‡ÃƒO: Remove automaticamente qualquer lead antigo com telefone de atendente
+  const beforeCount = leads.length;
+  leads = leads.filter((l: any) => !isAttendantPhone(l.leadPhone));
+
+  // Se filtrou algum lead fantasma de atendente, salva a lista limpa no disco
+  if (leads.length < beforeCount) {
+    try {
+      const file = getLeadsFilePath();
+      fs.writeFileSync(file, JSON.stringify(leads.slice(0, 500), null, 2), "utf8");
+      fs.writeFileSync("/tmp/alpha_google_leads.json", JSON.stringify(leads.slice(0, 500), null, 2), "utf8");
+    } catch {}
+  }
+
+  return leads;
 }
 
 function writeLeads(leads: any[]): void {
   try {
     const file = getLeadsFilePath();
     fs.writeFileSync(file, JSON.stringify(leads.slice(0, 500), null, 2), "utf8");
+    // Espelha tambÃ©m em /tmp por redundÃ¢ncia
     try {
       fs.writeFileSync("/tmp/alpha_google_leads.json", JSON.stringify(leads.slice(0, 500), null, 2), "utf8");
     } catch {}
@@ -90,17 +124,32 @@ export async function GET(request: NextRequest) {
     try {
       const file = getRulesFilePath();
       if (fs.existsSync(file)) {
-        return NextResponse.json(JSON.parse(fs.readFileSync(file, "utf8")));
+        const rules = JSON.parse(fs.readFileSync(file, "utf8"));
+        return NextResponse.json(rules);
       }
     } catch {}
     return NextResponse.json({
       quote: {
         actionName: "orcamento_enviado",
-        phrases: ["orçamento enviado", "orcamento enviado", "segue o orçamento", "segue seu orçamento", "enviei o orçamento", "proposta enviada"],
+        phrases: [
+          "orÃ§amento enviado",
+          "orcamento enviado",
+          "segue o orÃ§amento",
+          "segue seu orÃ§amento",
+          "enviei o orÃ§amento",
+          "proposta enviada",
+        ],
       },
       purchase: {
         actionName: "compra_realizada",
-        phrases: ["pedido fechado", "compra realizada", "venda confirmada", "pedido confirmado", "segue copia do pedido", "venda fechada"],
+        phrases: [
+          "pedido fechado",
+          "compra realizada",
+          "venda confirmada",
+          "pedido confirmado",
+          "segue copia do pedido",
+          "venda fechada",
+        ],
       },
     });
   }
@@ -111,10 +160,12 @@ export async function GET(request: NextRequest) {
   });
 }
 
+// POST: Recuperar ou Inserir Lead Manualmente, ou Salvar Regras
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
+    // 1. Salvar Regras DinÃ¢micas de ConversÃ£o
     if (body.type === "save_rules" && body.rules) {
       const file = getRulesFilePath();
       fs.writeFileSync(file, JSON.stringify(body.rules, null, 2), "utf8");
@@ -124,13 +175,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, message: "Regras salvas com sucesso!" });
     }
 
+    // 2. Recuperar ou Inserir Lead Manualmente
     if (body.action === "add_lead" || body.action === "recover_lead" || body.leadPhone) {
       const cleanPhone = String(body.leadPhone || "").replace(/\D/g, "");
       if (!cleanPhone) {
-        return NextResponse.json({ error: "Telefone do lead é obrigatório" }, { status: 400 });
+        return NextResponse.json({ error: "Telefone do lead Ã© obrigatÃ³rio" }, { status: 400 });
       }
 
       const leads = readLeads();
+
       const newLead = {
         id: body.id || `lead_recov_${Date.now()}`,
         leadName: body.leadName || "Cliente WhatsApp",
@@ -149,6 +202,7 @@ export async function POST(request: NextRequest) {
         updatedAt: new Date().toISOString(),
       };
 
+      // Se jÃ¡ existir pelo telefone, atualiza. SenÃ£o adiciona no topo.
       const existingIdx = leads.findIndex((l: any) => {
         const p = String(l.leadPhone || "").replace(/\D/g, "");
         return p === cleanPhone || (p.length >= 8 && cleanPhone.length >= 8 && p.slice(-8) === cleanPhone.slice(-8));
@@ -161,12 +215,42 @@ export async function POST(request: NextRequest) {
       }
 
       writeLeads(leads);
+
       return NextResponse.json({ success: true, lead: newLead, message: "Lead salvo com sucesso!" });
     }
 
-    return NextResponse.json({ error: "Ação não reconhecida" }, { status: 400 });
+    return NextResponse.json({ error: "AÃ§Ã£o nÃ£o reconhecida" }, { status: 400 });
   } catch (error: any) {
-    return NextResponse.json({ error: error?.message || "Erro no POST" }, { status: 500 });
+    return NextResponse.json({ error: error?.message || "Erro ao processar POST" }, { status: 500 });
+  }
+}
+
+export async function PATCH(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const { id, stage, value, attendantName } = body;
+
+    if (!id) {
+      return NextResponse.json({ error: "ID do lead Ã© obrigatÃ³rio" }, { status: 400 });
+    }
+
+    const leads = readLeads();
+    const index = leads.findIndex((l: any) => l.id === id);
+
+    if (index === -1) {
+      return NextResponse.json({ error: "Lead nÃ£o encontrado" }, { status: 404 });
+    }
+
+    if (stage) leads[index].stage = stage;
+    if (value !== undefined) leads[index].value = Number(value);
+    if (attendantName) leads[index].attendantName = attendantName;
+    leads[index].updatedAt = new Date().toISOString();
+
+    writeLeads(leads);
+
+    return NextResponse.json({ success: true, lead: leads[index] });
+  } catch (error: any) {
+    return NextResponse.json({ error: error?.message || "Erro interno" }, { status: 500 });
   }
 }
 
@@ -178,10 +262,10 @@ export async function DELETE(request: NextRequest) {
 
     let leads = readLeads();
 
-    // Remove automaticamente todos os leads que possuem os números dos próprios atendentes
+    // Limpa automaticamente leads teste com nÃºmeros dos atendentes
     if (action === "clean_attendants") {
       const attendantPhones = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
-      const countBefore = leads.length;
+      const originalCount = leads.length;
       leads = leads.filter((l: any) => {
         const p = String(l.leadPhone || "").replace(/\D/g, "");
         return !attendantPhones.some((att) => p === att || p.slice(-8) === att.slice(-8));
@@ -189,13 +273,13 @@ export async function DELETE(request: NextRequest) {
       writeLeads(leads);
       return NextResponse.json({
         success: true,
-        removed: countBefore - leads.length,
-        message: "Registros dos atendentes limpos com sucesso!",
+        removed: originalCount - leads.length,
+        message: "Leads dos atendentes removidos com sucesso!",
       });
     }
 
     if (!id) {
-      return NextResponse.json({ error: "ID é obrigatório" }, { status: 400 });
+      return NextResponse.json({ error: "ID Ã© obrigatÃ³rio" }, { status: 400 });
     }
 
     leads = leads.filter((l: any) => l.id !== id);
@@ -203,6 +287,6 @@ export async function DELETE(request: NextRequest) {
 
     return NextResponse.json({ success: true, message: "Lead removido com sucesso!" });
   } catch (error: any) {
-    return NextResponse.json({ error: error?.message || "Erro ao excluir" }, { status: 500 });
+    return NextResponse.json({ error: error?.message || "Erro ao excluir lead" }, { status: 500 });
   }
 }
