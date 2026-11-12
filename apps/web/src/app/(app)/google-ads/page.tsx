@@ -432,18 +432,23 @@ export default function GoogleAdsPage() {
     }
   };
 
+  // Filtro InfalÃ­vel: Exclui Josi e SÃ©rgio de qualquer contagem ou tabela
+  const realLeadEvents = useMemo(() => {
+    return leadEvents.filter((l) => !isAttendantLead(l.leadPhone));
+  }, [leadEvents]);
+
   // Listas DinÃ¢micas de OpÃ§Ãµes para Filtros
   const uniqueCampaigns = useMemo(() => {
     const set = new Set<string>();
-    leadEvents.forEach((l) => l.campaign && set.add(l.campaign));
+    realLeadEvents.forEach((l) => l.campaign && set.add(l.campaign));
     return Array.from(set);
-  }, [leadEvents]);
+  }, [realLeadEvents]);
 
   const uniqueAdGroups = useMemo(() => {
     const set = new Set<string>();
-    leadEvents.forEach((l) => l.adGroup && set.add(l.adGroup));
+    realLeadEvents.forEach((l) => l.adGroup && set.add(l.adGroup));
     return Array.from(set);
-  }, [leadEvents]);
+  }, [realLeadEvents]);
 
   // Leads filtrados para o RelatÃ³rio CustomizÃ¡vel
   const filteredReportLeads = useMemo(() => {
@@ -517,10 +522,6 @@ export default function GoogleAdsPage() {
     document.body.removeChild(link);
   };
 
-  // Filtro InfalÃ­vel: Exclui Josi e SÃ©rgio de qualquer contagem ou tabela
-  const realLeadEvents = useMemo(() => {
-    return leadEvents.filter((l) => !isAttendantLead(l.leadPhone));
-  }, [leadEvents]);
 
   // Contadores Globais (apenas leads reais)
   const totalLeads = realLeadEvents.length;
@@ -2016,7 +2017,7 @@ export default function GoogleAdsPage() {
                       </button>
                     </td>
                     <td style={{ padding: "10px 12px", fontWeight: 700, color: "#fff" }}>
-                      {leadEvents.filter((l) => l.attendantName.toLowerCase().includes(attendant.name.toLowerCase())).length} leads
+                      {realLeadEvents.filter((l) => l.attendantName.toLowerCase().includes(attendant.name.toLowerCase())).length} leads
                     </td>
                     <td style={{ padding: "10px 12px", textAlign: "right" }}>
                       <button
@@ -2296,7 +2297,7 @@ export default function GoogleAdsPage() {
                     gap: "6px",
                   }}
                 >
-                  <Download size={14} /> Baixar Backup JSON ({leadEvents.length} Leads)
+                  <Download size={14} /> Baixar Backup JSON ({realLeadEvents.length} Leads Reais)
                 </button>
 
                 <button
