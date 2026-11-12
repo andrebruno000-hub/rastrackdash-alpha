@@ -1,41 +1,55 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
+import path from "path";
 
 export const dynamic = "force-dynamic";
 
-const LEADS_FILE = "/tmp/alpha_google_leads.json";
-const AUDIT_FILE = "/tmp/alpha_google_conversion_audits.json";
-const RULES_FILE = "/tmp/alpha_google_conversion_rules.json";
+/**
+ * MOTOR DE ATRIBUIÇÃO TEMPORAL & DETECÇÃO DE FRASES UAZAPI
+ * Caminho: apps/web/src/app/api/webhooks/google-whatsapp/route.ts
+ */
 
-const DEFAULT_RULES = {
-  quote: {
-    actionName: "WhatsApp - Orçamento Enviado",
-    phrases: ["orçamento enviado", "orcamento enviado", "segue o orçamento", "proposta enviada", "segue seu orçamento"],
-  },
-  purchase: {
-    actionName: "WhatsApp - Compra Realizada",
-    phrases: ["pedido fechado", "compra realizada", "venda confirmada", "pedido confirmado", "segue copia do pedido"],
-  },
-};
-
-function getActiveRules() {
+function getStorageDir(): string {
+  if (process.env.GOOGLE_ADS_DATA_DIR) {
+    try {
+      if (!fs.existsSync(process.env.GOOGLE_ADS_DATA_DIR)) {
+        fs.mkdirSync(process.env.GOOGLE_ADS_DATA_DIR, { recursive: true });
+      }
+      return process.env.GOOGLE_ADS_DATA_DIR;
+    } catch {}
+  }
   try {
-    if (fs.existsSync(RULES_FILE)) {
-      return JSON.parse(fs.readFileSync(RULES_FILE, "utf8"));
+    if (fs.existsSync("/data")) {
+      return "/data";
     }
   } catch {}
-  return DEFAULT_RULES;
+  return "/tmp";
 }
 
+function getLeadsFilePath(): string {
+  return path.join(getStorageDir(), "alpha_google_leads.json");
+}
+
+function getAuditsFilePath(): string {
+  return path.join(getStorageDir(), "alpha_google_conversion_audits.json");
+}
+
+const LEADS_FILE = getLeadsFilePath();
+const AUDIT_FILE = getAuditsFilePath();
+
+// Comparador resiliente de telefones
 function isSamePhone(p1: string, p2: string): boolean {
   const c1 = String(p1 || "").replace(/\D/g, "");
   const c2 = String(p2 || "").replace(/\D/g, "");
   if (!c1 || !c2) return false;
   if (c1 === c2) return true;
-  if (c1.length >= 8 && c2.length >= 8) return c1.slice(-8) === c2.slice(-8);
+  if (c1.length >= 8 && c2.length >= 8) {
+    return c1.slice(-8) === c2.slice(-8);
+  }
   return false;
 }
 
+// Decodificador de Caracteres Invisíveis Unicode (Zero-Width)
 function decodeZeroWidth(text: string): string | null {
   if (!text) return null;
   const map: Record<string, number> = { "\u200B": 0, "\u200C": 1, "\u200D": 2, "\u2060": 3 };
@@ -55,6 +69,7 @@ function decodeZeroWidth(text: string): string | null {
 
 function extractTrackingTag(text: string): { gclid?: string; keyword?: string; campaign?: string; adGroup?: string } | null {
   if (!text) return null;
+
   const invisible = decodeZeroWidth(text);
   if (invisible && invisible.includes("ref:")) {
     const parts = invisible.split("|");
@@ -67,16 +82,25 @@ function extractTrackingTag(text: string): { gclid?: string; keyword?: string; c
     }
     return result;
   }
+
   const match = text.match(/\[ref:([^|\]]+)(?:\|kw:([^\]]+))?\]/);
   if (match) {
-    return { gclid: match[1], keyword: match[2] ? decodeURIComponent(match[2]) : undefined };
+    return {
+      gclid: match[1],
+      keyword: match[2] ? decodeURIComponent(match[2]) : undefined,
+    };
   }
+
   return null;
 }
 
 function extractMonetaryValue(text: string): number | null {
   if (!text) return null;
-  const match = text.match(/(?:r\$|reais)\s*([\d\.,]+)/i) || text.match(/([\d\.,]+)\s*(?:reais)/i) || text.match(/r\$\s*([\d\.,]+)/i);
+  const match =
+    text.match(/(?:r\$|reais)\s*([\d\.,]+)/i) ||
+    text.match(/([\d\.,]+)\s*(?:reais)/i) ||
+    text.match(/r\$\s*([\d\.,]+)/i);
+
   if (match) {
     const clean = match[1].replace(/\./g, "").replace(",", ".");
     const val = parseFloat(clean);
@@ -88,96 +112,214 @@ function extractMonetaryValue(text: string): number | null {
 function recordAuditLog(entry: any) {
   try {
     let logs: any[] = [];
-    if (fs.existsSync(AUDIT_FILE)) logs = JSON.parse(fs.readFileSync(AUDIT_FILE, "utf8"));
+    if (fs.existsSync(AUDIT_FILE)) {
+      logs = JSON.parse(fs.readFileSync(AUDIT_FILE, "utf8"));
+    }
     logs.unshift(entry);
     fs.writeFileSync(AUDIT_FILE, JSON.stringify(logs.slice(0, 500), null, 2), "utf8");
+  } catch (err) {
+    console.error("Erro ao salvar auditoria:", err);
+  }
+}
+
+export async function GET() {
+  let leadsCount = 0;
+  let auditsCount = 0;
+  try {
+    if (fs.existsSync(LEADS_FILE)) leadsCount = JSON.parse(fs.readFileSync(LEADS_FILE, "utf8")).length;
+    if (fs.existsSync(AUDIT_FILE)) auditsCount = JSON.parse(fs.readFileSync(AUDIT_FILE, "utf8")).length;
   } catch {}
+
+  return NextResponse.json({
+    status: "online",
+    module: "Google Ads WhatsApp Webhook & Temporal Attribution Engine v3.0",
+    leadsCount,
+    auditsCount,
+    timestamp: new Date().toISOString(),
+  });
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+
     const message = body.message || body.data?.message || {};
     const key = message.key || body.key || body.data?.key || {};
 
     const rawPhone = key.remoteJid || body.sender || body.phone || body.chat?.wa_chatid || "";
     const cleanPhone = String(rawPhone).replace(/\D/g, "");
 
-    const pushName = body.contactName || body.pushName || message.pushName || body.data?.pushName || body.senderName || "";
-    const messageText = message.conversation || message.text || message.extendedTextMessage?.text || body.text || body.messageText || "";
+    const pushName =
+      body.contactName ||
+      body.pushName ||
+      message.pushName ||
+      body.data?.pushName ||
+      body.senderName ||
+      "";
+
+    const messageText =
+      message.conversation ||
+      message.text ||
+      message.extendedTextMessage?.text ||
+      body.text ||
+      body.messageText ||
+      "";
+
     const fromMe = Boolean(key.fromMe ?? body.fromMe ?? false);
     const instanceName = body.instance || body.instanceName || body.session || "";
 
     let leads: any[] = [];
     if (fs.existsSync(LEADS_FILE)) {
-      try { leads = JSON.parse(fs.readFileSync(LEADS_FILE, "utf8")); } catch {}
+      try {
+        leads = JSON.parse(fs.readFileSync(LEADS_FILE, "utf8"));
+      } catch {}
     }
 
-    // Regras dinâmicas salvas pelo usuário
-    const rules = getActiveRules();
+    // =========================================================================
+    // CASO 1: MENSAGEM DO CLIENTE (fromMe === false)
+    // =========================================================================
+    if (!fromMe && cleanPhone) {
+      const isAttendantPhone = (p: string) => {
+        const clean = String(p || "").replace(/\D/g, "");
+        return ["5521980659269", "5521994060206", "21980659269", "21994060206"].some(
+          att => clean === att || (clean.length >= 8 && clean.slice(-8) === att.slice(-8))
+        );
+      };
 
-    // 1. Mensagem do Cliente
-    if (!fromMe) {
-      const tracking = extractTrackingTag(messageText);
-      const gclid = tracking?.gclid;
+      if (!isAttendantPhone(cleanPhone)) {
+        const tracking = extractTrackingTag(messageText);
+        const gclid = tracking?.gclid;
 
-      if (gclid) {
-        const leadIndex = leads.findIndex((l: any) => l.gclid === gclid || (l.id && l.id.includes(gclid.slice(0, 15))));
+        // CAMADA 1: Tag Invisível Presente (GCLID exato)
+        if (gclid) {
+          const leadIndex = leads.findIndex(
+            (l: any) => l.gclid === gclid || (l.id && l.id.includes(gclid.slice(0, 15)))
+          );
 
-        if (leadIndex !== -1) {
-          if (pushName) leads[leadIndex].leadName = pushName;
-          if (cleanPhone) leads[leadIndex].leadPhone = cleanPhone;
-          leads[leadIndex].stage = "conversa_iniciada";
-          leads[leadIndex].firstMessageAt = new Date().toISOString();
-          if (tracking?.keyword) leads[leadIndex].keyword = tracking.keyword;
-          if (tracking?.campaign) leads[leadIndex].campaign = tracking.campaign;
-          if (tracking?.adGroup) leads[leadIndex].adGroup = tracking.adGroup;
-        } else {
-          leads.unshift({
-            id: `g_${gclid.slice(0, 15)}_${Date.now()}`,
-            leadName: pushName || "Cliente WhatsApp",
+          if (leadIndex !== -1) {
+            if (pushName) leads[leadIndex].leadName = pushName;
+            leads[leadIndex].leadPhone = cleanPhone;
+            leads[leadIndex].stage = "conversa_iniciada";
+            leads[leadIndex].firstMessageAt = new Date().toISOString();
+            if (tracking?.keyword) leads[leadIndex].keyword = tracking.keyword;
+            if (tracking?.campaign) leads[leadIndex].campaign = tracking.campaign;
+            if (tracking?.adGroup) leads[leadIndex].adGroup = tracking.adGroup;
+          } else {
+            leads.unshift({
+              id: `g_${gclid.slice(0, 15)}_${Date.now()}`,
+              leadName: pushName || "Cliente WhatsApp",
+              leadPhone: cleanPhone,
+              attendantName: instanceName.toLowerCase().includes("sergio") ? "Sérgio" : "Josi",
+              keyword: tracking?.keyword || "Pesquisa Google",
+              campaign: tracking?.campaign || "Campanha Pesquisa",
+              adGroup: tracking?.adGroup || "Geral",
+              gclid: gclid,
+              conversionType: "conversa_iniciada",
+              stage: "conversa_iniciada",
+              status: "queued",
+              occurredAt: new Date().toISOString(),
+              firstMessageAt: new Date().toISOString(),
+            });
+          }
+
+          fs.writeFileSync(LEADS_FILE, JSON.stringify(leads.slice(0, 500), null, 2), "utf8");
+
+          recordAuditLog({
+            id: `audit_${Date.now()}`,
             leadPhone: cleanPhone,
-            attendantName: instanceName.toLowerCase().includes("sergio") ? "Sérgio" : "Josi",
-            keyword: tracking?.keyword || "Pesquisa Google",
-            campaign: tracking?.campaign || "Campanha Pesquisa",
-            adGroup: tracking?.adGroup || "Geral",
-            gclid: gclid,
-            conversionType: "conversa_iniciada",
-            stage: "conversa_iniciada",
-            status: "queued",
-            occurredAt: new Date().toISOString(),
+            leadName: pushName || "Cliente WhatsApp",
+            action: "conversa_iniciada",
+            detectedPhrase: "Mensagem inicial com Tag Invisível Google Ads",
+            attendant: instanceName || "Roleta",
+            timestamp: new Date().toISOString(),
+            statusOci: "queued",
+          });
+
+          return NextResponse.json({
+            success: true,
+            action: "lead_identified_exact_tag",
+            leadName: pushName,
+            leadPhone: cleanPhone,
+            gclid,
           });
         }
 
-        fs.writeFileSync(LEADS_FILE, JSON.stringify(leads.slice(0, 500), null, 2), "utf8");
+        // CAMADA 2: ATRIBUIÇÃO TEMPORAL (Cliente apagou o texto pronto e mandou "Oi", áudio, etc.)
+        const now = Date.now();
+        const pendingLeadIndex = leads.findIndex((l: any) => {
+          const isPending = !l.firstMessageAt || isAttendantPhone(l.leadPhone) || l.leadPhone === "Aguardando WhatsApp...";
+          if (!isPending) return false;
 
-        recordAuditLog({
-          id: `audit_${Date.now()}`,
-          leadPhone: cleanPhone,
-          leadName: pushName || "Cliente WhatsApp",
-          action: "conversa_iniciada",
-          detectedPhrase: "Mensagem inicial com Tag Invisível Google Ads",
-          attendant: instanceName || "Roleta",
-          timestamp: new Date().toISOString(),
-          statusOci: "queued",
+          const leadTime = new Date(l.occurredAt).getTime();
+          const isWithinWindow = (now - leadTime) < 20 * 60 * 1000; // Janela de 20 min
+          if (!isWithinWindow) return false;
+
+          const attendant = String(l.attendantName || "").toLowerCase();
+          const inst = String(instanceName || "").toLowerCase();
+          return !inst || attendant.includes("josi") && inst.includes("josi") || attendant.includes("sergio") && inst.includes("sergio");
         });
 
-        return NextResponse.json({ success: true, action: "lead_identified", gclid });
+        if (pendingLeadIndex !== -1) {
+          leads[pendingLeadIndex].leadPhone = cleanPhone;
+          if (pushName) leads[pendingLeadIndex].leadName = pushName;
+          leads[pendingLeadIndex].stage = "conversa_iniciada";
+          leads[pendingLeadIndex].firstMessageAt = new Date().toISOString();
+          leads[pendingLeadIndex].updatedAt = new Date().toISOString();
+
+          fs.writeFileSync(LEADS_FILE, JSON.stringify(leads.slice(0, 500), null, 2), "utf8");
+
+          recordAuditLog({
+            id: `audit_temporal_${Date.now()}`,
+            leadPhone: cleanPhone,
+            leadName: pushName || "Cliente WhatsApp",
+            action: "conversa_iniciada",
+            detectedPhrase: `Texto livre: "${messageText.slice(0, 50)}" (Atribuição Temporal 20min)`,
+            attendant: leads[pendingLeadIndex].attendantName || instanceName,
+            gclid: leads[pendingLeadIndex].gclid,
+            timestamp: new Date().toISOString(),
+            statusOci: "queued",
+          });
+
+          return NextResponse.json({
+            success: true,
+            action: "lead_identified_temporal_window",
+            leadName: pushName,
+            leadPhone: cleanPhone,
+            matchedKeyword: leads[pendingLeadIndex].keyword,
+            gclid: leads[pendingLeadIndex].gclid,
+          });
+        }
       }
     }
 
-    // 2. Mensagem do Atendente (Verificação Dinâmica de Palavras-Chave)
+    // =========================================================================
+    // CASO 2: MENSAGEM DO ATENDENTE (Gatilhos de Orçamento e Venda)
+    // =========================================================================
     if (fromMe && cleanPhone) {
       const lowerText = messageText.toLowerCase();
-      const leadIndex = leads.findIndex((l: any) => isSamePhone(l.leadPhone, cleanPhone));
+      const attendantName = instanceName.toLowerCase().includes("sergio") ? "Sérgio" : "Josi";
+
+      const isQuoteTrigger =
+        lowerText.includes("orçamento enviado") ||
+        lowerText.includes("orcamento enviado") ||
+        lowerText.includes("segue o orçamento") ||
+        lowerText.includes("segue seu orçamento") ||
+        lowerText.includes("enviei o orçamento") ||
+        lowerText.includes("proposta enviada") ||
+        lowerText.includes("segue o orcamento");
+
+      const isPurchaseTrigger =
+        lowerText.includes("pedido fechado") ||
+        lowerText.includes("compra realizada") ||
+        lowerText.includes("venda confirmada") ||
+        lowerText.includes("pedido confirmado") ||
+        lowerText.includes("segue copia do pedido") ||
+        lowerText.includes("venda fechada");
+
+      let leadIndex = leads.findIndex((l: any) => isSamePhone(l.leadPhone, cleanPhone));
 
       if (leadIndex !== -1) {
         const lead = leads[leadIndex];
-        const attendantName = lead.attendantName || (instanceName.toLowerCase().includes("sergio") ? "Sérgio" : "Josi");
-
-        // Checagem das frases de ORÇAMENTO configuradas
-        const quotePhrases: string[] = rules.quote?.phrases || [];
-        const isQuoteTrigger = quotePhrases.some((phrase) => lowerText.includes(phrase.toLowerCase().trim()));
 
         if (isQuoteTrigger) {
           leads[leadIndex].stage = "orcamento_enviado";
@@ -200,12 +342,8 @@ export async function POST(request: NextRequest) {
             statusOci: "queued",
           });
 
-          return NextResponse.json({ success: true, action: "conversion_trigger_quote", stage: "orcamento_enviado" });
+          return NextResponse.json({ success: true, action: "quote_recorded" });
         }
-
-        // Checagem das frases de COMPRA configuradas
-        const purchasePhrases: string[] = rules.purchase?.phrases || [];
-        const isPurchaseTrigger = purchasePhrases.some((phrase) => lowerText.includes(phrase.toLowerCase().trim()));
 
         if (isPurchaseTrigger) {
           const value = extractMonetaryValue(messageText);
@@ -232,13 +370,14 @@ export async function POST(request: NextRequest) {
             statusOci: "queued",
           });
 
-          return NextResponse.json({ success: true, action: "conversion_trigger_purchase", value, stage: "compra_realizada" });
+          return NextResponse.json({ success: true, action: "purchase_recorded" });
         }
       }
     }
 
     return NextResponse.json({ success: true, action: "ignored" });
   } catch (error: any) {
+    console.error("Erro no processamento do webhook:", error);
     return NextResponse.json({ error: error?.message || "Internal error" }, { status: 500 });
   }
 }
