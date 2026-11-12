@@ -1,15 +1,38 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
+import path from "path";
+
 export const dynamic = "force-dynamic";
+
 /**
  * Rota de Redirecionamento, Roleta e Registro de Leads (CNAC Tapetes)
  * Caminho: apps/web/src/app/r/cnac/route.ts
  */
 
 let requestCounter = 0;
-const LEADS_FILE = "/tmp/alpha_google_leads.json";
 
-// Tabela de caracteres Unicode 100% invisíveis (largura zero)
+function getStorageDir(): string {
+  if (process.env.GOOGLE_ADS_DATA_DIR) {
+    try {
+      if (!fs.existsSync(process.env.GOOGLE_ADS_DATA_DIR)) {
+        fs.mkdirSync(process.env.GOOGLE_ADS_DATA_DIR, { recursive: true });
+      }
+      return process.env.GOOGLE_ADS_DATA_DIR;
+    } catch {}
+  }
+  try {
+    if (fs.existsSync("/data")) {
+      return "/data";
+    }
+  } catch {}
+  return "/tmp";
+}
+
+function getLeadsFilePath(): string {
+  const dir = getStorageDir();
+  return path.join(dir, "alpha_google_leads.json");
+}
+
 const ZW = ["\u200B", "\u200C", "\u200D", "\u2060"];
 
 function encodeZeroWidth(text: string): string {
@@ -34,15 +57,20 @@ function recordLead(lead: {
   occurredAt: string;
 }) {
   try {
+    const file = getLeadsFilePath();
     let leads: any[] = [];
-    if (fs.existsSync(LEADS_FILE)) {
-      leads = JSON.parse(fs.readFileSync(LEADS_FILE, "utf8"));
+    if (fs.existsSync(file)) {
+      leads = JSON.parse(fs.readFileSync(file, "utf8"));
+    } else if (fs.existsSync("/tmp/alpha_google_leads.json")) {
+      leads = JSON.parse(fs.readFileSync("/tmp/alpha_google_leads.json", "utf8"));
     }
-    // Adiciona o novo lead no topo da lista
     leads.unshift(lead);
-    // Mantém os últimos 500 leads
     if (leads.length > 500) leads = leads.slice(0, 500);
-    fs.writeFileSync(LEADS_FILE, JSON.stringify(leads, null, 2));
+    fs.writeFileSync(file, JSON.stringify(leads, null, 2));
+
+    try {
+      fs.writeFileSync("/tmp/alpha_google_leads.json", JSON.stringify(leads, null, 2));
+    } catch {}
   } catch (err) {
     console.error("Erro ao registrar lead no disco:", err);
   }
@@ -51,7 +79,6 @@ function recordLead(lead: {
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
 
-  // 1. Atendentes com números reais (Josi e Sérgio)
   const attendants = [
     {
       name: process.env.CNAC_ATTENDANT_1_NAME || "Josi",
@@ -63,43 +90,43 @@ export async function GET(request: NextRequest) {
     }
   ];
 
-  // 2. Roleta 50% / 50%
   requestCounter = (requestCounter + 1) % attendants.length;
   const chosen = attendants[requestCounter];
 
-  // 3. Captura parâmetros do Google Ads
   const gclid = searchParams.get("gclid") || searchParams.get("wbraid") || searchParams.get("gbraid") || "";
   const keyword = searchParams.get("utm_term") || "";
-  const campaign = searchParams.get("utm_campaign") || "Pesquisa Google";
-  const adGroup = searchParams.get("utm_content") || searchParams.get("utm_adgroup") || "Conjunto Geral";
+  const campaign = searchParams.get("utm_campaign") || "";
+  const adGroup = searchParams.get("utm_content") || searchParams.get("utm_medium") || searchParams.get("utm_adgroup") || "";
 
-  // 4. Registra o lead imediatamente no servidor para aparecer no painel
-  recordLead({
-    id: gclid ? `g_${gclid.slice(0, 15)}_${Date.now()}` : `lead_${Date.now()}`,
-    leadPhone: chosen.phone,
-    attendantName: chosen.name,
-    keyword: keyword || "Direto (Sem palavra-chave)",
-    campaign: campaign,
-    adGroup: adGroup,
-    gclid: gclid || "sem_gclid",
-    conversionType: "conversa_iniciada",
-    status: "queued",
-    occurredAt: new Date().toISOString(),
-  });
+  // CORREÇÃO CRÍTICA: Só registra lead se for clique real de anúncio Google (com gclid ou keyword)
+  // E NUNCA coloca o telefone do atendente como leadPhone!
+  const isRealGoogleAd = Boolean(gclid || keyword);
 
-  // 5. Mensagem 100% limpa visível para o cliente
+  if (isRealGoogleAd) {
+    recordLead({
+      id: gclid ? `g_${gclid.slice(0, 15)}_${Date.now()}` : `lead_${Date.now()}`,
+      leadPhone: "Aguardando envio no WhatsApp...", // Nunca mais grava o telefone do atendente!
+      attendantName: chosen.name,
+      keyword: keyword || "Google Ads Search",
+      campaign: campaign || "Campanha Google",
+      adGroup: adGroup || "Conjunto Geral",
+      gclid: gclid || "sem_gclid",
+      conversionType: "conversa_iniciada",
+      status: "queued",
+      occurredAt: new Date().toISOString(),
+    });
+  }
+
   let text = "Olá! Vim pelo site da CNAC Tapetes e gostaria de um orçamento.";
 
-  // 6. Injeta a tag invisível se houver gclid (com palavra-chave, campanha e conjunto)
   if (gclid) {
     let tag = `ref:${gclid}`;
     if (keyword) tag += `|kw:${keyword.trim()}`;
-    if (campaign && campaign !== "Pesquisa Google") tag += `|cmp:${campaign.trim()}`;
-    if (adGroup && adGroup !== "Conjunto Geral") tag += `|adg:${adGroup.trim()}`;
+    if (campaign) tag += `|cmp:${campaign.trim()}`;
+    if (adGroup) tag += `|adg:${adGroup.trim()}`;
     text += encodeZeroWidth(tag);
   }
 
-  // 7. Redirecionamento instantâneo (< 10ms)
   const whatsappUrl = `https://api.whatsapp.com/send?phone=${chosen.phone}&text=${encodeURIComponent(text)}`;
 
   return NextResponse.redirect(whatsappUrl, {
