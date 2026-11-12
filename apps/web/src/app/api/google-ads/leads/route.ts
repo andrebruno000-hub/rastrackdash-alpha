@@ -5,7 +5,7 @@ import path from "path";
 export const dynamic = "force-dynamic";
 
 /**
- * API para listar, gerenciar, salvar regras e RECUPERAR LEADS do Google Ads
+ * API para listar, gerenciar, salvar regras e LIMPAR LEADS FANTASMAS
  * apps/web/src/app/api/google-ads/leads/route.ts
  */
 
@@ -90,32 +90,17 @@ export async function GET(request: NextRequest) {
     try {
       const file = getRulesFilePath();
       if (fs.existsSync(file)) {
-        const rules = JSON.parse(fs.readFileSync(file, "utf8"));
-        return NextResponse.json(rules);
+        return NextResponse.json(JSON.parse(fs.readFileSync(file, "utf8")));
       }
     } catch {}
     return NextResponse.json({
       quote: {
         actionName: "orcamento_enviado",
-        phrases: [
-          "orçamento enviado",
-          "orcamento enviado",
-          "segue o orçamento",
-          "segue seu orçamento",
-          "enviei o orçamento",
-          "proposta enviada",
-        ],
+        phrases: ["orçamento enviado", "orcamento enviado", "segue o orçamento", "segue seu orçamento", "enviei o orçamento", "proposta enviada"],
       },
       purchase: {
         actionName: "compra_realizada",
-        phrases: [
-          "pedido fechado",
-          "compra realizada",
-          "venda confirmada",
-          "pedido confirmado",
-          "segue copia do pedido",
-          "venda fechada",
-        ],
+        phrases: ["pedido fechado", "compra realizada", "venda confirmada", "pedido confirmado", "segue copia do pedido", "venda fechada"],
       },
     });
   }
@@ -130,7 +115,6 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
-    // 1. Salvar Regras
     if (body.type === "save_rules" && body.rules) {
       const file = getRulesFilePath();
       fs.writeFileSync(file, JSON.stringify(body.rules, null, 2), "utf8");
@@ -140,7 +124,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, message: "Regras salvas com sucesso!" });
     }
 
-    // 2. Recuperar ou Inserir Lead Manualmente
     if (body.action === "add_lead" || body.action === "recover_lead" || body.leadPhone) {
       const cleanPhone = String(body.leadPhone || "").replace(/\D/g, "");
       if (!cleanPhone) {
@@ -183,34 +166,43 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ error: "Ação não reconhecida" }, { status: 400 });
   } catch (error: any) {
-    return NextResponse.json({ error: error?.message || "Erro ao processar POST" }, { status: 500 });
+    return NextResponse.json({ error: error?.message || "Erro no POST" }, { status: 500 });
   }
 }
 
-export async function PATCH(request: NextRequest) {
+export async function DELETE(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { id, stage, value, attendantName } = body;
+    const { searchParams } = new URL(request.url);
+    const id = searchParams.get("id");
+    const action = searchParams.get("action");
+
+    let leads = readLeads();
+
+    // Remove automaticamente todos os leads que possuem os números dos próprios atendentes
+    if (action === "clean_attendants") {
+      const attendantPhones = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
+      const countBefore = leads.length;
+      leads = leads.filter((l: any) => {
+        const p = String(l.leadPhone || "").replace(/\D/g, "");
+        return !attendantPhones.some((att) => p === att || p.slice(-8) === att.slice(-8));
+      });
+      writeLeads(leads);
+      return NextResponse.json({
+        success: true,
+        removed: countBefore - leads.length,
+        message: "Registros dos atendentes limpos com sucesso!",
+      });
+    }
 
     if (!id) {
-      return NextResponse.json({ error: "ID do lead é obrigatório" }, { status: 400 });
+      return NextResponse.json({ error: "ID é obrigatório" }, { status: 400 });
     }
 
-    const leads = readLeads();
-    const index = leads.findIndex((l: any) => l.id === id);
-
-    if (index === -1) {
-      return NextResponse.json({ error: "Lead não encontrado" }, { status: 404 });
-    }
-
-    if (stage) leads[index].stage = stage;
-    if (value !== undefined) leads[index].value = Number(value);
-    if (attendantName) leads[index].attendantName = attendantName;
-    leads[index].updatedAt = new Date().toISOString();
-
+    leads = leads.filter((l: any) => l.id !== id);
     writeLeads(leads);
-    return NextResponse.json({ success: true, lead: leads[index] });
+
+    return NextResponse.json({ success: true, message: "Lead removido com sucesso!" });
   } catch (error: any) {
-    return NextResponse.json({ error: error?.message || "Erro interno" }, { status: 500 });
+    return NextResponse.json({ error: error?.message || "Erro ao excluir" }, { status: 500 });
   }
 }
