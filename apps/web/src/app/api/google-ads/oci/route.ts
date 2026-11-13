@@ -968,6 +968,22 @@ export async function GET(request: NextRequest) {
     }
   );
 
+  const adjustableConversions = leads
+    .filter((l: any) => Boolean(l?.sentStages?.compra_realizada?.orderId))
+    .map((l: any) => ({
+      id: l.id,
+      leadName: l.leadName || "Cliente WhatsApp",
+      leadPhone: l.leadPhone,
+      stage: l.stage,
+      value: Number(l.value || 0),
+      orderId: l.sentStages.compra_realizada.orderId,
+      conversionAction: l.sentStages.compra_realizada.conversionAction,
+      sentValue: Number(l.sentStages.compra_realizada.value || 0),
+      sentAt: l.sentStages.compra_realizada.sentAt,
+      pendingConversionAdjustment: l.pendingConversionAdjustment || null,
+      conversionAdjustments: l.conversionAdjustments || [],
+    }));
+
   return NextResponse.json(
     {
       customerId: CUSTOMER_ID,
@@ -988,6 +1004,7 @@ export async function GET(request: NextRequest) {
         actionSummaries: diagnostics.actionSummaries,
       },
       items,
+      adjustableConversions,
     },
     { headers: { "Cache-Control": "no-store, no-cache, must-revalidate" } }
   );
@@ -1012,6 +1029,139 @@ export async function POST(request: NextRequest) {
     if (body?.action === "refresh_diagnostics") {
       const diag = await fetchOrReadOfficialDiagnostics(true);
       return NextResponse.json({ success: diag.apiConnected, officialDiagnostics: diag });
+    }
+
+    // 3) Ajuste de Conversão (RESTATEMENT / RETRACTION) vinculado ao mesmo orderId
+    if (body?.action === "upload_adjustment") {
+      const leadId = String(body?.leadId || "").trim();
+      const adjustmentType: "RESTATEMENT" | "RETRACTION" =
+        body?.adjustmentType === "RETRACTION" ? "RETRACTION" : "RESTATEMENT";
+      const adjustedValue = Number(body?.adjustedValue ?? 0);
+
+      if (!leadId) {
+        return NextResponse.json({ success: false, error: "leadId é obrigatório" }, { status: 400 });
+      }
+
+      const leads = readLeads();
+      const idx = leads.findIndex((l: any) => l.id === leadId);
+      if (idx === -1) {
+        return NextResponse.json({ success: false, error: "Lead não encontrado" }, { status: 404 });
+      }
+
+      const sentStage =
+        leads[idx]?.sentStages?.compra_realizada ||
+        leads[idx]?.sentStages?.[getLeadStage(leads[idx])];
+
+      const orderId = String(
+        body?.orderId || sentStage?.orderId || leads[idx]?.ociOrderId || ""
+      ).trim();
+      if (!orderId) {
+        return NextResponse.json(
+          { success: false, error: "Lead sem orderId enviado anteriormente ao Google Ads." },
+          { status: 400 }
+        );
+      }
+
+      const ctxAdj = await resolveWorkingGoogleAdsContext();
+      if (!ctxAdj.ok || !ctxAdj.version || !ctxAdj.accessToken || !ctxAdj.devToken) {
+        return NextResponse.json(
+          { success: false, error: ctxAdj.error || "Google Ads API indisponível." },
+          { status: 400 }
+        );
+      }
+
+      const conversionAction =
+        sentStage?.conversionAction ||
+        resolveStageConversionAction(
+          "compra_realizada",
+          ctxAdj.conversionActions,
+          readActionMapping(),
+          readRulesActionNames()
+        )?.resourceName;
+
+      if (!conversionAction) {
+        return NextResponse.json(
+          { success: false, error: "Ação de conversão não encontrada para ajuste." },
+          { status: 400 }
+        );
+      }
+
+      const adjustmentEntry: Record<string, any> = {
+        conversionAction,
+        orderId,
+        adjustmentType,
+        adjustmentDateTime: formatGoogleAdsDateTime(Date.now()),
+      };
+      if (adjustmentType === "RESTATEMENT") {
+        adjustmentEntry.restatementValue = {
+          adjustedValue: isNaN(adjustedValue) ? 0 : adjustedValue,
+          currencyCode: "BRL",
+        };
+      }
+
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${ctxAdj.accessToken}`,
+        "developer-token": ctxAdj.devToken,
+        "Content-Type": "application/json",
+      };
+      if (ctxAdj.loginCustomerId) headers["login-customer-id"] = ctxAdj.loginCustomerId;
+
+      const adjRes = await fetch(
+        `https://googleads.googleapis.com/${ctxAdj.version}/customers/${CUSTOMER_ID}:uploadConversionAdjustments`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ conversionAdjustments: [adjustmentEntry], partialFailure: true }),
+        }
+      );
+
+      const adjJson = await adjRes.json().catch(() => ({}));
+      const pf = parsePartialFailureErrors(adjJson, 1);
+
+      if (!adjRes.ok || pf.hasAnyFailure) {
+        const rawErr =
+          pf.perItemError[0] ||
+          pf.globalMessage ||
+          adjJson?.error?.message ||
+          `Erro HTTP ${adjRes.status} no ajuste`;
+        return NextResponse.json(
+          { success: false, error: buildFriendlyGoogleOciError(rawErr), apiResponse: adjJson },
+          { status: 400 }
+        );
+      }
+
+      if (!Array.isArray(leads[idx].conversionAdjustments)) {
+        leads[idx].conversionAdjustments = [];
+      }
+      leads[idx].conversionAdjustments.unshift({
+        adjustmentType,
+        orderId,
+        adjustedValue: adjustmentType === "RESTATEMENT" ? adjustedValue : 0,
+        adjustedAt: new Date().toISOString(),
+        apiVersion: ctxAdj.version,
+      });
+      if (adjustmentType === "RESTATEMENT") {
+        leads[idx].value = adjustedValue;
+        if (leads[idx].sentStages?.compra_realizada) {
+          leads[idx].sentStages.compra_realizada.value = adjustedValue;
+        }
+      } else {
+        leads[idx].stage = "orcamento_enviado";
+        leads[idx].conversionType = "orcamento_enviado";
+        leads[idx].value = 0;
+      }
+      leads[idx].pendingConversionAdjustment = null;
+      leads[idx].updatedAt = new Date().toISOString();
+      writeLeads(leads);
+
+      return NextResponse.json({
+        success: true,
+        adjustmentType,
+        orderId,
+        adjustedValue,
+        apiVersionUsed: ctxAdj.version,
+        lead: leads[idx],
+      });
     }
 
     const mode: "retry_failed" | "auto" = body?.mode === "retry_failed" ? "retry_failed" : "auto";
