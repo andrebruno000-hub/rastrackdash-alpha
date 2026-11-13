@@ -5,11 +5,24 @@ import path from "path";
 export const dynamic = "force-dynamic";
 
 /**
- * API para listar, gerenciar, salvar regras e RECUPERAR LEADS do Google Ads
+ * API para listar, gerenciar, salvar regras e resolver nomes reais via Google Ads API
  * apps/web/src/app/api/google-ads/leads/route.ts
  *
- * Suporta armazenamento persistente (/data montado no Dokploy ou /tmp com fallback).
+ * PASSO 1: ConversÃ£o automÃ¡tica de IDs de Campanha e Conjunto para Nomes Reais
+ * via Google Ads API (v25/v26 com fallback automÃ¡tico e descoberta de MCC).
  */
+
+interface EntitiesSyncMeta {
+  apiConnected: boolean;
+  customerId: string;
+  apiVersionUsed?: string;
+  loginCustomerIdUsed?: string;
+  campaignsCount: number;
+  adGroupsCount: number;
+  lastSyncAt?: string;
+  lastAttemptAt?: string;
+  lastError?: string | null;
+}
 
 function getStorageDir(): string {
   if (process.env.GOOGLE_ADS_DATA_DIR) {
@@ -21,35 +34,33 @@ function getStorageDir(): string {
     } catch {}
   }
 
-  // Tenta pasta persistente montada no Dokploy
   try {
     if (fs.existsSync("/data")) {
       return "/data";
     }
   } catch {}
 
-  // Fallback padrÃ£o
   return "/tmp";
 }
 
 function getLeadsFilePath(): string {
-  const dir = getStorageDir();
-  return path.join(dir, "alpha_google_leads.json");
+  return path.join(getStorageDir(), "alpha_google_leads.json");
 }
 
 function getAuditsFilePath(): string {
-  const dir = getStorageDir();
-  return path.join(dir, "alpha_google_conversion_audits.json");
+  return path.join(getStorageDir(), "alpha_google_conversion_audits.json");
 }
 
 function getRulesFilePath(): string {
-  const dir = getStorageDir();
-  return path.join(dir, "alpha_google_conversion_rules.json");
+  return path.join(getStorageDir(), "alpha_google_conversion_rules.json");
 }
 
 function getEntitiesFilePath(): string {
-  const dir = getStorageDir();
-  return path.join(dir, "alpha_google_entities_map.json");
+  return path.join(getStorageDir(), "alpha_google_entities_map.json");
+}
+
+function getEntitiesMetaFilePath(): string {
+  return path.join(getStorageDir(), "alpha_google_entities_meta.json");
 }
 
 function readEntitiesMap(): Record<string, string> {
@@ -76,11 +87,52 @@ function writeEntitiesMap(map: Record<string, string>): void {
   }
 }
 
-async function getGoogleAdsAccessToken(): Promise<string | null> {
-  const clientId = process.env.GOOGLE_ADS_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_ADS_CLIENT_SECRET;
-  const refreshToken = process.env.GOOGLE_ADS_REFRESH_TOKEN;
-  if (!clientId || !clientSecret || !refreshToken) return null;
+function readEntitiesMeta(): EntitiesSyncMeta {
+  const defaultMeta: EntitiesSyncMeta = {
+    apiConnected: false,
+    customerId: (process.env.GOOGLE_ADS_CUSTOMER_ID || "3228136878").replace(/\D/g, ""),
+    campaignsCount: 0,
+    adGroupsCount: 0,
+  };
+  try {
+    const file = getEntitiesMetaFilePath();
+    if (fs.existsSync(file)) {
+      return { ...defaultMeta, ...JSON.parse(fs.readFileSync(file, "utf8")) };
+    } else if (fs.existsSync("/tmp/alpha_google_entities_meta.json")) {
+      return { ...defaultMeta, ...JSON.parse(fs.readFileSync("/tmp/alpha_google_entities_meta.json", "utf8")) };
+    }
+  } catch {}
+  return defaultMeta;
+}
+
+function writeEntitiesMeta(meta: EntitiesSyncMeta): void {
+  try {
+    const file = getEntitiesMetaFilePath();
+    fs.writeFileSync(file, JSON.stringify(meta, null, 2), "utf8");
+    try {
+      fs.writeFileSync("/tmp/alpha_google_entities_meta.json", JSON.stringify(meta, null, 2), "utf8");
+    } catch {}
+  } catch {}
+}
+
+function getActiveApiVersions(): string[] {
+  const configured = process.env.GOOGLE_ADS_API_VERSION?.trim();
+  const base = ["v25", "v26", "v24", "v23"];
+  if (!configured) return base;
+  return [configured, ...base.filter((v) => v !== configured)];
+}
+
+async function getGoogleAdsAccessToken(): Promise<{ token: string | null; error?: string }> {
+  const clientId = process.env.GOOGLE_ADS_CLIENT_ID?.trim();
+  const clientSecret = process.env.GOOGLE_ADS_CLIENT_SECRET?.trim();
+  const refreshToken = process.env.GOOGLE_ADS_REFRESH_TOKEN?.trim();
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    return {
+      token: null,
+      error: "VariÃ¡veis OAuth ausentes (GOOGLE_ADS_CLIENT_ID / CLIENT_SECRET / REFRESH_TOKEN).",
+    };
+  }
 
   try {
     const res = await fetch("https://oauth2.googleapis.com/token", {
@@ -93,77 +145,325 @@ async function getGoogleAdsAccessToken(): Promise<string | null> {
         grant_type: "refresh_token",
       }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      return data.access_token || null;
+
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.access_token) {
+      return { token: data.access_token };
     }
-  } catch (err) {
-    console.error("Erro ao renovar token Google Ads:", err);
+    return {
+      token: null,
+      error: `OAuth2 erro ${res.status}: ${data.error_description || data.error || "Falha ao gerar access_token"}`,
+    };
+  } catch (err: any) {
+    return { token: null, error: `Falha de rede OAuth2: ${err?.message || "desconhecida"}` };
   }
-  return null;
 }
 
-// AUTO-DISCOVERY: Busca todas as Campanhas e Conjuntos na conta Google Ads sem intervenÃ§Ã£o humana
-async function autoSyncEntitiesFromGoogleAds(): Promise<Record<string, string>> {
-  const map = readEntitiesMap();
-  const customerId = (process.env.GOOGLE_ADS_CUSTOMER_ID || "3228136878").replace(/\D/g, "");
-  const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
-  const accessToken = await getGoogleAdsAccessToken();
+async function executeGaqlStream(params: {
+  version: string;
+  customerId: string;
+  accessToken: string;
+  devToken: string;
+  query: string;
+  loginCustomerId?: string;
+}): Promise<{ ok: boolean; status: number; rows: any[]; errorText?: string }> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${params.accessToken}`,
+    "developer-token": params.devToken,
+    "Content-Type": "application/json",
+  };
+  if (params.loginCustomerId) {
+    headers["login-customer-id"] = params.loginCustomerId.replace(/\D/g, "");
+  }
 
-  if (!devToken || !accessToken) {
-    return map;
+  const res = await fetch(
+    `https://googleads.googleapis.com/${params.version}/customers/${params.customerId}/googleAds:searchStream`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query: params.query }),
+    }
+  );
+
+  const rawText = await res.text();
+  if (!res.ok) {
+    return { ok: false, status: res.status, rows: [], errorText: rawText.slice(0, 500) };
   }
 
   try {
-    const gaqlQuery = `
-      SELECT
-        campaign.id,
-        campaign.name,
-        ad_group.id,
-        ad_group.name,
-        campaign.status,
-        ad_group.status
-      FROM ad_group
-      WHERE campaign.status != 'REMOVED'
-    `;
+    const parsed = JSON.parse(rawText);
+    const rows: any[] = [];
+    if (Array.isArray(parsed)) {
+      for (const batch of parsed) {
+        if (Array.isArray(batch?.results)) {
+          rows.push(...batch.results);
+        }
+      }
+    } else if (Array.isArray(parsed?.results)) {
+      rows.push(...parsed.results);
+    }
+    return { ok: true, status: res.status, rows };
+  } catch {
+    return { ok: false, status: res.status, rows: [], errorText: "Resposta JSON invÃ¡lida da Google Ads API." };
+  }
+}
 
-    const res = await fetch(
-      `https://googleads.googleapis.com/v17/customers/${customerId}/googleAds:searchStream`,
+async function discoverManagerLoginCustomerId(params: {
+  version: string;
+  targetCustomerId: string;
+  accessToken: string;
+  devToken: string;
+}): Promise<string | undefined> {
+  try {
+    const listRes = await fetch(
+      `https://googleads.googleapis.com/${params.version}/customers:listAccessibleCustomers`,
       {
-        method: "POST",
+        method: "GET",
         headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "developer-token": devToken,
-          "login-customer-id": customerId,
-          "Content-Type": "application/json",
+          Authorization: `Bearer ${params.accessToken}`,
+          "developer-token": params.devToken,
         },
-        body: JSON.stringify({ query: gaqlQuery }),
       }
     );
+    if (!listRes.ok) return undefined;
+    const listData = await listRes.json().catch(() => ({}));
+    const resourceNames: string[] = Array.isArray(listData?.resourceNames) ? listData.resourceNames : [];
 
-    if (res.ok) {
-      const gadsData = await res.json();
-      if (Array.isArray(gadsData)) {
-        gadsData.forEach((batch: any) => {
-          if (Array.isArray(batch.results)) {
-            batch.results.forEach((row: any) => {
-              const cId = String(row.campaign?.id || "");
-              const cName = row.campaign?.name;
-              const aId = String(row.adGroup?.id || "");
-              const aName = row.adGroup?.name;
-              if (cId && cName) map[cId] = cName;
-              if (aId && aName) map[aId] = aName;
-            });
-          }
-        });
-        writeEntitiesMap(map);
+    for (const rn of resourceNames) {
+      const candidateId = String(rn).replace("customers/", "").replace(/\D/g, "");
+      if (!candidateId) continue;
+
+      const check = await executeGaqlStream({
+        version: params.version,
+        customerId: candidateId,
+        loginCustomerId: candidateId,
+        accessToken: params.accessToken,
+        devToken: params.devToken,
+        query: `SELECT customer_client.id, customer_client.manager FROM customer_client WHERE customer_client.id = ${params.targetCustomerId}`,
+      });
+
+      if (check.ok && check.rows.length > 0) {
+        return candidateId;
       }
     }
-  } catch (err) {
-    console.error("Erro na auto-sincronizaÃ§Ã£o do catÃ¡logo Google Ads:", err);
+  } catch {}
+  return undefined;
+}
+
+// AUTO-DISCOVERY PROFISSIONAL (PadrÃ£o Hyros/AnyTrack/RedTrack):
+// Busca Campanhas, Conjuntos e Asset Groups (PMax) via Google Ads API ativa (v25/v26)
+async function autoSyncEntitiesFromGoogleAds(forceRefresh = false): Promise<{
+  map: Record<string, string>;
+  meta: EntitiesSyncMeta;
+}> {
+  const map = readEntitiesMap();
+  const prevMeta = readEntitiesMeta();
+  const customerId = (process.env.GOOGLE_ADS_CUSTOMER_ID || "3228136878").replace(/\D/g, "");
+  const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim();
+  const nowMs = Date.now();
+
+  // Evita spam na API em polling de 4s: respeita cooldown de 60s apÃ³s erro e TTL de 15min apÃ³s sucesso
+  if (!forceRefresh && prevMeta.lastAttemptAt) {
+    const elapsedMs = nowMs - new Date(prevMeta.lastAttemptAt).getTime();
+    if (!prevMeta.apiConnected && elapsedMs < 60 * 1000) {
+      return { map, meta: prevMeta };
+    }
+    if (prevMeta.apiConnected && prevMeta.lastSyncAt) {
+      const syncAgeMs = nowMs - new Date(prevMeta.lastSyncAt).getTime();
+      if (syncAgeMs < 15 * 60 * 1000 && Object.keys(map).length > 0) {
+        return { map, meta: prevMeta };
+      }
+    }
   }
 
-  return map;
+  if (!devToken) {
+    const meta: EntitiesSyncMeta = {
+      ...prevMeta,
+      apiConnected: false,
+      customerId,
+      lastAttemptAt: new Date().toISOString(),
+      lastError: "GOOGLE_ADS_DEVELOPER_TOKEN nÃ£o configurado.",
+    };
+    writeEntitiesMeta(meta);
+    return { map, meta };
+  }
+
+  const oauth = await getGoogleAdsAccessToken();
+  if (!oauth.token) {
+    const meta: EntitiesSyncMeta = {
+      ...prevMeta,
+      apiConnected: false,
+      customerId,
+      lastAttemptAt: new Date().toISOString(),
+      lastError: oauth.error || "Token OAuth invÃ¡lido.",
+    };
+    writeEntitiesMeta(meta);
+    return { map, meta };
+  }
+
+  const accessToken = oauth.token;
+  const versions = getActiveApiVersions();
+  const explicitLoginId = process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID?.replace(/\D/g, "") || undefined;
+  let loginCustomerId = explicitLoginId || prevMeta.loginCustomerIdUsed;
+
+  const campaignQuery = `SELECT campaign.id, campaign.name, campaign.status FROM campaign`;
+  const adGroupQuery = `SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group.status FROM ad_group`;
+  const assetGroupQuery = `SELECT campaign.id, campaign.name, asset_group.id, asset_group.name FROM asset_group`;
+
+  let workingVersion: string | undefined;
+  let campaignRows: any[] = [];
+  let lastError: string | null = null;
+
+  for (const version of versions) {
+    let res = await executeGaqlStream({
+      version,
+      customerId,
+      accessToken,
+      devToken,
+      query: campaignQuery,
+      loginCustomerId,
+    });
+
+    // Se falhou por versÃ£o descontinuada (404 / UNSUPPORTED_VERSION), tenta a prÃ³xima versÃ£o ativa
+    if (!res.ok && (res.status === 404 || (res.errorText && /UNSUPPORTED_VERSION|deprecated|sunset/i.test(res.errorText)))) {
+      lastError = `VersÃ£o ${version} indisponÃ­vel (${res.status})`;
+      continue;
+    }
+
+    // Se falhou com 403 / USER_PERMISSION_DENIED e nÃ£o havia login-customer-id explÃ­cito, descobre a MCC automaticamente
+    if (!res.ok && !explicitLoginId && (res.status === 403 || (res.errorText && /USER_PERMISSION_DENIED|PERMISSION_DENIED/i.test(res.errorText)))) {
+      // 1) Tenta primeiro SEM login-customer-id se estava usando um em cache
+      if (loginCustomerId) {
+        const directRes = await executeGaqlStream({
+          version,
+          customerId,
+          accessToken,
+          devToken,
+          query: campaignQuery,
+        });
+        if (directRes.ok) {
+          loginCustomerId = undefined;
+          res = directRes;
+        }
+      }
+
+      // 2) Se ainda falhar, consulta listAccessibleCustomers para encontrar a MCC mÃ£e
+      if (!res.ok) {
+        const discoveredMcc = await discoverManagerLoginCustomerId({
+          version,
+          targetCustomerId: customerId,
+          accessToken,
+          devToken,
+        });
+        if (discoveredMcc) {
+          loginCustomerId = discoveredMcc;
+          res = await executeGaqlStream({
+            version,
+            customerId,
+            accessToken,
+            devToken,
+            query: campaignQuery,
+            loginCustomerId,
+          });
+        }
+      }
+    }
+
+    if (res.ok) {
+      workingVersion = version;
+      campaignRows = res.rows;
+      lastError = null;
+      break;
+    } else {
+      lastError = `Google Ads API (${version}) erro ${res.status}: ${res.errorText || "erro desconhecido"}`;
+      break;
+    }
+  }
+
+  if (!workingVersion) {
+    const meta: EntitiesSyncMeta = {
+      ...prevMeta,
+      apiConnected: false,
+      customerId,
+      lastAttemptAt: new Date().toISOString(),
+      lastError: lastError || "NÃ£o foi possÃ­vel conectar na Google Ads API.",
+    };
+    writeEntitiesMeta(meta);
+    return { map, meta };
+  }
+
+  let campaignsCount = 0;
+  let adGroupsCount = 0;
+
+  for (const row of campaignRows) {
+    const cId = String(row.campaign?.id || "");
+    const cName = row.campaign?.name;
+    if (cId && cName) {
+      map[cId] = cName;
+      campaignsCount++;
+    }
+  }
+
+  // Busca todos os Conjuntos de AnÃºncios (Ad Groups)
+  const adGroupRes = await executeGaqlStream({
+    version: workingVersion,
+    customerId,
+    accessToken,
+    devToken,
+    query: adGroupQuery,
+    loginCustomerId,
+  });
+
+  if (adGroupRes.ok) {
+    for (const row of adGroupRes.rows) {
+      const cId = String(row.campaign?.id || "");
+      const cName = row.campaign?.name;
+      const aId = String(row.adGroup?.id || "");
+      const aName = row.adGroup?.name;
+      if (cId && cName) map[cId] = cName;
+      if (aId && aName) {
+        map[aId] = aName;
+        adGroupsCount++;
+      }
+    }
+  }
+
+  // Busca Asset Groups (Performance Max) em modo best-effort
+  const assetGroupRes = await executeGaqlStream({
+    version: workingVersion,
+    customerId,
+    accessToken,
+    devToken,
+    query: assetGroupQuery,
+    loginCustomerId,
+  });
+
+  if (assetGroupRes.ok) {
+    for (const row of assetGroupRes.rows) {
+      const agId = String(row.assetGroup?.id || "");
+      const agName = row.assetGroup?.name;
+      if (agId && agName && !map[agId]) {
+        map[agId] = agName;
+        adGroupsCount++;
+      }
+    }
+  }
+
+  writeEntitiesMap(map);
+  const meta: EntitiesSyncMeta = {
+    apiConnected: true,
+    customerId,
+    apiVersionUsed: workingVersion,
+    loginCustomerIdUsed: loginCustomerId,
+    campaignsCount,
+    adGroupsCount,
+    lastSyncAt: new Date().toISOString(),
+    lastAttemptAt: new Date().toISOString(),
+    lastError: null,
+  };
+  writeEntitiesMeta(meta);
+
+  return { map, meta };
 }
 
 const ATTENDANT_PHONES = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
@@ -189,11 +489,9 @@ function readLeads(): any[] {
     console.error("Erro ao ler leads:", error);
   }
 
-  // AUTO-HIGIENIZAÃ‡ÃƒO: Remove automaticamente qualquer lead antigo com telefone de atendente
   const beforeCount = leads.length;
   leads = leads.filter((l: any) => !isAttendantPhone(l.leadPhone));
 
-  // Se filtrou algum lead fantasma de atendente, salva a lista limpa no disco
   if (leads.length < beforeCount) {
     try {
       const file = getLeadsFilePath();
@@ -209,7 +507,6 @@ function writeLeads(leads: any[]): void {
   try {
     const file = getLeadsFilePath();
     fs.writeFileSync(file, JSON.stringify(leads.slice(0, 500), null, 2), "utf8");
-    // Espelha tambÃ©m em /tmp por redundÃ¢ncia
     try {
       fs.writeFileSync("/tmp/alpha_google_leads.json", JSON.stringify(leads.slice(0, 500), null, 2), "utf8");
     } catch {}
@@ -244,33 +541,38 @@ export async function GET(request: NextRequest) {
       const file = getRulesFilePath();
       if (fs.existsSync(file)) {
         const rules = JSON.parse(fs.readFileSync(file, "utf8"));
-        return NextResponse.json(rules);
+        return NextResponse.json(rules, {
+          headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
+        });
       }
     } catch {}
-    return NextResponse.json({
-      quote: {
-        actionName: "orcamento_enviado",
-        phrases: [
-          "orÃ§amento enviado",
-          "orcamento enviado",
-          "segue o orÃ§amento",
-          "segue seu orÃ§amento",
-          "enviei o orÃ§amento",
-          "proposta enviada",
-        ],
+    return NextResponse.json(
+      {
+        quote: {
+          actionName: "orcamento_enviado",
+          phrases: [
+            "orÃ§amento enviado",
+            "orcamento enviado",
+            "segue o orÃ§amento",
+            "segue seu orÃ§amento",
+            "enviei o orÃ§amento",
+            "proposta enviada",
+          ],
+        },
+        purchase: {
+          actionName: "compra_realizada",
+          phrases: [
+            "pedido fechado",
+            "compra realizada",
+            "venda confirmada",
+            "pedido confirmado",
+            "segue copia do pedido",
+            "venda fechada",
+          ],
+        },
       },
-      purchase: {
-        actionName: "compra_realizada",
-        phrases: [
-          "pedido fechado",
-          "compra realizada",
-          "venda confirmada",
-          "pedido confirmado",
-          "segue copia do pedido",
-          "venda fechada",
-        ],
-      },
-    });
+      { headers: { "Cache-Control": "no-store, no-cache, must-revalidate" } }
+    );
   }
 
   if (type === "entities") {
@@ -279,49 +581,78 @@ export async function GET(request: NextRequest) {
     });
   }
 
+  if (type === "entities_status") {
+    const entities = readEntitiesMap();
+    const meta = readEntitiesMeta();
+    return NextResponse.json(
+      {
+        ...meta,
+        mappedKeysCount: Object.keys(entities).length,
+        entities,
+      },
+      { headers: { "Cache-Control": "no-store, no-cache, must-revalidate" } }
+    );
+  }
+
   const leads = readLeads();
   let entities = readEntitiesMap();
 
-  // AUTO-RESOLVIMENTO: Se houver IDs numÃ©ricos nÃ£o mapeados, busca automaticamente na API do Google Ads
-  const hasUnmapped = leads.some((l: any) =>
-    (l.campaign && /^\d+$/.test(l.campaign) && !entities[l.campaign]) ||
-    (l.adGroup && /^\d+$/.test(l.adGroup) && !entities[l.adGroup])
+  const hasUnmappedNumeric = leads.some(
+    (l: any) =>
+      (l.campaign && /^\d+$/.test(String(l.campaign).trim()) && !entities[String(l.campaign).trim()]) ||
+      (l.adGroup && /^\d+$/.test(String(l.adGroup).trim()) && !entities[String(l.adGroup).trim()])
   );
 
-  if (hasUnmapped) {
+  const meta = readEntitiesMeta();
+  const isCacheExpired =
+    !meta.lastSyncAt || Date.now() - new Date(meta.lastSyncAt).getTime() > 15 * 60 * 1000;
+
+  if (hasUnmappedNumeric || isCacheExpired) {
     try {
-      entities = await autoSyncEntitiesFromGoogleAds();
+      const synced = await autoSyncEntitiesFromGoogleAds(false);
+      entities = synced.map;
     } catch {}
   }
 
-  const enriched = leads.map((l: any) => ({
-    ...l,
-    campaignName: entities[l.campaign] || l.campaign,
-    adGroupName: entities[l.adGroup] || l.adGroup,
-  }));
+  const enriched = leads.map((l: any) => {
+    const rawCamp = String(l.campaign || "").trim();
+    const rawAdGrp = String(l.adGroup || "").trim();
+    return {
+      ...l,
+      campaignName: entities[rawCamp] || rawCamp,
+      adGroupName: entities[rawAdGrp] || rawAdGrp,
+    };
+  });
 
   return NextResponse.json(enriched, {
     headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
   });
 }
 
-// POST: Recuperar ou Inserir Lead Manualmente, Salvar Regras ou Sincronizar CatÃ¡logo
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
-    // 0. Auto-SincronizaÃ§Ã£o do CatÃ¡logo Completo via Google Ads API
+    // 0. Auto-SincronizaÃ§Ã£o ForÃ§ada do CatÃ¡logo Completo via Google Ads API
     if (body.action === "sync_catalog" || body.action === "sync_entities_api") {
-      const updated = await autoSyncEntitiesFromGoogleAds();
+      const { map, meta } = await autoSyncEntitiesFromGoogleAds(true);
       return NextResponse.json({
-        success: true,
-        entities: updated,
-        count: Object.keys(updated).length,
-        message: "CatÃ¡logo de Campanhas e Conjuntos sincronizado com sucesso via Google Ads API!",
+        success: meta.apiConnected,
+        apiConnected: meta.apiConnected,
+        apiVersionUsed: meta.apiVersionUsed,
+        loginCustomerIdUsed: meta.loginCustomerIdUsed,
+        campaignsCount: meta.campaignsCount,
+        adGroupsCount: meta.adGroupsCount,
+        lastError: meta.lastError,
+        entities: map,
+        count: Object.keys(map).length,
+        message: meta.apiConnected
+          ? `CatÃ¡logo sincronizado com sucesso via Google Ads API (${meta.apiVersionUsed}): ${meta.campaignsCount} campanhas e ${meta.adGroupsCount} conjuntos.`
+          : `Falha ao conectar Google Ads API: ${meta.lastError}`,
       });
     }
 
-    // 1. Salvar ou Atualizar Mapeamento de Nomes Reais (ID Google Ads -> Nome Real)
+    // 1. Salvar ou Atualizar Mapeamento Manual (Fallback se necessÃ¡rio)
     if (body.action === "save_entities" || body.type === "save_entities") {
       const current = readEntitiesMap();
       const updated = { ...current, ...(body.entities || {}) };
@@ -329,7 +660,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, entities: updated, message: "Nomes reais vinculados com sucesso!" });
     }
 
-    // 1. Salvar Regras DinÃ¢micas de ConversÃ£o
+    // 2. Salvar Regras DinÃ¢micas de ConversÃ£o
     if (body.type === "save_rules" && body.rules) {
       const file = getRulesFilePath();
       fs.writeFileSync(file, JSON.stringify(body.rules, null, 2), "utf8");
@@ -339,7 +670,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, message: "Regras salvas com sucesso!" });
     }
 
-    // 2. Recuperar ou Inserir Lead Manualmente
+    // 3. Inserir/Recuperar Lead (mantido atÃ© o Passo 2)
     if (body.action === "add_lead" || body.action === "recover_lead" || body.leadPhone) {
       const cleanPhone = String(body.leadPhone || "").replace(/\D/g, "");
       if (!cleanPhone) {
@@ -347,7 +678,6 @@ export async function POST(request: NextRequest) {
       }
 
       const leads = readLeads();
-
       const newLead = {
         id: body.id || `lead_recov_${Date.now()}`,
         leadName: body.leadName || "Cliente WhatsApp",
@@ -366,7 +696,6 @@ export async function POST(request: NextRequest) {
         updatedAt: new Date().toISOString(),
       };
 
-      // Se jÃ¡ existir pelo telefone, atualiza. SenÃ£o adiciona no topo.
       const existingIdx = leads.findIndex((l: any) => {
         const p = String(l.leadPhone || "").replace(/\D/g, "");
         return p === cleanPhone || (p.length >= 8 && cleanPhone.length >= 8 && p.slice(-8) === cleanPhone.slice(-8));
@@ -379,7 +708,6 @@ export async function POST(request: NextRequest) {
       }
 
       writeLeads(leads);
-
       return NextResponse.json({ success: true, lead: newLead, message: "Lead salvo com sucesso!" });
     }
 
@@ -411,7 +739,6 @@ export async function PATCH(request: NextRequest) {
     leads[index].updatedAt = new Date().toISOString();
 
     writeLeads(leads);
-
     return NextResponse.json({ success: true, lead: leads[index] });
   } catch (error: any) {
     return NextResponse.json({ error: error?.message || "Erro interno" }, { status: 500 });
@@ -426,7 +753,6 @@ export async function DELETE(request: NextRequest) {
 
     let leads = readLeads();
 
-    // Limpa automaticamente leads teste com nÃºmeros dos atendentes
     if (action === "clean_attendants") {
       const attendantPhones = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
       const originalCount = leads.length;
