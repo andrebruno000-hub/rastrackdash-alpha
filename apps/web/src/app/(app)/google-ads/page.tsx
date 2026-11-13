@@ -29,6 +29,8 @@ import {
   Calendar,
   Download,
   Percent,
+  AlertTriangle,
+  Lock,
 } from "lucide-react";
 
 interface Attendant {
@@ -59,6 +61,10 @@ interface GoogleLeadEvent {
   purchasedAt?: string;
   value?: number;
   triggerPhrase?: string;
+  ociOrderId?: string;
+  ociError?: string | null;
+  ociResult?: string | null;
+  lastUploadedStage?: string;
 }
 
 interface ConversionRules {
@@ -261,25 +267,108 @@ export default function GoogleAdsPage() {
     return hasGclid || hasKeyword || hasRealPhone;
   };
 
-  // Sincronização & Reenvio de Conversões OCI para o Google Ads
+  // Central OCI v25/v26: Diagnóstico Oficial, Enhanced Conversions & Retry Inteligente
   const [isSyncingOci, setIsSyncingOci] = useState(false);
   const [ociSyncResult, setOciSyncResult] = useState<any>(null);
+  const [ociDiagnostics, setOciDiagnostics] = useState<any>(null);
+  const [isRefreshingOciDiag, setIsRefreshingOciDiag] = useState(false);
+  const [ociActionMapDraft, setOciActionMapDraft] = useState<{
+    conversa_iniciada: string;
+    orcamento_enviado: string;
+    compra_realizada: string;
+  }>({
+    conversa_iniciada: "",
+    orcamento_enviado: "",
+    compra_realizada: "",
+  });
+  const [isSavingOciMapping, setIsSavingOciMapping] = useState(false);
+  const [ociMappingFeedback, setOciMappingFeedback] = useState<string | null>(null);
+  const ociActionMapLoadedRef = useRef<boolean>(false);
+  const lastAutoOciTriggerRef = useRef<number>(0);
 
-  const handleTriggerOciSync = async (force: boolean = true, id?: string) => {
+  const fetchOciDiagnostics = async (forceRefresh = false) => {
+    if (forceRefresh) setIsRefreshingOciDiag(true);
+    try {
+      const res = await fetch(`/api/google-ads/oci${forceRefresh ? "?refresh=true" : ""}`);
+      if (res.ok) {
+        const data = await res.json();
+        setOciDiagnostics(data);
+        if (!ociActionMapLoadedRef.current && data?.actionMapping) {
+          ociActionMapLoadedRef.current = true;
+          setOciActionMapDraft({
+            conversa_iniciada: data.actionMapping.conversa_iniciada || "",
+            orcamento_enviado: data.actionMapping.orcamento_enviado || "",
+            compra_realizada: data.actionMapping.compra_realizada || "",
+          });
+        }
+        // Disparo automático seguro para conversões que já completaram maturação de 4h
+        const readyCount = Number(data?.stats?.readyToUpload || 0);
+        if (readyCount > 0 && Date.now() - lastAutoOciTriggerRef.current > 2 * 60 * 1000) {
+          lastAutoOciTriggerRef.current = Date.now();
+          fetch("/api/google-ads/oci", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: "auto" }),
+          })
+            .then((r) => r.json())
+            .then((autoRes) => {
+              if (autoRes && (autoRes.uploadedCount > 0 || autoRes.failedCount > 0)) {
+                setOciSyncResult(autoRes);
+                fetchData();
+                fetch("/api/google-ads/oci")
+                  .then((d) => d.json())
+                  .then((refreshed) => setOciDiagnostics(refreshed))
+                  .catch(() => {});
+              }
+            })
+            .catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.error("Erro ao consultar diagnóstico OCI:", err);
+    } finally {
+      if (forceRefresh) setIsRefreshingOciDiag(false);
+    }
+  };
+
+  const handleTriggerOciRetry = async (id?: string) => {
     setIsSyncingOci(true);
     try {
       const res = await fetch("/api/google-ads/oci", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force, id }),
+        body: JSON.stringify({ mode: "retry_failed", id }),
       });
       const data = await res.json();
       setOciSyncResult(data);
-      await fetchData();
+      await Promise.all([fetchData(), fetchOciDiagnostics(false)]);
     } catch (err) {
-      console.error("Erro ao sincronizar OCI:", err);
+      console.error("Erro ao reenviar falhas OCI:", err);
     } finally {
       setIsSyncingOci(false);
+    }
+  };
+
+  const handleSaveOciMapping = async () => {
+    setIsSavingOciMapping(true);
+    setOciMappingFeedback(null);
+    try {
+      const res = await fetch("/api/google-ads/oci", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "save_action_mapping", mapping: ociActionMapDraft }),
+      });
+      if (res.ok) {
+        setOciMappingFeedback("Vínculo de ações de conversão salvo com sucesso!");
+        await fetchOciDiagnostics(false);
+        setTimeout(() => setOciMappingFeedback(null), 3500);
+      } else {
+        setOciMappingFeedback("Erro ao salvar vínculo de ações.");
+      }
+    } catch {
+      setOciMappingFeedback("Falha de comunicação ao salvar vínculo.");
+    } finally {
+      setIsSavingOciMapping(false);
     }
   };
 
@@ -356,6 +445,14 @@ export default function GoogleAdsPage() {
     const interval = setInterval(fetchData, 4000);
     return () => clearInterval(interval);
   }, [reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant]);
+
+  useEffect(() => {
+    fetchOciDiagnostics(false);
+    const ociInterval = setInterval(() => {
+      fetchOciDiagnostics(false);
+    }, 30000);
+    return () => clearInterval(ociInterval);
+  }, []);
 
   // Manipulador de Presets de Data
   const handleDatePresetChange = (preset: "today" | "yesterday" | "7d" | "30d" | "this_month" | "all") => {
@@ -1435,52 +1532,56 @@ export default function GoogleAdsPage() {
 
                         <td style={{ padding: "10px 12px" }}>
                           {event.status === "sent" ? (
-                            <span style={{ color: "#34d399", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px", fontWeight: 700 }}>
-                              <CheckCircle2 size={13} /> Enviado Google
-                            </span>
-                          ) : event.status === "failed" ? (
-                            <button
-                              type="button"
-                              onClick={() => handleTriggerOciSync(true, event.id)}
-                              style={{
-                                background: "rgba(239, 68, 68, 0.15)",
-                                border: "1px solid rgba(239, 68, 68, 0.3)",
-                                color: "#f87171",
-                                padding: "3px 8px",
-                                borderRadius: "6px",
-                                fontSize: "11px",
-                                fontWeight: 600,
-                                cursor: "pointer",
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: "4px",
-                              }}
-                            >
-                              <RefreshCw size={11} /> Reenviar
-                            </button>
-                          ) : (
-                            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                              <span style={{ color: "#38bdf8", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px" }}>
-                                <Clock size={12} /> Fila Maturação
+                            <div>
+                              <span
+                                style={{ color: "#34d399", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px", fontWeight: 700 }}
+                                title={event.ociResult || "Enviado com sucesso ao Google Ads"}
+                              >
+                                <CheckCircle2 size={13} /> Enviado Google
                               </span>
+                              {event.ociOrderId && (
+                                <div style={{ color: "#64748b", fontSize: "10px", marginTop: "2px" }}>
+                                  orderId: {event.ociOrderId.slice(0, 18)}…
+                                </div>
+                              )}
+                            </div>
+                          ) : event.status === "failed" ? (
+                            <div>
                               <button
                                 type="button"
-                                onClick={() => handleTriggerOciSync(true, event.id)}
-                                title="Forçar envio para o Google Ads agora"
+                                onClick={() => handleTriggerOciRetry(event.id)}
+                                disabled={isSyncingOci}
+                                title={event.ociError || "Reenviar conversão com falha"}
                                 style={{
-                                  background: "#1e293b",
-                                  border: "1px solid #334155",
-                                  color: "#38bdf8",
-                                  borderRadius: "4px",
-                                  padding: "2px 6px",
-                                  fontSize: "10px",
-                                  fontWeight: 600,
+                                  background: "rgba(239, 68, 68, 0.15)",
+                                  border: "1px solid rgba(239, 68, 68, 0.35)",
+                                  color: "#f87171",
+                                  padding: "4px 9px",
+                                  borderRadius: "6px",
+                                  fontSize: "11px",
+                                  fontWeight: 700,
                                   cursor: "pointer",
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: "4px",
                                 }}
                               >
-                                Enviar
+                                <RefreshCw size={11} /> Reenviar Falha
                               </button>
+                              {event.ociError && (
+                                <div style={{ color: "#fca5a5", fontSize: "10px", marginTop: "3px", maxWidth: "170px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {event.ociError}
+                                </div>
+                              )}
                             </div>
+                          ) : !event.firstMessageAt || isWaitingWhatsApp(event.leadPhone) ? (
+                            <span style={{ color: "#facc15", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "11px", fontWeight: 600 }}>
+                              <Clock size={12} /> Aguardando WhatsApp
+                            </span>
+                          ) : (
+                            <span style={{ color: "#38bdf8", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "11px", fontWeight: 600 }}>
+                              <Clock size={12} /> Fila Maturação (4h)
+                            </span>
                           )}
                         </td>
 
@@ -2466,9 +2567,19 @@ export default function GoogleAdsPage() {
                           {item.value ? `R$ ${item.value.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}` : "—"}
                         </td>
                         <td style={{ padding: "10px 12px" }}>
-                          <span style={{ color: "#10b981", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px" }}>
-                            <CheckCircle2 size={12} /> Fila OCI Ativa
-                          </span>
+                          {item.statusOci === "sent" ? (
+                            <span style={{ color: "#34d399", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px", fontWeight: 600 }}>
+                              <CheckCircle2 size={12} /> Enviado Google
+                            </span>
+                          ) : item.statusOci === "failed" ? (
+                            <span style={{ color: "#f87171", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px", fontWeight: 600 }}>
+                              <AlertTriangle size={12} /> Falha OCI
+                            </span>
+                          ) : (
+                            <span style={{ color: "#38bdf8", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px" }}>
+                              <Clock size={12} /> Fila OCI Ativa
+                            </span>
+                          )}
                         </td>
                         <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
                           {item.timestamp ? new Date(item.timestamp).toLocaleString("pt-BR") : "—"}
@@ -2637,65 +2748,325 @@ export default function GoogleAdsPage() {
             )}
           </div>
 
-          {/* CENTRAL OCI — ENVIO E REENVIO PARA GOOGLE ADS API (ESTILO META ADS) */}
-          <div style={{ marginTop: "20px", padding: "18px", background: "#0b1329", border: "1px solid #1e293b", borderRadius: "10px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px", marginBottom: "12px" }}>
-              <div>
-                <h4 style={{ color: "#38bdf8", fontSize: "14px", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
-                  <Send size={16} /> Disparo & Sincronização Google Ads OCI (Offline Conversions v17)
-                </h4>
-                <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
-                  Controle de envio para a API do Google Ads. Envie conversões maturadas (&gt;4h) ou force o reenvio manual a qualquer momento (como no Meta Ads).
-                </p>
-              </div>
+          {/* CENTRAL OCI — GOOGLE ADS API v25/v26 + ENHANCED CONVERSIONS SHA-256 + DIAGNÓSTICO OFICIAL */}
+          {(() => {
+            const ociFailedCount = Math.max(
+              entitiesStatus.ociStats?.failed ?? 0,
+              ociDiagnostics?.stats?.failedCount ?? 0,
+              realLeadEvents.filter((l) => l.status === "failed").length
+            );
+            const clientSum = ociDiagnostics?.officialDiagnostics?.clientSummary?.[0];
+            const officialRatePct = clientSum ? Math.round(Number(clientSum.successRate || 0) * 100) : null;
+            const availableActions = Array.isArray(ociDiagnostics?.availableConversionActions)
+              ? ociDiagnostics.availableConversionActions
+              : [];
+            const officialAlerts = [
+              ...(Array.isArray(clientSum?.alerts) ? clientSum.alerts : []),
+              ...((Array.isArray(ociDiagnostics?.officialDiagnostics?.actionSummaries)
+                ? ociDiagnostics.officialDiagnostics.actionSummaries
+                : []
+              ).flatMap((a: any) => (Array.isArray(a.alerts) ? a.alerts : []))),
+            ];
 
-              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  onClick={() => handleTriggerOciSync(true)}
-                  disabled={isSyncingOci}
-                  style={{
-                    background: "#2563eb",
-                    border: "none",
-                    color: "#fff",
-                    borderRadius: "8px",
-                    padding: "9px 16px",
-                    fontSize: "12px",
-                    fontWeight: 700,
-                    cursor: "pointer",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    opacity: isSyncingOci ? 0.6 : 1,
-                  }}
-                >
-                  <RefreshCw size={14} style={{ transform: isSyncingOci ? "rotate(180deg)" : "none", transition: "transform 0.4s" }} />
-                  {isSyncingOci ? "Enviando..." : "⚡ Disparar / Reenviar Conversões para o Google Ads Agora"}
-                </button>
-              </div>
-            </div>
+            return (
+              <div style={{ marginTop: "20px", padding: "18px", background: "#0b1329", border: "1px solid #1e293b", borderRadius: "10px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", marginBottom: "16px" }}>
+                  <div>
+                    <h4 style={{ color: "#38bdf8", fontSize: "14px", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
+                      <Send size={16} /> Central OCI Blindada — Google Ads API {ociDiagnostics?.apiVersionUsed || "v25/v26"}
+                    </h4>
+                    <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
+                      Enhanced Conversions for Leads (SHA-256 E.164 + GCLID) • Anti-duplicidade nativa via <code>orderId</code> determinístico • Trava absoluta no backend para conversões já enviadas.
+                    </p>
+                  </div>
 
-            {ociSyncResult && (
-              <div
-                style={{
-                  background: ociSyncResult.hasApiCredentials ? "rgba(16, 185, 129, 0.15)" : "rgba(234, 179, 8, 0.15)",
-                  border: `1px solid ${ociSyncResult.hasApiCredentials ? "#10b981" : "#facc15"}`,
-                  color: ociSyncResult.hasApiCredentials ? "#34d399" : "#fde047",
-                  padding: "10px 14px",
-                  borderRadius: "8px",
-                  fontSize: "12px",
-                  marginTop: "10px",
-                }}
-              >
-                <strong>Resultado do Disparo OCI:</strong> {ociSyncResult.uploadedCount} conversão(ões) processada(s).
-                {!ociSyncResult.hasApiCredentials && (
-                  <span style={{ display: "block", marginTop: "4px", color: "#facc15" }}>
-                    ⚠️ Nota: Credenciais diretas do Google Ads API ainda não estão no Dokploy (as conversões estão maturadas e validadas no painel local).
-                  </span>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      onClick={() => fetchOciDiagnostics(true)}
+                      disabled={isRefreshingOciDiag}
+                      style={{
+                        background: "#1e293b",
+                        border: "1px solid #334155",
+                        color: "#cbd5e1",
+                        borderRadius: "8px",
+                        padding: "9px 14px",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        opacity: isRefreshingOciDiag ? 0.6 : 1,
+                      }}
+                    >
+                      <RefreshCw size={13} style={{ transform: isRefreshingOciDiag ? "rotate(180deg)" : "none", transition: "transform 0.4s" }} />
+                      {isRefreshingOciDiag ? "Consultando Google..." : "Atualizar Diagnóstico Oficial Google"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleTriggerOciRetry()}
+                      disabled={isSyncingOci || ociFailedCount === 0}
+                      title={
+                        ociFailedCount === 0
+                          ? "Botão bloqueado: não existem conversões com falha real. Eventos enviados são protegidos contra duplicidade e novos leads aguardam automaticamente a maturação de 4h."
+                          : "Reprocessar apenas as conversões que falharam"
+                      }
+                      style={{
+                        background: ociFailedCount > 0 ? "#dc2626" : "#0f172a",
+                        border: `1px solid ${ociFailedCount > 0 ? "#ef4444" : "#1e293b"}`,
+                        color: ociFailedCount > 0 ? "#ffffff" : "#64748b",
+                        borderRadius: "8px",
+                        padding: "9px 16px",
+                        fontSize: "12px",
+                        fontWeight: 700,
+                        cursor: ociFailedCount > 0 && !isSyncingOci ? "pointer" : "not-allowed",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        opacity: isSyncingOci ? 0.6 : 1,
+                      }}
+                    >
+                      {ociFailedCount > 0 ? <RefreshCw size={14} /> : <Lock size={13} />}
+                      {isSyncingOci
+                        ? "Reenviando Falhas..."
+                        : ociFailedCount > 0
+                          ? `⚡ Reenviar ${ociFailedCount} Falha(s) OCI Agora`
+                          : "Sem Falhas Pendentes (Envio Automático Blindado)"}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 4 Cards de Diagnóstico Oficial & Fila */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "12px", marginBottom: "16px" }}>
+                  <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px" }}>
+                    <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                      Diagnóstico Oficial Google
+                    </div>
+                    <div style={{ fontSize: "18px", fontWeight: 800, color: clientSum ? "#34d399" : "#94a3b8", marginTop: "4px" }}>
+                      {officialRatePct !== null ? `${officialRatePct}% Aceitação` : ociDiagnostics?.apiConnected ? "API Ativa (Sem lotes)" : "Verificando..."}
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "2px" }}>
+                      {clientSum
+                        ? `${clientSum.successfulEventCount}/${clientSum.totalEventCount} aceitos • ${clientSum.pendingEventCount} pendentes`
+                        : "offline_conversion_upload_client_summary"}
+                    </div>
+                  </div>
+
+                  <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px" }}>
+                    <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                      Enhanced Conversions + Lock
+                    </div>
+                    <div style={{ fontSize: "15px", fontWeight: 700, color: "#38bdf8", marginTop: "6px" }}>
+                      SHA-256 E.164 + orderId
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "3px" }}>
+                      Telefone do cliente hasheado + bloqueio absoluto de reenvio de eventos <code>sent</code>.
+                    </div>
+                  </div>
+
+                  <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px" }}>
+                    <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                      Fila & Maturação (4h)
+                    </div>
+                    <div style={{ fontSize: "16px", fontWeight: 800, color: "#ffffff", marginTop: "4px" }}>
+                      <span style={{ color: "#34d399" }}>{ociDiagnostics?.stats?.totalSent ?? entitiesStatus.ociStats?.sent ?? 0}</span> env •{" "}
+                      <span style={{ color: "#38bdf8" }}>{ociDiagnostics?.stats?.waitingMaturation ?? 0}</span> mat •{" "}
+                      <span style={{ color: ociFailedCount > 0 ? "#f87171" : "#94a3b8" }}>{ociFailedCount}</span> falhas
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "2px" }}>
+                      Prontos p/ envio automático: <strong style={{ color: "#38bdf8" }}>{ociDiagnostics?.stats?.readyToUpload ?? 0}</strong> • Aguard. WPP: {ociDiagnostics?.stats?.waitingWhatsApp ?? 0}
+                    </div>
+                  </div>
+
+                  <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px" }}>
+                    <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                      Ações Google Encontradas
+                    </div>
+                    <div style={{ fontSize: "18px", fontWeight: 800, color: availableActions.length > 0 ? "#c084fc" : "#facc15", marginTop: "4px" }}>
+                      {availableActions.length} Ação(ões)
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "2px" }}>
+                      Conta {ociDiagnostics?.customerId || "3228136878"} ({ociDiagnostics?.apiVersionUsed || "v25"})
+                    </div>
+                  </div>
+                </div>
+
+                {/* Alertas Oficiais do Google Ads (CLICK_NOT_FOUND / EXPIRED_EVENT / etc.) */}
+                {officialAlerts.length > 0 && (
+                  <div style={{ marginBottom: "14px", padding: "10px 14px", background: "rgba(234, 179, 8, 0.12)", border: "1px solid rgba(234, 179, 8, 0.35)", borderRadius: "8px", fontSize: "12px", color: "#fde047" }}>
+                    <strong>Alertas Oficiais de Processamento Google Ads:</strong>
+                    <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
+                      {officialAlerts.map((al: any, idx: number) => (
+                        <li key={idx}>
+                          <code>{al.errorCode || "ALERTA"}</code> {al.count ? `(${al.count}x)` : ""}: {al.errorMessage || "Verifique janela do GCLID"}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Mapeamento Real de Ações de Conversão da Conta Google Ads */}
+                <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "14px", marginBottom: "14px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px", marginBottom: "10px" }}>
+                    <div>
+                      <strong style={{ fontSize: "12px", color: "#e2e8f0" }}>
+                        Vínculo com Ações de Conversão Reais na Conta Google Ads ({ociDiagnostics?.customerId || "3228136878"})
+                      </strong>
+                      <p style={{ fontSize: "11px", color: "#64748b", margin: "2px 0 0" }}>
+                        Auto-detectado pelo nome ou selecione manualmente abaixo qual ação no Google Ads recebe cada etapa do WhatsApp.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleSaveOciMapping}
+                      disabled={isSavingOciMapping}
+                      style={{
+                        background: "#1e293b",
+                        border: "1px solid #334155",
+                        color: "#38bdf8",
+                        borderRadius: "6px",
+                        padding: "6px 12px",
+                        fontSize: "11px",
+                        fontWeight: 700,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {isSavingOciMapping ? "Salvando..." : "Salvar Vínculo de Ações OCI"}
+                    </button>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px" }}>
+                    {(
+                      [
+                        { key: "conversa_iniciada", label: "1. Conversa Iniciada" },
+                        { key: "orcamento_enviado", label: "2. Orçamento Enviado" },
+                        { key: "compra_realizada", label: "3. Compra Realizada (R$)" },
+                      ] as const
+                    ).map((st) => {
+                      const summaryItem = (ociDiagnostics?.stageMappingSummary || []).find((m: any) => m.stage === st.key);
+                      return (
+                        <div key={st.key}>
+                          <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                            {st.label}
+                          </label>
+                          <select
+                            value={ociActionMapDraft[st.key]}
+                            onChange={(e) =>
+                              setOciActionMapDraft((prev) => ({ ...prev, [st.key]: e.target.value }))
+                            }
+                            className="gads-select-field"
+                            style={{ width: "100%", fontSize: "12px", padding: "7px 10px" }}
+                          >
+                            <option value="">
+                              {summaryItem?.resolvedActionName
+                                ? `Auto: ${summaryItem.resolvedActionName} (ID ${summaryItem.resolvedActionId})`
+                                : "Auto-detectar (Nenhuma ação compatível encontrada)"}
+                            </option>
+                            {availableActions.map((act: any) => (
+                              <option key={act.id} value={act.id}>
+                                {act.name} [{act.type}] (ID {act.id})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {ociMappingFeedback && (
+                    <div style={{ marginTop: "8px", fontSize: "12px", color: "#34d399", fontWeight: 600 }}>
+                      {ociMappingFeedback}
+                    </div>
+                  )}
+                </div>
+
+                {ociSyncResult && (
+                  <div
+                    style={{
+                      background: ociSyncResult.failedCount === 0 && ociSyncResult.hasApiCredentials ? "rgba(16, 185, 129, 0.14)" : "rgba(234, 179, 8, 0.14)",
+                      border: `1px solid ${ociSyncResult.failedCount === 0 && ociSyncResult.hasApiCredentials ? "#10b981" : "#facc15"}`,
+                      color: ociSyncResult.failedCount === 0 && ociSyncResult.hasApiCredentials ? "#34d399" : "#fde047",
+                      padding: "10px 14px",
+                      borderRadius: "8px",
+                      fontSize: "12px",
+                      marginBottom: "12px",
+                    }}
+                  >
+                    <strong>Resultado do Processamento OCI ({ociSyncResult.apiVersionUsed || "API"}):</strong>{" "}
+                    {ociSyncResult.uploadedCount || 0} enviado(s) • {ociSyncResult.failedCount || 0} falha(s) •{" "}
+                    {ociSyncResult.skippedSentCount || 0} bloqueado(s) contra duplicidade.
+                    {ociSyncResult.error && (
+                      <div style={{ marginTop: "4px", color: "#fca5a5" }}>Erro: {ociSyncResult.error}</div>
+                    )}
+                    {Array.isArray(ociSyncResult.results) && ociSyncResult.results.some((r: any) => r.error) && (
+                      <div style={{ marginTop: "4px", color: "#fca5a5" }}>
+                        Detalhe: {ociSyncResult.results.find((r: any) => r.error)?.error}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Tabela Auditável da Fila OCI */}
+                {Array.isArray(ociDiagnostics?.items) && ociDiagnostics.items.length > 0 && (
+                  <div className="gads-table-scroll">
+                    <table className="gads-table">
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                          <th style={{ padding: "8px 10px" }}>Lead / Enhanced SHA-256</th>
+                          <th style={{ padding: "8px 10px" }}>Etapa & Ação Google</th>
+                          <th style={{ padding: "8px 10px" }}>orderId (Anti-Duplicidade)</th>
+                          <th style={{ padding: "8px 10px" }}>Status OCI</th>
+                          <th style={{ padding: "8px 10px" }}>Diagnóstico / Erro</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ociDiagnostics.items.slice(0, 12).map((it: any) => (
+                          <tr key={`${it.id}_${it.stage}`} style={{ borderBottom: "1px solid #0f172a" }}>
+                            <td style={{ padding: "8px 10px" }}>
+                              <div style={{ color: "#fff", fontWeight: 600, fontSize: "12px" }}>{it.leadName}</div>
+                              <div style={{ color: "#64748b", fontSize: "11px" }}>
+                                {it.leadPhone}{" "}
+                                {it.hasHashedPhone && (
+                                  <span style={{ color: "#34d399", fontWeight: 700 }}>• SHA-256 ✓</span>
+                                )}
+                              </div>
+                            </td>
+                            <td style={{ padding: "8px 10px", fontSize: "12px", color: "#cbd5e1" }}>
+                              <div>{it.stage}</div>
+                              <div style={{ fontSize: "11px", color: it.resolvedConversionAction ? "#c084fc" : "#facc15" }}>
+                                {it.resolvedConversionAction?.name || "Ação não mapeada"}
+                              </div>
+                            </td>
+                            <td style={{ padding: "8px 10px", fontSize: "11px", color: "#94a3b8", fontFamily: "monospace" }}>
+                              {it.orderId}
+                            </td>
+                            <td style={{ padding: "8px 10px", fontSize: "11px", fontWeight: 700 }}>
+                              {it.status === "sent" ? (
+                                <span style={{ color: "#34d399" }}>✓ Enviado</span>
+                              ) : it.status === "failed" ? (
+                                <span style={{ color: "#f87171" }}>✕ Falha</span>
+                              ) : it.status === "waiting_whatsapp" ? (
+                                <span style={{ color: "#facc15" }}>Aguard. WhatsApp</span>
+                              ) : it.isMatured ? (
+                                <span style={{ color: "#38bdf8" }}>Pronto p/ Envio</span>
+                              ) : (
+                                <span style={{ color: "#94a3b8" }}>Maturando ({it.hoursRemaining}h)</span>
+                              )}
+                            </td>
+                            <td style={{ padding: "8px 10px", fontSize: "11px", color: it.ociError ? "#fca5a5" : "#64748b", maxWidth: "280px" }}>
+                              {it.ociError || it.ociResult || "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </div>
-            )}
-          </div>
+            );
+          })()}
         </div>
       )}
     </div>
