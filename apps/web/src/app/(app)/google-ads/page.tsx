@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Send,
   CheckCircle2,
@@ -134,6 +134,20 @@ export default function GoogleAdsPage() {
     leadsCount?: number;
     lastLeadAt?: string | null;
     ociStats?: { queued: number; sent: number; failed: number };
+    uazapiStatus?: {
+      configured: boolean;
+      source?: string;
+      baseUrl?: string;
+      instancesCount?: number;
+      hasJosiToken?: boolean;
+      hasSergioToken?: boolean;
+      josiTokenMasked?: string;
+      sergioTokenMasked?: string;
+      lastSyncAt?: string | null;
+      lastError?: string | null;
+      recoveredCount?: number;
+      updatedCount?: number;
+    };
   }>({
     apiConnected: false,
     campaignsCount: 0,
@@ -177,70 +191,17 @@ export default function GoogleAdsPage() {
   const [newPurchasePhrase, setNewPurchasePhrase] = useState("");
   const [isSavingRules, setIsSavingRules] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [rulesErrorMsg, setRulesErrorMsg] = useState<string | null>(null);
+  const lastRulesEditRef = useRef<number>(0);
+  const isSavingRulesRef = useRef<boolean>(false);
 
-  // Modal de Recuperação / Inserção Manual de Lead
-  const [isRecoverModalOpen, setIsRecoverModalOpen] = useState(false);
-  const [recovName, setRecovName] = useState("");
-  const [recovPhone, setRecovPhone] = useState("");
-  const [recovAttendant, setRecovAttendant] = useState("Josi");
-  const [recovKeyword, setRecovKeyword] = useState("");
-  const [recovCampaign, setRecovCampaign] = useState("Campanha Google Ads");
-  const [recovAdGroup, setRecovAdGroup] = useState("Geral");
-  const [recovStage, setRecovStage] = useState<GoogleLeadEvent["stage"]>("conversa_iniciada");
-  const [recovValue, setRecovValue] = useState("");
-  const [recovNotes, setRecovNotes] = useState("");
-  const [isSubmittingRecov, setIsSubmittingRecov] = useState(false);
-  const [recovSuccessMsg, setRecovSuccessMsg] = useState("");
-
-  const handleSaveRecoveredLead = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanPhone = recovPhone.replace(/\D/g, "");
-    if (!cleanPhone) {
-      alert("Por favor, informe o número de WhatsApp do lead.");
-      return;
-    }
-    setIsSubmittingRecov(true);
-    try {
-      const parsedValue = recovValue ? parseFloat(recovValue.replace(/\./g, "").replace(",", ".")) : 0;
-      const res = await fetch("/api/google-ads/leads", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "recover_lead",
-          leadName: recovName.trim() || "Cliente WhatsApp",
-          leadPhone: cleanPhone,
-          attendantName: recovAttendant,
-          keyword: recovKeyword.trim() || "Google Ads Search",
-          campaign: recovCampaign.trim() || "Campanha Google Ads",
-          adGroup: recovAdGroup.trim() || "Geral",
-          stage: recovStage || "conversa_iniciada",
-          value: isNaN(parsedValue) ? 0 : parsedValue,
-          notes: recovNotes.trim() || "Lead recuperado/inserido manualmente",
-        }),
-      });
-
-      if (res.ok) {
-        setRecovSuccessMsg("Lead salvo e restaurado com sucesso!");
-        setTimeout(() => {
-          setRecovSuccessMsg("");
-          setIsRecoverModalOpen(false);
-          setRecovName("");
-          setRecovPhone("");
-          setRecovValue("");
-          setRecovNotes("");
-          setRecovKeyword("");
-        }, 1200);
-        await fetchData();
-      } else {
-        alert("Erro ao salvar lead. Verifique se o servidor está ativo.");
-      }
-    } catch (err) {
-      console.error("Erro ao salvar lead recuperado:", err);
-      alert("Falha na comunicação com o servidor.");
-    } finally {
-      setIsSubmittingRecov(false);
-    }
-  };
+  // Configuração da Reconciliação Automática WhatsApp (Uazapi Pull Sync)
+  const [uazapiBaseUrl, setUazapiBaseUrl] = useState("");
+  const [uazapiJosiToken, setUazapiJosiToken] = useState("");
+  const [uazapiSergioToken, setUazapiSergioToken] = useState("");
+  const [isSavingUazapi, setIsSavingUazapi] = useState(false);
+  const [uazapiFeedback, setUazapiFeedback] = useState<string | null>(null);
+  const uazapiConfigLoadedRef = useRef<boolean>(false);
 
   const handleDownloadBackup = () => {
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(leadEvents, null, 2));
@@ -360,7 +321,11 @@ export default function GoogleAdsPage() {
       }
       if (rulesRes.ok) {
         const data = await rulesRes.json();
-        if (data && data.quote && data.purchase) setRules(data);
+        const canApplyPollRules =
+          !isSavingRulesRef.current && Date.now() - lastRulesEditRef.current > 12000;
+        if (canApplyPollRules && data && data.quote && data.purchase) {
+          setRules(data);
+        }
       }
       if (reportsRes.ok) {
         const data = await reportsRes.json();
@@ -368,7 +333,15 @@ export default function GoogleAdsPage() {
       }
       if (entitiesStatusRes.ok) {
         const data = await entitiesStatusRes.json();
-        if (data) setEntitiesStatus(data);
+        if (data) {
+          setEntitiesStatus(data);
+          if (!uazapiConfigLoadedRef.current && data.uazapiStatus) {
+            uazapiConfigLoadedRef.current = true;
+            if (data.uazapiStatus.baseUrl) setUazapiBaseUrl(data.uazapiStatus.baseUrl);
+            if (data.uazapiStatus.josiTokenMasked) setUazapiJosiToken(data.uazapiStatus.josiTokenMasked);
+            if (data.uazapiStatus.sergioTokenMasked) setUazapiSergioToken(data.uazapiStatus.sergioTokenMasked);
+          }
+        }
       }
     } catch (e: any) {
       console.error("Erro ao carregar dados:", e);
@@ -424,50 +397,133 @@ export default function GoogleAdsPage() {
     }
   }, [attendants]);
 
-  // Ações de Regras Dinâmicas
+  // Persistência imediata das Regras Dinâmicas (sem sobrescrita pelo polling de 4s)
+  const persistRulesImmediately = async (nextRules: ConversionRules) => {
+    lastRulesEditRef.current = Date.now();
+    isSavingRulesRef.current = true;
+    setIsSavingRules(true);
+    setRulesErrorMsg(null);
+    try {
+      const res = await fetch("/api/google-ads/leads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "save_rules", rules: nextRules }),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data?.rules) {
+          setRules(data.rules);
+        }
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 2500);
+      } else {
+        setRulesErrorMsg("Falha ao gravar regras no servidor.");
+      }
+    } catch (e) {
+      console.error("Erro ao salvar regras:", e);
+      setRulesErrorMsg("Erro de rede ao salvar regras.");
+    } finally {
+      isSavingRulesRef.current = false;
+      setIsSavingRules(false);
+    }
+  };
+
   const handleAddPhrase = (type: "quote" | "purchase", phrase: string) => {
     const clean = phrase.trim().toLowerCase();
     if (!clean) return;
-    if (rules[type].phrases.includes(clean)) return;
+    if (rules[type].phrases.some((p) => p.trim().toLowerCase() === clean)) {
+      if (type === "quote") setNewQuotePhrase("");
+      if (type === "purchase") setNewPurchasePhrase("");
+      return;
+    }
 
-    setRules({
+    lastRulesEditRef.current = Date.now();
+    const updated: ConversionRules = {
       ...rules,
       [type]: {
         ...rules[type],
         phrases: [...rules[type].phrases, clean],
       },
-    });
+    };
+    setRules(updated);
 
     if (type === "quote") setNewQuotePhrase("");
     if (type === "purchase") setNewPurchasePhrase("");
+    void persistRulesImmediately(updated);
   };
 
   const handleRemovePhrase = (type: "quote" | "purchase", phraseToRemove: string) => {
-    setRules({
+    lastRulesEditRef.current = Date.now();
+    const updated: ConversionRules = {
       ...rules,
       [type]: {
         ...rules[type],
         phrases: rules[type].phrases.filter((p) => p !== phraseToRemove),
       },
-    });
+    };
+    setRules(updated);
+    void persistRulesImmediately(updated);
   };
 
   const handleSaveRules = async () => {
-    setIsSavingRules(true);
+    await persistRulesImmediately(rules);
+  };
+
+  const handleSaveUazapiConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingUazapi(true);
+    setUazapiFeedback(null);
     try {
       const res = await fetch("/api/google-ads/leads", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "save_rules", rules }),
+        body: JSON.stringify({
+          type: "save_uazapi_config",
+          baseUrl: uazapiBaseUrl.trim(),
+          josiToken: uazapiJosiToken.trim(),
+          sergioToken: uazapiSergioToken.trim(),
+        }),
       });
-      if (res.ok) {
-        setSaveSuccess(true);
-        setTimeout(() => setSaveSuccess(false), 3000);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        const rec = data.syncResult?.recoveredCount || 0;
+        const upd = data.syncResult?.updatedCount || 0;
+        setUazapiFeedback(
+          data.syncResult?.lastError
+            ? `Configuração salva, mas Uazapi retornou: ${data.syncResult.lastError}`
+            : `Reconciliação Uazapi ativa! Verificação concluída (${rec} leads recuperados, ${upd} atualizados).`
+        );
+        await fetchData();
+      } else {
+        setUazapiFeedback(data.error || "Falha ao salvar configuração da Uazapi.");
       }
-    } catch (e) {
-      console.error("Erro ao salvar regras:", e);
+    } catch (err: any) {
+      setUazapiFeedback(err?.message || "Erro ao conectar com o servidor.");
     } finally {
-      setIsSavingRules(false);
+      setIsSavingUazapi(false);
+    }
+  };
+
+  const handleTriggerUazapiReconcile = async () => {
+    setIsSavingUazapi(true);
+    setUazapiFeedback(null);
+    try {
+      const res = await fetch("/api/google-ads/leads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "reconcile_uazapi" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      setUazapiFeedback(
+        data.lastError
+          ? `Aviso Uazapi: ${data.lastError}`
+          : `Histórico verificado (${data.checkedMessagesCount || 0} mensagens checadas).`
+      );
+      await fetchData();
+    } catch {
+      setUazapiFeedback("Erro ao executar reconciliação Uazapi.");
+    } finally {
+      setIsSavingUazapi(false);
     }
   };
 
@@ -1027,20 +1083,6 @@ export default function GoogleAdsPage() {
           >
             <CheckCheck size={15} /> 5. Regras & Auditoria
           </button>
-
-          <button
-            onClick={() => setIsRecoverModalOpen(true)}
-            className="gads-tab-btn"
-            style={{
-              background: "#059669",
-              color: "#ffffff",
-              border: "1px solid #10b981",
-              fontWeight: 700,
-              marginLeft: "auto",
-            }}
-          >
-            <UserPlus size={15} /> + Recuperar / Inserir Lead
-          </button>
         </div>
 
         {/* BARRA DE DIAGNÓSTICO E SAÚDE DO BACKEND EM TEMPO REAL */}
@@ -1108,8 +1150,17 @@ export default function GoogleAdsPage() {
               </span>
             </div>
 
-            {/* Status Fila OCI */}
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#94a3b8", fontSize: "11px", fontWeight: 600 }}>
+            {/* Status Fila OCI + Reconciliação WhatsApp */}
+            <div style={{ display: "flex", alignItems: "center", gap: "12px", color: "#94a3b8", fontSize: "11px", fontWeight: 600, flexWrap: "wrap" }}>
+              <span>
+                WhatsApp Anti-Perda:{" "}
+                <strong style={{ color: entitiesStatus.uazapiStatus?.configured ? "#34d399" : "#94a3b8" }}>
+                  {entitiesStatus.uazapiStatus?.configured
+                    ? `Ativa (${entitiesStatus.uazapiStatus.instancesCount || 1} inst.)`
+                    : "Webhook Ativo"}
+                </strong>
+              </span>
+              <span style={{ color: "#334155" }}>|</span>
               <span>
                 OCI: <strong style={{ color: "#38bdf8" }}>{entitiesStatus.ociStats?.queued ?? 0}</strong> fila •{" "}
                 <strong style={{ color: "#34d399" }}>{entitiesStatus.ociStats?.sent ?? 0}</strong> enviados •{" "}
@@ -1288,28 +1339,9 @@ export default function GoogleAdsPage() {
               <strong style={{ display: "block", color: "#94a3b8", fontSize: "14px" }}>
                 Nenhum lead encontrado com os filtros atuais
               </strong>
-              <p style={{ maxWidth: "460px", margin: "6px auto 0", fontSize: "13px", lineHeight: "1.5" }}>
-                Os cliques da Landing Page com anúncios do Google Ads entrarão aqui automaticamente com o nome e número do WhatsApp.
+              <p style={{ maxWidth: "480px", margin: "6px auto 0", fontSize: "13px", lineHeight: "1.5" }}>
+                Os cliques da Landing Page com anúncios do Google Ads e mensagens do WhatsApp entram aqui automaticamente em tempo real.
               </p>
-              <button
-                onClick={() => setIsRecoverModalOpen(true)}
-                style={{
-                  marginTop: "16px",
-                  background: "#059669",
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: "8px",
-                  padding: "10px 18px",
-                  fontSize: "13px",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "6px",
-                }}
-              >
-                <UserPlus size={15} /> Recuperar / Inserir Lead Manualmente
-              </button>
             </div>
           ) : (
             <div className="gads-table-scroll">
@@ -2223,8 +2255,13 @@ export default function GoogleAdsPage() {
                 Configuração Dinâmica de Frases & Regras Google Ads
               </h2>
               <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-                Edite as frases que disparam as conversões no WhatsApp em tempo real, sem precisar mexer em código.
+                Adicione ou remova frases em tempo real — toda alteração é salva automaticamente no servidor e aplicada na hora no webhook do WhatsApp.
               </p>
+              {rulesErrorMsg && (
+                <p style={{ color: "#f87171", fontSize: "12px", marginTop: "4px", fontWeight: 600 }}>
+                  {rulesErrorMsg}
+                </p>
+              )}
             </div>
 
             <button
@@ -2476,10 +2513,27 @@ export default function GoogleAdsPage() {
                 >
                   <Download size={14} /> Baixar Backup JSON ({realLeadEvents.length} Leads Reais)
                 </button>
+              </div>
+            </div>
+          </div>
 
+          {/* RECONCILIAÇÃO AUTOMÁTICA WHATSAPP (UAZAPI PULL SYNC ANTI-PERDA) */}
+          <div style={{ marginTop: "20px", padding: "18px", background: "#0b1329", border: "1px solid #1e293b", borderRadius: "10px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", marginBottom: "14px" }}>
+              <div>
+                <h4 style={{ color: "#34d399", fontSize: "14px", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
+                  <RefreshCw size={15} /> Reconciliação Automática WhatsApp (Uazapi Anti-Perda em Deploys)
+                </h4>
+                <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
+                  Se um webhook falhar durante um deploy ou instabilidade, o sistema relê automaticamente mensagens recentes na Uazapi e resgata os leads com tag invisível Google Ads.
+                </p>
+              </div>
+
+              {entitiesStatus.uazapiStatus?.configured && (
                 <button
                   type="button"
-                  onClick={() => setIsRecoverModalOpen(true)}
+                  onClick={handleTriggerUazapiReconcile}
+                  disabled={isSavingUazapi}
                   style={{
                     background: "#059669",
                     border: "none",
@@ -2492,12 +2546,95 @@ export default function GoogleAdsPage() {
                     display: "inline-flex",
                     alignItems: "center",
                     gap: "6px",
+                    opacity: isSavingUazapi ? 0.6 : 1,
                   }}
                 >
-                  <UserPlus size={14} /> + Recuperar / Inserir Lead
+                  <RefreshCw size={13} /> {isSavingUazapi ? "Verificando..." : "Verificar Histórico Uazapi Agora"}
+                </button>
+              )}
+            </div>
+
+            <form onSubmit={handleSaveUazapiConfig} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px", alignItems: "end" }}>
+              <div>
+                <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                  URL Base da Uazapi
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ex: https://anunciosalpha.uazapi.com"
+                  value={uazapiBaseUrl}
+                  onChange={(e) => setUazapiBaseUrl(e.target.value)}
+                  className="gads-input-field"
+                  style={{ padding: "8px 12px", fontSize: "12px" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                  Token Instância Josi
+                </label>
+                <input
+                  type="text"
+                  placeholder="Cole o token da instância Josi"
+                  value={uazapiJosiToken}
+                  onChange={(e) => setUazapiJosiToken(e.target.value)}
+                  className="gads-input-field"
+                  style={{ padding: "8px 12px", fontSize: "12px" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                  Token Instância Sérgio
+                </label>
+                <input
+                  type="text"
+                  placeholder="Cole o token da instância Sérgio"
+                  value={uazapiSergioToken}
+                  onChange={(e) => setUazapiSergioToken(e.target.value)}
+                  className="gads-input-field"
+                  style={{ padding: "8px 12px", fontSize: "12px" }}
+                />
+              </div>
+
+              <div>
+                <button
+                  type="submit"
+                  disabled={isSavingUazapi}
+                  style={{
+                    width: "100%",
+                    background: "#1e293b",
+                    border: "1px solid #334155",
+                    color: "#38bdf8",
+                    borderRadius: "8px",
+                    padding: "9px 14px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {isSavingUazapi ? "Salvando..." : "Salvar & Testar Reconciliação"}
                 </button>
               </div>
-            </div>
+            </form>
+
+            {(uazapiFeedback || entitiesStatus.uazapiStatus?.lastSyncAt || entitiesStatus.uazapiStatus?.lastError) && (
+              <div style={{ marginTop: "10px", fontSize: "12px", color: entitiesStatus.uazapiStatus?.lastError ? "#fde047" : "#94a3b8" }}>
+                {uazapiFeedback && <div style={{ color: "#34d399", fontWeight: 600 }}>{uazapiFeedback}</div>}
+                {entitiesStatus.uazapiStatus?.lastSyncAt && (
+                  <span>
+                    Última checagem automática: {new Date(entitiesStatus.uazapiStatus.lastSyncAt).toLocaleString("pt-BR")} •{" "}
+                    Recuperados: <strong style={{ color: "#34d399" }}>{entitiesStatus.uazapiStatus.recoveredCount || 0}</strong> •{" "}
+                    Atualizados: <strong style={{ color: "#38bdf8" }}>{entitiesStatus.uazapiStatus.updatedCount || 0}</strong>
+                  </span>
+                )}
+                {entitiesStatus.uazapiStatus?.lastError && (
+                  <div style={{ color: "#fde047", marginTop: "4px" }}>
+                    Diagnóstico Uazapi: {entitiesStatus.uazapiStatus.lastError}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* CENTRAL OCI — ENVIO E REENVIO PARA GOOGLE ADS API (ESTILO META ADS) */}
@@ -2558,263 +2695,6 @@ export default function GoogleAdsPage() {
                 )}
               </div>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* MODAL PARA RECUPERAR / INSERIR LEAD MANUALMENTE */}
-      {isRecoverModalOpen && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            backgroundColor: "rgba(0, 0, 0, 0.75)",
-            backdropFilter: "blur(4px)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 9999,
-            padding: "16px",
-          }}
-        >
-          <div
-            style={{
-              background: "#0b1329",
-              border: "1px solid #334155",
-              borderRadius: "14px",
-              width: "100%",
-              maxWidth: "520px",
-              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5)",
-              overflow: "hidden",
-            }}
-          >
-            {/* Cabeçalho do Modal */}
-            <div
-              style={{
-                padding: "16px 20px",
-                borderBottom: "1px solid #1e293b",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                background: "#0f172a",
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <span style={{ background: "#059669", borderRadius: "8px", padding: "6px", display: "inline-flex" }}>
-                  <UserPlus size={18} color="#fff" />
-                </span>
-                <div>
-                  <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 700, color: "#fff" }}>
-                    Recuperar / Inserir Lead
-                  </h3>
-                  <p style={{ margin: 0, fontSize: "11px", color: "#94a3b8" }}>
-                    Insira o lead que conversou no WhatsApp para que ele apareça no Funil e nos Relatórios.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsRecoverModalOpen(false)}
-                style={{
-                  background: "transparent",
-                  border: "none",
-                  color: "#94a3b8",
-                  cursor: "pointer",
-                  padding: "4px",
-                }}
-              >
-                <X size={20} />
-              </button>
-            </div>
-
-            {/* Formulário do Modal */}
-            <form onSubmit={handleSaveRecoveredLead} style={{ padding: "20px" }}>
-              {recovSuccessMsg && (
-                <div
-                  style={{
-                    background: "#064e3b",
-                    border: "1px solid #10b981",
-                    color: "#a7f3d0",
-                    padding: "10px 14px",
-                    borderRadius: "8px",
-                    marginBottom: "16px",
-                    fontSize: "13px",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
-                  }}
-                >
-                  <CheckCircle2 size={16} /> {recovSuccessMsg}
-                </div>
-              )}
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
-                <div>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                    Nome do Cliente:
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Ex: Carlos Silva"
-                    value={recovName}
-                    onChange={(e) => setRecovName(e.target.value)}
-                    className="gads-input-field"
-                    style={{ padding: "8px 12px", fontSize: "13px" }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                    WhatsApp do Cliente <span style={{ color: "#ef4444" }}>*</span>:
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="Ex: 21999998888"
-                    value={recovPhone}
-                    onChange={(e) => setRecovPhone(e.target.value)}
-                    className="gads-input-field"
-                    style={{ padding: "8px 12px", fontSize: "13px" }}
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
-                <div>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                    Atendente Responsável:
-                  </label>
-                  <select
-                    value={recovAttendant}
-                    onChange={(e) => setRecovAttendant(e.target.value)}
-                    className="gads-select-field"
-                    style={{ padding: "8px 12px", fontSize: "13px" }}
-                  >
-                    <option value="Josi">Josi (5521980659269)</option>
-                    <option value="Sérgio">Sérgio (5521994060206)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                    Etapa Atual no Funil:
-                  </label>
-                  <select
-                    value={recovStage}
-                    onChange={(e) => setRecovStage(e.target.value as any)}
-                    className="gads-select-field"
-                    style={{ padding: "8px 12px", fontSize: "13px" }}
-                  >
-                    <option value="conversa_iniciada">1. Conversa Iniciada</option>
-                    <option value="orcamento_enviado">2. Orçamento Enviado</option>
-                    <option value="compra_realizada">3. Compra Realizada</option>
-                  </select>
-                </div>
-              </div>
-
-              {recovStage === "compra_realizada" && (
-                <div style={{ marginBottom: "14px" }}>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#34d399", marginBottom: "4px" }}>
-                    Valor da Venda (R$):
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Ex: 1500,00"
-                    value={recovValue}
-                    onChange={(e) => setRecovValue(e.target.value)}
-                    className="gads-input-field"
-                    style={{ padding: "8px 12px", fontSize: "13px", borderColor: "#10b981" }}
-                  />
-                </div>
-              )}
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
-                <div>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                    Palavra-Chave Google:
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Ex: tapete sob medida"
-                    value={recovKeyword}
-                    onChange={(e) => setRecovKeyword(e.target.value)}
-                    className="gads-input-field"
-                    style={{ padding: "8px 12px", fontSize: "13px" }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                    Campanha:
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Ex: Campanha Search Rio"
-                    value={recovCampaign}
-                    onChange={(e) => setRecovCampaign(e.target.value)}
-                    className="gads-input-field"
-                    style={{ padding: "8px 12px", fontSize: "13px" }}
-                  />
-                </div>
-              </div>
-
-              <div style={{ marginBottom: "18px" }}>
-                <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                  Observações / Notas:
-                </label>
-                <input
-                  type="text"
-                  placeholder="Ex: Lead entrou hoje às 11h pedindo orçamento de tapete geométrico"
-                  value={recovNotes}
-                  onChange={(e) => setRecovNotes(e.target.value)}
-                  className="gads-input-field"
-                  style={{ padding: "8px 12px", fontSize: "13px" }}
-                />
-              </div>
-
-              {/* Botões de Ação */}
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", borderTop: "1px solid #1e293b", paddingTop: "14px" }}>
-                <button
-                  type="button"
-                  onClick={() => setIsRecoverModalOpen(false)}
-                  style={{
-                    background: "#1e293b",
-                    border: "1px solid #334155",
-                    color: "#94a3b8",
-                    borderRadius: "8px",
-                    padding: "9px 16px",
-                    fontSize: "13px",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmittingRecov}
-                  style={{
-                    background: "#059669",
-                    border: "none",
-                    color: "#fff",
-                    borderRadius: "8px",
-                    padding: "9px 20px",
-                    fontSize: "13px",
-                    fontWeight: 700,
-                    cursor: "pointer",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    opacity: isSubmittingRecov ? 0.7 : 1,
-                  }}
-                >
-                  <Save size={15} /> {isSubmittingRecov ? "Salvando..." : "Salvar Lead no Painel"}
-                </button>
-              </div>
-            </form>
           </div>
         </div>
       )}
