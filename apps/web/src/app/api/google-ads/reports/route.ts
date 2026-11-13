@@ -5,7 +5,7 @@ import path from "path";
 export const dynamic = "force-dynamic";
 
 /**
- * PASSO 1 + 4: RELATÃ“RIO DE CUSTO, RECEITA, LUCRO E ROAS COM NOMES REAIS VIA GOOGLE ADS API
+ * PASSO 1 + 4: RELATÓRIO DE CUSTO, RECEITA, LUCRO E ROAS COM NOMES REAIS VIA GOOGLE ADS API
  * apps/web/src/app/api/google-ads/reports/route.ts
  */
 
@@ -49,12 +49,21 @@ function readEntitiesMap(): Record<string, string> {
   return {};
 }
 
+function writeJsonAtomic(filePath: string, payload: unknown): void {
+  const json = JSON.stringify(payload, null, 2);
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmpPath, json, "utf8");
+  fs.renameSync(tmpPath, filePath);
+}
+
 function writeEntitiesMap(map: Record<string, string>): void {
   try {
     const file = getEntitiesFilePath();
-    fs.writeFileSync(file, JSON.stringify(map, null, 2), "utf8");
+    writeJsonAtomic(file, map);
     try {
-      fs.writeFileSync("/tmp/alpha_google_entities_map.json", JSON.stringify(map, null, 2), "utf8");
+      if (file !== "/tmp/alpha_google_entities_map.json") {
+        writeJsonAtomic("/tmp/alpha_google_entities_map.json", map);
+      }
     } catch {}
   } catch {}
 }
@@ -104,7 +113,7 @@ async function getGoogleAdsAccessToken(): Promise<{ token: string | null; error?
     }
     return {
       token: null,
-      error: `OAuth2 erro ${res.status}: ${data.error_description || data.error || "Falha ao renovar token"}`,
+      error: `OAuth2 erro ${res.status}${data.error ? ` (${data.error})` : ""}: ${data.error_description || data.error || res.statusText || "Falha ao renovar token"}`,
     };
   } catch (err: any) {
     return { token: null, error: `Erro de rede OAuth2: ${err?.message || "desconhecido"}` };
@@ -137,9 +146,11 @@ async function executeGaqlStream(params: {
     }
   );
 
+  const requestId = res.headers.get("request-id");
   const rawText = await res.text();
   if (!res.ok) {
-    return { ok: false, status: res.status, rows: [], errorText: rawText.slice(0, 500) };
+    const reqSuffix = requestId ? ` [request-id: ${requestId}]` : "";
+    return { ok: false, status: res.status, rows: [], errorText: `${rawText.slice(0, 450)}${reqSuffix}` };
   }
 
   try {
@@ -154,7 +165,7 @@ async function executeGaqlStream(params: {
     }
     return { ok: true, status: res.status, rows };
   } catch {
-    return { ok: false, status: res.status, rows: [], errorText: "Resposta JSON invÃ¡lida." };
+    return { ok: false, status: res.status, rows: [], errorText: "Resposta JSON inválida." };
   }
 }
 
@@ -251,16 +262,25 @@ export async function GET(request: NextRequest) {
 
   // 1. Consulta Gastos e Entidades Reais na API do Google Ads ativa (v25/v26)
   const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim();
-  const oauth = await getGoogleAdsAccessToken();
+  const missingEnv = [
+    "GOOGLE_ADS_DEVELOPER_TOKEN",
+    "GOOGLE_ADS_CLIENT_ID",
+    "GOOGLE_ADS_CLIENT_SECRET",
+    "GOOGLE_ADS_REFRESH_TOKEN",
+  ].filter((k) => !process.env[k]?.trim());
+
   let apiConnected = false;
   let apiVersionUsed: string | undefined;
   let apiError: string | null = null;
   const gadsMetricRows: any[] = [];
 
-  if (!devToken) {
-    apiError = "GOOGLE_ADS_DEVELOPER_TOKEN nÃ£o configurado.";
-  } else if (!oauth.token) {
-    apiError = oauth.error || "Falha na autenticaÃ§Ã£o OAuth Google Ads.";
+  const oauth: { token: string | null; error?: string } =
+    missingEnv.length === 0 ? await getGoogleAdsAccessToken() : { token: null };
+
+  if (missingEnv.length > 0) {
+    apiError = `Variáveis ausentes no runtime do container web (Dokploy): ${missingEnv.join(", ")}.`;
+  } else if (!devToken || !oauth.token) {
+    apiError = oauth.error || "Falha na autenticação OAuth Google Ads.";
   } else {
     const accessToken = oauth.token;
     const explicitLoginId = process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID?.replace(/\D/g, "") || undefined;
@@ -295,7 +315,7 @@ export async function GET(request: NextRequest) {
       });
 
       if (!res.ok && (res.status === 404 || (res.errorText && /UNSUPPORTED_VERSION|deprecated|sunset/i.test(res.errorText)))) {
-        apiError = `VersÃ£o ${version} indisponÃ­vel`;
+        apiError = `Versão ${version} indisponível`;
         continue;
       }
 
@@ -340,7 +360,7 @@ export async function GET(request: NextRequest) {
         apiError = null;
         gadsMetricRows.push(...res.rows);
 
-        // TambÃ©m garante todas as campanhas (incl. PMax) no dicionÃ¡rio
+        // Também garante todas as campanhas (incl. PMax) no dicionário
         const allCamps = await executeGaqlStream({
           version,
           customerId,
@@ -377,7 +397,7 @@ export async function GET(request: NextRequest) {
     writeEntitiesMap(entities);
   }
 
-  // 2. Agrupa leads jÃ¡ convertendo ID -> Nome Real antes de mesclar com mÃ©tricas da API
+  // 2. Agrupa leads já convertendo ID -> Nome Real antes de mesclar com métricas da API
   const performanceMap: Record<
     string,
     {
@@ -428,7 +448,7 @@ export async function GET(request: NextRequest) {
     }
   });
 
-  // Mescla mÃ©tricas de custo/cliques/impressÃµes da Google Ads API
+  // Mescla métricas de custo/cliques/impressões da Google Ads API
   gadsMetricRows.forEach((row: any) => {
     const cId = String(row.campaign?.id || "");
     const cName = row.campaign?.name || "Campanha";
