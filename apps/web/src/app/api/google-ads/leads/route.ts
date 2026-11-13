@@ -127,6 +127,10 @@ function getProcessedMessagesFilePath(): string {
   return path.join(getStorageDir(), "alpha_google_processed_messages.json");
 }
 
+function getClickViewMetaFilePath(): string {
+  return path.join(getStorageDir(), "alpha_google_clickview_meta.json");
+}
+
 function writeJsonAtomic(filePath: string, payload: unknown): void {
   const json = JSON.stringify(payload, null, 2);
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
@@ -1150,6 +1154,156 @@ async function autoSyncEntitiesFromGoogleAds(forceRefresh = false): Promise<{
   return { map, meta };
 }
 
+async function autoEnrichLeadsViaClickView(
+  leads: any[],
+  meta: EntitiesSyncMeta,
+  entities: Record<string, string>
+): Promise<{ leads: any[]; enrichedCount: number }> {
+  const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim();
+  const missingEnv = getMissingGoogleAdsEnvVars();
+  if (!devToken || missingEnv.length > 0 || !meta.apiConnected) {
+    return { leads, enrichedCount: 0 };
+  }
+
+  // Throttle de 5 minutos entre lotes de enriquecimento para proteger a cota Exploração
+  let lastClickViewRunMs = 0;
+  try {
+    const cvMetaPath = getClickViewMetaFilePath();
+    if (fs.existsSync(cvMetaPath)) {
+      const parsed = JSON.parse(fs.readFileSync(cvMetaPath, "utf8"));
+      lastClickViewRunMs = Number(parsed?.lastRunMs || 0);
+    }
+  } catch {}
+  if (Date.now() - lastClickViewRunMs < 5 * 60 * 1000) {
+    return { leads, enrichedCount: 0 };
+  }
+
+  const nowMs = Date.now();
+  const candidates = leads.filter((l: any) => {
+    if (!l?.gclid || l.gclid === "sem_gclid") return false;
+    if (l.clickViewEnriched) return false;
+    if (l.clickViewAttempts >= 2) return false;
+    if (l.clickViewCheckedAt && nowMs - new Date(l.clickViewCheckedAt).getTime() < 4 * 60 * 60 * 1000) {
+      return false;
+    }
+    const occurredMs = new Date(l.occurredAt || l.firstMessageAt || 0).getTime();
+    if (!occurredMs || isNaN(occurredMs)) return false;
+    const ageDays = (nowMs - occurredMs) / (1000 * 60 * 60 * 24);
+    // click_view mantém até 90 dias de histórico e exige ao menos ~1h pós-clique
+    return ageDays >= 0.04 && ageDays <= 89;
+  });
+
+  if (candidates.length === 0) return { leads, enrichedCount: 0 };
+
+  const oauth = await getGoogleAdsAccessToken();
+  if (!oauth.token) return { leads, enrichedCount: 0 };
+
+  try {
+    writeJsonAtomic(getClickViewMetaFilePath(), { lastRunMs: nowMs, lastRunAt: new Date().toISOString() });
+  } catch {}
+
+  const version = meta.apiVersionUsed || getActiveApiVersions()[0];
+  const customerId = (process.env.GOOGLE_ADS_CUSTOMER_ID || "3228136878").replace(/\D/g, "");
+  const loginCustomerId =
+    process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID?.replace(/\D/g, "") || meta.loginCustomerIdUsed;
+
+  // Agrupa por data (no máximo 2 datas distintas por ciclo)
+  const dateMap = new Map<string, any[]>();
+  for (const c of candidates) {
+    const d = String(c.occurredAt || c.firstMessageAt || "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+    if (!dateMap.has(d)) {
+      if (dateMap.size >= 2) continue;
+      dateMap.set(d, []);
+    }
+    dateMap.get(d)!.push(c);
+  }
+
+  let enrichedCount = 0;
+  let leadsChanged = false;
+  let entitiesChanged = false;
+
+  for (const [dateStr, dayLeads] of dateMap.entries()) {
+    const query = `
+      SELECT
+        click_view.gclid,
+        segments.date,
+        click_view.keyword_info.text,
+        click_view.keyword_info.match_type,
+        click_view.ad_group_ad,
+        campaign.id,
+        campaign.name,
+        ad_group.id,
+        ad_group.name
+      FROM click_view
+      WHERE segments.date = '${dateStr}'
+    `;
+
+    const res = await executeGaqlStream({
+      version,
+      customerId,
+      accessToken: oauth.token,
+      devToken,
+      loginCustomerId,
+      query,
+    });
+
+    if (!res.ok) continue;
+
+    const byGclid = new Map<string, any>();
+    for (const row of res.rows) {
+      const g = String(row.clickView?.gclid || "").trim();
+      if (g) byGclid.set(g, row);
+    }
+
+    for (const target of dayLeads) {
+      const idx = leads.findIndex((x: any) => x.id === target.id);
+      if (idx === -1) continue;
+
+      leads[idx].clickViewCheckedAt = new Date().toISOString();
+      leads[idx].clickViewAttempts = Number(leads[idx].clickViewAttempts || 0) + 1;
+      leadsChanged = true;
+
+      const match = byGclid.get(String(target.gclid).trim());
+      if (match) {
+        const cId = String(match.campaign?.id || "");
+        const cName = match.campaign?.name;
+        const aId = String(match.adGroup?.id || "");
+        const aName = match.adGroup?.name;
+        const kwText = match.clickView?.keywordInfo?.text;
+        const kwMatch = match.clickView?.keywordInfo?.matchType;
+        const adGroupAdRn = String(match.clickView?.adGroupAd || "");
+        const adId = adGroupAdRn ? adGroupAdRn.split("~").pop() || adGroupAdRn.split("/").pop() : undefined;
+
+        if (cId && cName) {
+          leads[idx].campaign = cId;
+          leads[idx].campaignName = cName;
+          entities[cId] = cName;
+          entitiesChanged = true;
+        }
+        if (aId && aName) {
+          leads[idx].adGroup = aId;
+          leads[idx].adGroupName = aName;
+          entities[aId] = aName;
+          entitiesChanged = true;
+        }
+        if (kwText) leads[idx].keyword = kwText;
+        if (kwMatch) leads[idx].matchType = kwMatch;
+        if (adGroupAdRn) {
+          leads[idx].adGroupAdResourceName = adGroupAdRn;
+          if (adId) leads[idx].adId = adId;
+        }
+        leads[idx].clickViewEnriched = true;
+        enrichedCount += 1;
+      }
+    }
+  }
+
+  if (entitiesChanged) writeEntitiesMap(entities);
+  if (leadsChanged) writeLeads(leads);
+  return { leads, enrichedCount };
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const type = searchParams.get("type");
@@ -1222,7 +1376,7 @@ export async function GET(request: NextRequest) {
     await autoReconcileUazapiIfConfigured(false);
   } catch {}
 
-  const leads = readLeads();
+  let leads = readLeads();
   let entities = readEntitiesMap();
 
   const hasUnmappedNumeric = leads.some(
@@ -1231,7 +1385,7 @@ export async function GET(request: NextRequest) {
       (l.adGroup && /^\d+$/.test(String(l.adGroup).trim()) && !entities[String(l.adGroup).trim()])
   );
 
-  const meta = readEntitiesMeta();
+  let meta = readEntitiesMeta();
   const isCacheExpired =
     !meta.lastSyncAt || Date.now() - new Date(meta.lastSyncAt).getTime() > 15 * 60 * 1000;
 
@@ -1239,8 +1393,14 @@ export async function GET(request: NextRequest) {
     try {
       const synced = await autoSyncEntitiesFromGoogleAds(false);
       entities = synced.map;
+      meta = synced.meta;
     } catch {}
   }
+
+  try {
+    const cvResult = await autoEnrichLeadsViaClickView(leads, meta, entities);
+    leads = cvResult.leads;
+  } catch {}
 
   const enriched = leads.map((l: any) => {
     const rawCamp = String(l.campaign || "").trim();
@@ -1355,10 +1515,40 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "Lead não encontrado" }, { status: 404 });
     }
 
+    const prevStage = leads[index].stage;
+    const prevValue = Number(leads[index].value || 0);
+    const sentPurchase = leads[index].sentStages?.compra_realizada;
+
     if (stage) leads[index].stage = stage;
     if (value !== undefined) leads[index].value = Number(value);
     if (attendantName) leads[index].attendantName = attendantName;
     leads[index].updatedAt = new Date().toISOString();
+
+    // PASSO 4: Se uma venda já foi enviada ao Google Ads e o valor ou etapa mudou,
+    // sinaliza ajuste pendente (RESTATEMENT / RETRACTION) vinculado ao mesmo orderId
+    if (sentPurchase?.orderId) {
+      const nextStage = leads[index].stage;
+      const nextVal = Number(leads[index].value || 0);
+      if (nextStage !== "compra_realizada" && prevStage === "compra_realizada") {
+        leads[index].pendingConversionAdjustment = {
+          adjustmentType: "RETRACTION",
+          orderId: sentPurchase.orderId,
+          conversionAction: sentPurchase.conversionAction,
+          previousValue: prevValue,
+          newValue: 0,
+          updatedAt: new Date().toISOString(),
+        };
+      } else if (nextStage === "compra_realizada" && value !== undefined && nextVal !== prevValue) {
+        leads[index].pendingConversionAdjustment = {
+          adjustmentType: "RESTATEMENT",
+          orderId: sentPurchase.orderId,
+          conversionAction: sentPurchase.conversionAction,
+          previousValue: prevValue,
+          newValue: nextVal,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+    }
 
     writeLeads(leads);
     return NextResponse.json({ success: true, lead: leads[index] });
