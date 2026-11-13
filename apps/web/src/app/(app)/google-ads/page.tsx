@@ -87,14 +87,14 @@ export default function GoogleAdsPage() {
     }
     return [
       { id: "1", name: "Josi", phone: "5521980659269", active: true, leadsCount: 0 },
-      { id: "2", name: "SÃ©rgio", phone: "5521994060206", active: true, leadsCount: 0 },
+      { id: "2", name: "Sérgio", phone: "5521994060206", active: true, leadsCount: 0 },
     ];
   });
 
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
 
-  // Base Real de Leads, Auditoria e RelatÃ³rios
+  // Base Real de Leads, Auditoria e Relatórios
   const [leadEvents, setLeadEvents] = useState<GoogleLeadEvent[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [reportsData, setReportsData] = useState<{
@@ -124,15 +124,26 @@ export default function GoogleAdsPage() {
     apiVersionUsed?: string;
     campaignsCount: number;
     adGroupsCount: number;
+    mappedKeysCount?: number;
     lastSyncAt?: string;
+    lastAttemptAt?: string;
     lastError?: string | null;
+    missingEnvVars?: string[];
+    storageDir?: string;
+    isPersistentStorage?: boolean;
+    leadsCount?: number;
+    lastLeadAt?: string | null;
+    ociStats?: { queued: number; sent: number; failed: number };
   }>({
     apiConnected: false,
     campaignsCount: 0,
     adGroupsCount: 0,
     lastError: null,
+    missingEnvVars: [],
+    isPersistentStorage: true,
+    ociStats: { queued: 0, sent: 0, failed: 0 },
   });
-  const [isSyncingCatalog, setIsSyncingCatalog] = useState(false);
+  const [backendFetchError, setBackendFetchError] = useState<string | null>(null);
 
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -141,7 +152,7 @@ export default function GoogleAdsPage() {
   const [filterAttendant, setFilterAttendant] = useState("all");
   const [filterStage, setFilterStage] = useState("all");
 
-  // FILTROS CUSTOMIZÃVEIS DA ABA DE RELATÃ“RIOS
+  // FILTROS CUSTOMIZÁVEIS DA ABA DE RELATÓRIOS
   const [reportDatePreset, setReportDatePreset] = useState<"today" | "yesterday" | "7d" | "30d" | "this_month" | "all">("all");
   const [reportStartDate, setReportStartDate] = useState("");
   const [reportEndDate, setReportEndDate] = useState("");
@@ -150,11 +161,11 @@ export default function GoogleAdsPage() {
   const [reportAttendant, setReportAttendant] = useState("all");
   const [reportStage, setReportStage] = useState("all");
 
-  // Regras DinÃ¢micas de ConversÃ£o
+  // Regras Dinâmicas de Conversão
   const [rules, setRules] = useState<ConversionRules>({
     quote: {
-      actionName: "WhatsApp - OrÃ§amento Enviado",
-      phrases: ["orÃ§amento enviado", "orcamento enviado", "segue o orÃ§amento", "proposta enviada", "segue seu orÃ§amento"],
+      actionName: "WhatsApp - Orçamento Enviado",
+      phrases: ["orçamento enviado", "orcamento enviado", "segue o orçamento", "proposta enviada", "segue seu orçamento"],
     },
     purchase: {
       actionName: "WhatsApp - Compra Realizada",
@@ -167,7 +178,7 @@ export default function GoogleAdsPage() {
   const [isSavingRules, setIsSavingRules] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Modal de RecuperaÃ§Ã£o / InserÃ§Ã£o Manual de Lead
+  // Modal de Recuperação / Inserção Manual de Lead
   const [isRecoverModalOpen, setIsRecoverModalOpen] = useState(false);
   const [recovName, setRecovName] = useState("");
   const [recovPhone, setRecovPhone] = useState("");
@@ -185,7 +196,7 @@ export default function GoogleAdsPage() {
     e.preventDefault();
     const cleanPhone = recovPhone.replace(/\D/g, "");
     if (!cleanPhone) {
-      alert("Por favor, informe o nÃºmero de WhatsApp do lead.");
+      alert("Por favor, informe o número de WhatsApp do lead.");
       return;
     }
     setIsSubmittingRecov(true);
@@ -221,11 +232,11 @@ export default function GoogleAdsPage() {
         }, 1200);
         await fetchData();
       } else {
-        alert("Erro ao salvar lead. Verifique se o servidor estÃ¡ ativo.");
+        alert("Erro ao salvar lead. Verifique se o servidor está ativo.");
       }
     } catch (err) {
       console.error("Erro ao salvar lead recuperado:", err);
-      alert("Falha na comunicaÃ§Ã£o com o servidor.");
+      alert("Falha na comunicação com o servidor.");
     } finally {
       setIsSubmittingRecov(false);
     }
@@ -254,7 +265,7 @@ export default function GoogleAdsPage() {
   };
 
   const handleCleanAttendantLeads = async () => {
-    if (!confirm("Remover os registros que possuem os nÃºmeros dos prÃ³prios atendentes (Josi e SÃ©rgio)?")) return;
+    if (!confirm("Remover os registros que possuem os números dos próprios atendentes (Josi e Sérgio)?")) return;
     try {
       const res = await fetch("/api/google-ads/leads?action=clean_attendants", { method: "DELETE" });
       if (res.ok) {
@@ -265,7 +276,7 @@ export default function GoogleAdsPage() {
     }
   };
 
-  // VerificaÃ§Ã£o de nÃºmeros de atendentes (Josi e SÃ©rgio)
+  // Verificação de números de atendentes (Josi e Sérgio)
   const ATTENDANT_PHONES = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
   const isAttendantLead = (phone: string): boolean => {
     const p = String(phone || "").replace(/\D/g, "");
@@ -275,16 +286,21 @@ export default function GoogleAdsPage() {
     );
   };
 
-  // IdentificaÃ§Ã£o InfalÃ­vel de Leads Reais do Google Ads:
-  // Preserva todo clique pago real (com GCLID ou Palavra-Chave) e descarta bots/healthchecks sem anÃºncio
+  const isWaitingWhatsApp = (phone?: string): boolean => {
+    const p = String(phone || "").trim();
+    return !p || /aguardando/i.test(p);
+  };
+
+  // Identificação Infalível de Leads Reais do Google Ads:
+  // Preserva todo clique pago real (com GCLID ou Palavra-Chave) e descarta bots/healthchecks sem anúncio
   const isRealGoogleLead = (l: any): boolean => {
     const hasGclid = Boolean(l.gclid && l.gclid !== "sem_gclid");
     const hasKeyword = Boolean(l.keyword && l.keyword !== "Direto (Sem palavra-chave)" && l.keyword !== "Pesquisa Google");
-    const hasRealPhone = Boolean(l.leadPhone && !isAttendantLead(l.leadPhone) && l.leadPhone !== "Aguardando WhatsApp...");
+    const hasRealPhone = Boolean(l.leadPhone && !isAttendantLead(l.leadPhone) && !isWaitingWhatsApp(l.leadPhone));
     return hasGclid || hasKeyword || hasRealPhone;
   };
 
-  // SincronizaÃ§Ã£o & Reenvio de ConversÃµes OCI para o Google Ads
+  // Sincronização & Reenvio de Conversões OCI para o Google Ads
   const [isSyncingOci, setIsSyncingOci] = useState(false);
   const [ociSyncResult, setOciSyncResult] = useState<any>(null);
 
@@ -306,34 +322,7 @@ export default function GoogleAdsPage() {
     }
   };
 
-  const handleSyncCatalog = async () => {
-    setIsSyncingCatalog(true);
-    try {
-      const res = await fetch("/api/google-ads/leads", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "sync_catalog" }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setEntitiesStatus((prev) => ({
-          ...prev,
-          apiConnected: Boolean(data.apiConnected),
-          apiVersionUsed: data.apiVersionUsed,
-          campaignsCount: data.campaignsCount ?? prev.campaignsCount,
-          adGroupsCount: data.adGroupsCount ?? prev.adGroupsCount,
-          lastError: data.lastError ?? null,
-        }));
-      }
-      await fetchData();
-    } catch (err) {
-      console.error("Erro ao sincronizar catÃ¡logo Google Ads:", err);
-    } finally {
-      setIsSyncingCatalog(false);
-    }
-  };
-
-  // Carregar dados
+  // Carregar dados (sincronização 100% automática no backend)
   const fetchData = async () => {
     setIsRefreshing(true);
     try {
@@ -352,10 +341,16 @@ export default function GoogleAdsPage() {
         fetch("/api/google-ads/leads?type=entities_status"),
       ]);
 
+      if (!leadsRes.ok) {
+        setBackendFetchError(`Erro HTTP ${leadsRes.status} ao consultar /api/google-ads/leads`);
+      } else {
+        setBackendFetchError(null);
+      }
+
       if (leadsRes.ok) {
         const data = await leadsRes.json();
         if (Array.isArray(data)) {
-          // MantÃ©m 100% dos cliques reais com palavras-chave e descarta acessos fantasmas
+          // Mantém 100% dos cliques reais com palavras-chave e descarta acessos fantasmas
           setLeadEvents(data.filter(isRealGoogleLead));
         }
       }
@@ -375,8 +370,9 @@ export default function GoogleAdsPage() {
         const data = await entitiesStatusRes.json();
         if (data) setEntitiesStatus(data);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error("Erro ao carregar dados:", e);
+      setBackendFetchError(e?.message || "Falha de comunicação com o backend");
     } finally {
       setTimeout(() => setIsRefreshing(false), 300);
     }
@@ -428,7 +424,7 @@ export default function GoogleAdsPage() {
     }
   }, [attendants]);
 
-  // AÃ§Ãµes de Regras DinÃ¢micas
+  // Ações de Regras Dinâmicas
   const handleAddPhrase = (type: "quote" | "purchase", phrase: string) => {
     const clean = phrase.trim().toLowerCase();
     if (!clean) return;
@@ -475,7 +471,7 @@ export default function GoogleAdsPage() {
     }
   };
 
-  // MovimentaÃ§Ã£o do Funil via PATCH
+  // Movimentação do Funil via PATCH
   const updateLeadStage = async (id: string, newStage: GoogleLeadEvent["stage"], value?: number) => {
     setLeadEvents((prev) =>
       prev.map((l) => (l.id === id ? { ...l, stage: newStage, value: value !== undefined ? value : l.value } : l))
@@ -492,12 +488,12 @@ export default function GoogleAdsPage() {
     }
   };
 
-  // Filtro InfalÃ­vel: Preserva 100% dos cliques reais e descarta bots
+  // Filtro Infalível: Preserva 100% dos cliques reais e descarta bots
   const realLeadEvents = useMemo(() => {
     return leadEvents.filter(isRealGoogleLead);
   }, [leadEvents]);
 
-  // Listas DinÃ¢micas de OpÃ§Ãµes para Filtros (ID + Nome Real via Google Ads API)
+  // Listas Dinâmicas de Opções para Filtros (ID + Nome Real via Google Ads API)
   const uniqueCampaigns = useMemo(() => {
     const map = new Map<string, string>();
     realLeadEvents.forEach((l) => {
@@ -520,7 +516,7 @@ export default function GoogleAdsPage() {
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
   }, [realLeadEvents, reportsData.reports]);
 
-  // Leads filtrados para o RelatÃ³rio CustomizÃ¡vel
+  // Leads filtrados para o Relatório Customizável
   const filteredReportLeads = useMemo(() => {
     return realLeadEvents.filter((event) => {
       const eventDate = (event.occurredAt || event.firstMessageAt || "").slice(0, 10);
@@ -540,7 +536,7 @@ export default function GoogleAdsPage() {
     });
   }, [realLeadEvents, reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant, reportStage]);
 
-  // MÃ©tricas Consolidadas do RelatÃ³rio no PerÃ­odo
+  // Métricas Consolidadas do Relatório no Período
   const reportMetrics = useMemo(() => {
     const totalLeadsCount = filteredReportLeads.length;
     const quotesCount = filteredReportLeads.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length;
@@ -569,7 +565,7 @@ export default function GoogleAdsPage() {
     };
   }, [filteredReportLeads, reportsData.totalCost]);
 
-  // Exportar RelatÃ³rio para CSV
+  // Exportar Relatório para CSV
   const handleExportCSV = () => {
     const headers = ["Data", "Nome", "Telefone", "Campanha", "Conjunto", "Palavra-Chave", "Atendente", "Etapa", "Valor R$"];
     const rows = filteredReportLeads.map((l) => [
@@ -598,7 +594,7 @@ export default function GoogleAdsPage() {
   // Contadores Globais (Cliques Reais vs Conversas Efetivas no WhatsApp)
   const totalLeads = realLeadEvents.length;
   const conversasIniciadas = realLeadEvents.filter(
-    (l) => Boolean(l.firstMessageAt) && !isAttendantLead(l.leadPhone) && l.leadPhone !== "Aguardando WhatsApp..."
+    (l) => Boolean(l.firstMessageAt) && !isAttendantLead(l.leadPhone) && !isWaitingWhatsApp(l.leadPhone)
   ).length;
   const orcamentosEnviados = realLeadEvents.filter((l) => l.stage === "orcamento_enviado").length;
   const comprasRealizadas = realLeadEvents.filter((l) => l.stage === "compra_realizada").length;
@@ -640,7 +636,7 @@ export default function GoogleAdsPage() {
   }, [realLeadEvents, totalLeads]);
 
   const sergioStats = useMemo(() => {
-    const list = realLeadEvents.filter((l) => l.attendantName.toLowerCase().includes("sergio") || l.attendantName.toLowerCase().includes("sÃ©rgio"));
+    const list = realLeadEvents.filter((l) => l.attendantName.toLowerCase().includes("sergio") || l.attendantName.toLowerCase().includes("sérgio"));
     const quotes = list.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length;
     const sales = list.filter((l) => l.stage === "compra_realizada").length;
     return {
@@ -960,7 +956,7 @@ export default function GoogleAdsPage() {
         }
       `}</style>
 
-      {/* CABEÃ‡ALHO */}
+      {/* CABEÇALHO */}
       <div className="gads-header-block">
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
@@ -968,18 +964,18 @@ export default function GoogleAdsPage() {
               <span style={{ background: "#2563eb", borderRadius: "8px", padding: "6px", display: "inline-flex" }}>
                 <Send size={20} color="#fff" />
               </span>
-              <h1 className="gads-title">Google Ads â€” InteligÃªncia & Funil</h1>
+              <h1 className="gads-title">Google Ads — Inteligência & Funil</h1>
             </div>
             <span className="gads-badge-iso">
               <ShieldCheck size={13} /> 100% Isolado da Meta Ads
             </span>
           </div>
           <p className="gads-subtitle">
-            RelatÃ³rios customizÃ¡veis de ROAS, atribuiÃ§Ã£o de palavras-chave, funil CRM por etapas e roleta justa de WhatsApp.
+            Relatórios customizáveis de ROAS, atribuição de palavras-chave, funil CRM por etapas e roleta justa de WhatsApp.
           </p>
         </div>
 
-        {/* NAVEGAÃ‡ÃƒO ENTRE AS 5 ABAS */}
+        {/* NAVEGAÇÃO ENTRE AS 5 ABAS */}
         <div className="gads-tabs-bar">
           <button
             onClick={() => setCurrentTab("leads")}
@@ -1009,7 +1005,7 @@ export default function GoogleAdsPage() {
               color: currentTab === "relatorios" ? "#fff" : "#94a3b8",
             }}
           >
-            <BarChart3 size={15} /> 3. RelatÃ³rios & Lucro (BI)
+            <BarChart3 size={15} /> 3. Relatórios & Lucro (BI)
           </button>
           <button
             onClick={() => setCurrentTab("roleta")}
@@ -1046,9 +1042,106 @@ export default function GoogleAdsPage() {
             <UserPlus size={15} /> + Recuperar / Inserir Lead
           </button>
         </div>
+
+        {/* BARRA DE DIAGNÓSTICO E SAÚDE DO BACKEND EM TEMPO REAL */}
+        <div
+          style={{
+            background: "#090f20",
+            border: `1px solid ${
+              backendFetchError
+                ? "rgba(239, 68, 68, 0.45)"
+                : !entitiesStatus.apiConnected || entitiesStatus.isPersistentStorage === false
+                  ? "rgba(234, 179, 8, 0.4)"
+                  : "rgba(16, 185, 129, 0.35)"
+            }`,
+            borderRadius: "10px",
+            padding: "10px 14px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "6px",
+            fontSize: "12px",
+          }}
+        >
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "12px" }}>
+              {/* Status Google Ads API */}
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  fontWeight: 700,
+                  color: entitiesStatus.apiConnected ? "#34d399" : "#fde047",
+                }}
+              >
+                <span
+                  style={{
+                    width: "8px",
+                    height: "8px",
+                    borderRadius: "50%",
+                    background: entitiesStatus.apiConnected ? "#10b981" : "#eab308",
+                    display: "inline-block",
+                  }}
+                />
+                {entitiesStatus.apiConnected
+                  ? `Google Ads API Online (${entitiesStatus.apiVersionUsed || "ativa"} • ${entitiesStatus.campaignsCount} campanhas / ${entitiesStatus.adGroupsCount} conjuntos sincronizados automaticamente)`
+                  : "Google Ads API Offline (Resolução Automática de Nomes)"}
+              </span>
+
+              <span style={{ color: "#334155" }}>|</span>
+
+              {/* Status Recepção e Armazenamento de Leads */}
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  fontWeight: 600,
+                  color: entitiesStatus.isPersistentStorage === false ? "#fde047" : "#38bdf8",
+                }}
+              >
+                {entitiesStatus.isPersistentStorage === false
+                  ? `Armazenamento Temporário (${entitiesStatus.storageDir || "/tmp"})`
+                  : `Armazenamento Persistente (${entitiesStatus.storageDir || "/data"})`}
+                {` • ${entitiesStatus.leadsCount ?? realLeadEvents.length} lead(s)`}
+                {entitiesStatus.lastLeadAt ? ` • Último recebido: ${entitiesStatus.lastLeadAt}` : ""}
+              </span>
+            </div>
+
+            {/* Status Fila OCI */}
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#94a3b8", fontSize: "11px", fontWeight: 600 }}>
+              <span>
+                OCI: <strong style={{ color: "#38bdf8" }}>{entitiesStatus.ociStats?.queued ?? 0}</strong> fila •{" "}
+                <strong style={{ color: "#34d399" }}>{entitiesStatus.ociStats?.sent ?? 0}</strong> enviados •{" "}
+                <strong style={{ color: (entitiesStatus.ociStats?.failed ?? 0) > 0 ? "#f87171" : "#94a3b8" }}>
+                  {entitiesStatus.ociStats?.failed ?? 0}
+                </strong>{" "}
+                falhas
+              </span>
+            </div>
+          </div>
+
+          {backendFetchError && (
+            <div style={{ color: "#fca5a5", fontWeight: 600 }}>
+              Erro no Backend Web: {backendFetchError}
+            </div>
+          )}
+
+          {!entitiesStatus.apiConnected && (entitiesStatus.lastError || reportsData.apiError) && (
+            <div style={{ color: "#fde047" }}>
+              <strong>Diagnóstico Google Ads API:</strong> {entitiesStatus.lastError || reportsData.apiError}
+            </div>
+          )}
+
+          {entitiesStatus.isPersistentStorage === false && (
+            <div style={{ color: "#fde047" }}>
+              <strong>Aviso de Persistência:</strong> O volume <code>/data</code> não está montado no serviço <code>web</code> do Dokploy. Leads salvos em <code>/tmp</code> são apagados a cada novo deploy.
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* CARDS DE MÃ‰TRICAS GLOBAIS */}
+      {/* CARDS DE MÉTRICAS GLOBAIS */}
       <div className="gads-metrics-grid">
         <div className="gads-metric-card">
           <span className="gads-metric-title" style={{ color: "#94a3b8" }}>
@@ -1072,7 +1165,7 @@ export default function GoogleAdsPage() {
 
         <div className="gads-metric-card">
           <span className="gads-metric-title" style={{ color: "#a855f7" }}>
-            OrÃ§amentos Enviados <Award size={14} color="#a855f7" />
+            Orçamentos Enviados <Award size={14} color="#a855f7" />
           </span>
           <div className="gads-metric-val" style={{ color: "#a855f7" }}>
             {orcamentosEnviados}
@@ -1101,10 +1194,10 @@ export default function GoogleAdsPage() {
           <div className="gads-filter-block">
             <div>
               <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-                RelatÃ³rio de Leads & AtribuiÃ§Ã£o Google Ads
+                Relatório de Leads & Atribuição Google Ads
               </h2>
               <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-                IdentificaÃ§Ã£o do contato do WhatsApp, termo de busca no Google, conjunto e atendente responsÃ¡vel.
+                Identificação do contato do WhatsApp, termo de busca no Google, conjunto e atendente responsável.
               </p>
             </div>
 
@@ -1127,7 +1220,7 @@ export default function GoogleAdsPage() {
               >
                 <option value="all">Todos Atendentes</option>
                 <option value="Josi">Atendente: Josi</option>
-                <option value="SÃ©rgio">Atendente: SÃ©rgio</option>
+                <option value="Sérgio">Atendente: Sérgio</option>
               </select>
 
               <select
@@ -1137,41 +1230,9 @@ export default function GoogleAdsPage() {
               >
                 <option value="all">Todas as Etapas</option>
                 <option value="conversa_iniciada">Conversa Iniciada</option>
-                <option value="orcamento_enviado">OrÃ§amento Enviado</option>
+                <option value="orcamento_enviado">Orçamento Enviado</option>
                 <option value="compra_realizada">Compra Realizada</option>
               </select>
-
-              <button
-                type="button"
-                onClick={handleSyncCatalog}
-                disabled={isSyncingCatalog}
-                style={{
-                  background: entitiesStatus.apiConnected ? "rgba(16, 185, 129, 0.14)" : "rgba(59, 130, 246, 0.15)",
-                  border: `1px solid ${entitiesStatus.apiConnected ? "rgba(16, 185, 129, 0.35)" : "rgba(59, 130, 246, 0.4)"}`,
-                  color: entitiesStatus.apiConnected ? "#34d399" : "#60a5fa",
-                  borderRadius: "8px",
-                  padding: "9px 12px",
-                  fontSize: "12px",
-                  fontWeight: "600",
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  opacity: isSyncingCatalog ? 0.65 : 1,
-                }}
-                title={
-                  entitiesStatus.lastError
-                    ? `Ãšltimo aviso API: ${entitiesStatus.lastError}`
-                    : "Sincronizar nomes reais das campanhas e conjuntos via Google Ads API"
-                }
-              >
-                <RefreshCw size={13} style={{ transform: isSyncingCatalog ? "rotate(180deg)" : "none", transition: "transform 0.4s" }} />
-                {isSyncingCatalog
-                  ? "Sincronizando API..."
-                  : entitiesStatus.apiConnected
-                    ? `API Google Conectada (${entitiesStatus.campaignsCount} camp.)`
-                    : "Sincronizar Nomes Google Ads"}
-              </button>
 
               <button
                 onClick={fetchData}
@@ -1213,29 +1274,13 @@ export default function GoogleAdsPage() {
                     alignItems: "center",
                     gap: "6px",
                   }}
-                  title="Remove os registros com telefones da Josi e do SÃ©rgio criados por acessos diretos"
+                  title="Remove os registros com telefones da Josi e do Sérgio criados por acessos diretos"
                 >
                   <Trash2 size={13} /> Limpar Leads com Telefones dos Atendentes
                 </button>
               )}
             </div>
           </div>
-
-          {!entitiesStatus.apiConnected && entitiesStatus.lastError && (
-            <div
-              style={{
-                marginBottom: "14px",
-                padding: "10px 14px",
-                borderRadius: "8px",
-                background: "rgba(234, 179, 8, 0.12)",
-                border: "1px solid rgba(234, 179, 8, 0.35)",
-                color: "#fde047",
-                fontSize: "12px",
-              }}
-            >
-              <strong>DiagnÃ³stico Google Ads API (ResoluÃ§Ã£o de Nomes):</strong> {entitiesStatus.lastError}
-            </div>
-          )}
 
           {filteredEvents.length === 0 ? (
             <div style={{ textAlign: "center", padding: "48px 16px", color: "#64748b" }}>
@@ -1244,7 +1289,7 @@ export default function GoogleAdsPage() {
                 Nenhum lead encontrado com os filtros atuais
               </strong>
               <p style={{ maxWidth: "460px", margin: "6px auto 0", fontSize: "13px", lineHeight: "1.5" }}>
-                Os cliques da Landing Page com anÃºncios do Google Ads entrarÃ£o aqui automaticamente com o nome e nÃºmero do WhatsApp.
+                Os cliques da Landing Page com anúncios do Google Ads entrarão aqui automaticamente com o nome e número do WhatsApp.
               </p>
               <button
                 onClick={() => setIsRecoverModalOpen(true)}
@@ -1278,7 +1323,7 @@ export default function GoogleAdsPage() {
                     <th style={{ padding: "10px 12px" }}>Etapa do Funil</th>
                     <th style={{ padding: "10px 12px" }}>GCLID / OCI</th>
                     <th style={{ padding: "10px 12px" }}>Data / Hora</th>
-                    <th style={{ padding: "10px 12px", textAlign: "right" }}>AÃ§Ãµes</th>
+                    <th style={{ padding: "10px 12px", textAlign: "right" }}>Ações</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1288,8 +1333,8 @@ export default function GoogleAdsPage() {
                       <tr key={event.id} style={{ borderBottom: "1px solid #0f172a" }}>
                         <td style={{ padding: "10px 12px" }}>
                           <div style={{ fontWeight: 600, color: "#fff", display: "flex", alignItems: "center", gap: "6px" }}>
-                            {event.leadName || "Lead em IdentificaÃ§Ã£o"}
-                            {event.leadPhone && !isAttendantLead(event.leadPhone) && event.leadPhone !== "Aguardando WhatsApp..." && (
+                            {event.leadName || "Lead em Identificação"}
+                            {event.leadPhone && !isAttendantLead(event.leadPhone) && !isWaitingWhatsApp(event.leadPhone) && (
                               <a
                                 href={`https://wa.me/${event.leadPhone}`}
                                 target="_blank"
@@ -1301,9 +1346,9 @@ export default function GoogleAdsPage() {
                               </a>
                             )}
                           </div>
-                          <small style={{ color: (!event.firstMessageAt || isAttendantLead(event.leadPhone) || event.leadPhone === "Aguardando WhatsApp...") ? "#eab308" : "#94a3b8" }}>
-                            {(!event.firstMessageAt || isAttendantLead(event.leadPhone) || event.leadPhone === "Aguardando WhatsApp...")
-                              ? "Aguardando 1Âª msg WhatsApp..."
+                          <small style={{ color: (!event.firstMessageAt || isAttendantLead(event.leadPhone) || isWaitingWhatsApp(event.leadPhone)) ? "#eab308" : "#94a3b8" }}>
+                            {(!event.firstMessageAt || isAttendantLead(event.leadPhone) || isWaitingWhatsApp(event.leadPhone))
+                              ? "Aguardando 1ª msg WhatsApp..."
                               : event.leadPhone}
                           </small>
                         </td>
@@ -1337,9 +1382,9 @@ export default function GoogleAdsPage() {
                         </td>
 
                         <td style={{ padding: "10px 12px" }}>
-                          {(!event.firstMessageAt || isAttendantLead(event.leadPhone) || event.leadPhone === "Aguardando WhatsApp...") ? (
+                          {(!event.firstMessageAt || isAttendantLead(event.leadPhone) || isWaitingWhatsApp(event.leadPhone)) ? (
                             <span style={{ background: "rgba(234, 179, 8, 0.15)", color: "#facc15", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
-                              Clique no AnÃºncio
+                              Clique no Anúncio
                             </span>
                           ) : stage === "conversa_iniciada" ? (
                             <span style={{ background: "rgba(59, 130, 246, 0.15)", color: "#60a5fa", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
@@ -1347,7 +1392,7 @@ export default function GoogleAdsPage() {
                             </span>
                           ) : stage === "orcamento_enviado" ? (
                             <span style={{ background: "rgba(168, 85, 247, 0.15)", color: "#c084fc", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
-                              OrÃ§amento Enviado
+                              Orçamento Enviado
                             </span>
                           ) : stage === "compra_realizada" ? (
                             <span style={{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
@@ -1384,12 +1429,12 @@ export default function GoogleAdsPage() {
                           ) : (
                             <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                               <span style={{ color: "#38bdf8", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px" }}>
-                                <Clock size={12} /> Fila MaturaÃ§Ã£o
+                                <Clock size={12} /> Fila Maturação
                               </span>
                               <button
                                 type="button"
                                 onClick={() => handleTriggerOciSync(true, event.id)}
-                                title="ForÃ§ar envio para o Google Ads agora"
+                                title="Forçar envio para o Google Ads agora"
                                 style={{
                                   background: "#1e293b",
                                   border: "1px solid #334155",
@@ -1446,10 +1491,10 @@ export default function GoogleAdsPage() {
         <div>
           <div style={{ marginBottom: "16px" }}>
             <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-              Funil de Clientes & ConversÃµes Google Ads
+              Funil de Clientes & Conversões Google Ads
             </h2>
             <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-              Acompanhe a jornada do cliente desde o clique na pesquisa atÃ© o fechamento da compra no WhatsApp.
+              Acompanhe a jornada do cliente desde o clique na pesquisa até o fechamento da compra no WhatsApp.
             </p>
           </div>
 
@@ -1468,7 +1513,7 @@ export default function GoogleAdsPage() {
                     <div key={lead.id} className="kanban-card">
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                         <strong style={{ color: "#fff", fontSize: "13px" }}>
-                          {lead.leadName || "Lead em IdentificaÃ§Ã£o"}
+                          {lead.leadName || "Lead em Identificação"}
                         </strong>
                         <span style={{ fontSize: "11px", color: "#64748b" }}>{lead.attendantName}</span>
                       </div>
@@ -1497,7 +1542,7 @@ export default function GoogleAdsPage() {
                             gap: "4px",
                           }}
                         >
-                          OrÃ§ar <ArrowRight size={11} />
+                          Orçar <ArrowRight size={11} />
                         </button>
                       </div>
                     </div>
@@ -1508,7 +1553,7 @@ export default function GoogleAdsPage() {
             <div className="kanban-col">
               <div className="kanban-col-header">
                 <span className="kanban-col-title" style={{ color: "#c084fc" }}>
-                  <Award size={15} /> 2. OrÃ§amento Enviado
+                  <Award size={15} /> 2. Orçamento Enviado
                 </span>
                 <span className="kanban-col-count">{orcamentosEnviados}</span>
               </div>
@@ -1528,7 +1573,7 @@ export default function GoogleAdsPage() {
                         {lead.leadPhone}
                       </div>
                       <div style={{ background: "#090f20", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#c084fc" }}>
-                        Proposta / OrÃ§amento Enviado
+                        Proposta / Orçamento Enviado
                       </div>
                       <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10px" }}>
                         <button
@@ -1592,14 +1637,14 @@ export default function GoogleAdsPage() {
                         {lead.leadPhone}
                       </div>
                       <div style={{ background: "rgba(16, 185, 129, 0.1)", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#34d399" }}>
-                        ConversÃ£o de Compra Registrada no Google Ads OCI
+                        Conversão de Compra Registrada no Google Ads OCI
                       </div>
                       <div style={{ display: "flex", justifyContent: "flex-start", marginTop: "8px" }}>
                         <button
                           onClick={() => updateLeadStage(lead.id, "orcamento_enviado")}
                           style={{ background: "transparent", border: "none", color: "#64748b", fontSize: "11px", cursor: "pointer" }}
                         >
-                          <ArrowLeft size={11} /> Voltar para OrÃ§amento
+                          <ArrowLeft size={11} /> Voltar para Orçamento
                         </button>
                       </div>
                     </div>
@@ -1611,18 +1656,18 @@ export default function GoogleAdsPage() {
       )}
 
       {/* =========================================================================
-          ABA 3: RELATÃ“RIOS & ANALYTICS CUSTOMIZÃVEL (BI COMPLETO)
+          ABA 3: RELATÓRIOS & ANALYTICS CUSTOMIZÁVEL (BI COMPLETO)
          ========================================================================= */}
       {currentTab === "relatorios" && (
         <div className="gads-panel">
-          {/* CabeÃ§alho dos RelatÃ³rios */}
+          {/* Cabeçalho dos Relatórios */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", marginBottom: "20px" }}>
             <div>
               <h2 style={{ fontSize: "18px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-                RelatÃ³rios CustomizÃ¡veis & InteligÃªncia Financeira
+                Relatórios Customizáveis & Inteligência Financeira
               </h2>
               <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-                Filtre por perÃ­odos, campanhas, conjuntos e atendentes para analisar gastos, faturamento, lucro e ROAS real.
+                Filtre por períodos, campanhas, conjuntos e atendentes para analisar gastos, faturamento, lucro e ROAS real.
               </p>
             </div>
 
@@ -1646,16 +1691,16 @@ export default function GoogleAdsPage() {
             </button>
           </div>
 
-          {/* PAINEL DE FILTROS AVANÃ‡ADOS */}
+          {/* PAINEL DE FILTROS AVANÇADOS */}
           <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "16px", marginBottom: "24px" }}>
-            {/* Presets RÃ¡pidos de Data */}
+            {/* Presets Rápidos de Data */}
             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "16px" }}>
               <button
                 type="button"
                 onClick={() => handleDatePresetChange("all")}
                 className={`date-preset-btn ${reportDatePreset === "all" ? "active" : ""}`}
               >
-                Todo o PerÃ­odo
+                Todo o Período
               </button>
               <button
                 type="button"
@@ -1676,21 +1721,21 @@ export default function GoogleAdsPage() {
                 onClick={() => handleDatePresetChange("7d")}
                 className={`date-preset-btn ${reportDatePreset === "7d" ? "active" : ""}`}
               >
-                Ãšltimos 7 dias
+                Últimos 7 dias
               </button>
               <button
                 type="button"
                 onClick={() => handleDatePresetChange("30d")}
                 className={`date-preset-btn ${reportDatePreset === "30d" ? "active" : ""}`}
               >
-                Ãšltimos 30 dias
+                Últimos 30 dias
               </button>
               <button
                 type="button"
                 onClick={() => handleDatePresetChange("this_month")}
                 className={`date-preset-btn ${reportDatePreset === "this_month" ? "active" : ""}`}
               >
-                Este MÃªs
+                Este Mês
               </button>
             </div>
 
@@ -1749,7 +1794,7 @@ export default function GoogleAdsPage() {
 
               <div>
                 <label style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", display: "block", marginBottom: "4px" }}>
-                  Conjunto de AnÃºncios:
+                  Conjunto de Anúncios:
                 </label>
                 <select
                   value={reportAdGroup}
@@ -1778,7 +1823,7 @@ export default function GoogleAdsPage() {
                 >
                   <option value="all">Todos Atendentes</option>
                   <option value="Josi">Josi</option>
-                  <option value="SÃ©rgio">SÃ©rgio</option>
+                  <option value="Sérgio">Sérgio</option>
                 </select>
               </div>
 
@@ -1794,14 +1839,14 @@ export default function GoogleAdsPage() {
                 >
                   <option value="all">Todas as Etapas</option>
                   <option value="conversa_iniciada">Conversa Iniciada</option>
-                  <option value="orcamento_enviado">OrÃ§amento Enviado</option>
+                  <option value="orcamento_enviado">Orçamento Enviado</option>
                   <option value="compra_realizada">Compra Realizada</option>
                 </select>
               </div>
             </div>
           </div>
 
-          {/* PLACAR CONSOLIDADO DE MÃ‰TRICAS DO PERÃODO */}
+          {/* PLACAR CONSOLIDADO DE MÉTRICAS DO PERÍODO */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px", marginBottom: "28px" }}>
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
               <span style={{ fontSize: "11px", color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Gasto Google Ads</span>
@@ -1822,7 +1867,7 @@ export default function GoogleAdsPage() {
             </div>
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
-              <span style={{ fontSize: "11px", color: "#c084fc", fontWeight: 700, textTransform: "uppercase" }}>OrÃ§amentos</span>
+              <span style={{ fontSize: "11px", color: "#c084fc", fontWeight: 700, textTransform: "uppercase" }}>Orçamentos</span>
               <div style={{ fontSize: "22px", fontWeight: 800, color: "#c084fc", marginTop: "4px" }}>
                 {reportMetrics.quotesCount}
               </div>
@@ -1834,7 +1879,7 @@ export default function GoogleAdsPage() {
               <div style={{ fontSize: "22px", fontWeight: 800, color: "#10b981", marginTop: "4px" }}>
                 {reportMetrics.salesCount}
               </div>
-              <small style={{ color: "#34d399", fontSize: "11px" }}>ConversÃ£o: {reportMetrics.conversionRate}%</small>
+              <small style={{ color: "#34d399", fontSize: "11px" }}>Conversão: {reportMetrics.conversionRate}%</small>
             </div>
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
@@ -1842,11 +1887,11 @@ export default function GoogleAdsPage() {
               <div style={{ fontSize: "22px", fontWeight: 800, color: "#10b981", marginTop: "4px" }}>
                 R$ {reportMetrics.totalRevenue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
               </div>
-              <small style={{ color: "#64748b", fontSize: "11px" }}>Ticket MÃ©dio: R$ {reportMetrics.averageTicket.toFixed(2)}</small>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>Ticket Médio: R$ {reportMetrics.averageTicket.toFixed(2)}</small>
             </div>
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
-              <span style={{ fontSize: "11px", color: "#fbbf24", fontWeight: 700, textTransform: "uppercase" }}>Lucro LÃ­quido Real</span>
+              <span style={{ fontSize: "11px", color: "#fbbf24", fontWeight: 700, textTransform: "uppercase" }}>Lucro Líquido Real</span>
               <div style={{ fontSize: "22px", fontWeight: 800, color: reportMetrics.profit >= 0 ? "#34d399" : "#f87171", marginTop: "4px" }}>
                 R$ {reportMetrics.profit.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
               </div>
@@ -1858,14 +1903,14 @@ export default function GoogleAdsPage() {
               <div style={{ fontSize: "22px", fontWeight: 800, color: "#38bdf8", marginTop: "4px" }}>
                 {reportMetrics.roas}x
               </div>
-              <small style={{ color: "#64748b", fontSize: "11px" }}>Retorno s/ anÃºncio</small>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>Retorno s/ anúncio</small>
             </div>
           </div>
 
-          {/* TABELA 1: DESEMPENHO POR CONJUNTO DE ANÃšNCIOS NO PERÃODO */}
+          {/* TABELA 1: DESEMPENHO POR CONJUNTO DE ANÚNCIOS NO PERÍODO */}
           <div style={{ marginBottom: "28px" }}>
             <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#fff", marginBottom: "10px" }}>
-              Resultado Financeiro por Conjunto de AnÃºncios no PerÃ­odo
+              Resultado Financeiro por Conjunto de Anúncios no Período
             </h3>
 
             <div className="gads-table-scroll">
@@ -1873,12 +1918,12 @@ export default function GoogleAdsPage() {
                 <thead>
                   <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
                     <th style={{ padding: "10px 12px" }}>Campanha Google</th>
-                    <th style={{ padding: "10px 12px" }}>Conjunto de AnÃºncios</th>
+                    <th style={{ padding: "10px 12px" }}>Conjunto de Anúncios</th>
                     <th style={{ padding: "10px 12px" }}>Gasto (R$)</th>
                     <th style={{ padding: "10px 12px" }}>Leads WhatsApp</th>
-                    <th style={{ padding: "10px 12px" }}>OrÃ§amentos</th>
+                    <th style={{ padding: "10px 12px" }}>Orçamentos</th>
                     <th style={{ padding: "10px 12px" }}>Vendas (R$)</th>
-                    <th style={{ padding: "10px 12px" }}>Lucro LÃ­quido (R$)</th>
+                    <th style={{ padding: "10px 12px" }}>Lucro Líquido (R$)</th>
                     <th style={{ padding: "10px 12px" }}>ROAS</th>
                   </tr>
                 </thead>
@@ -1927,10 +1972,10 @@ export default function GoogleAdsPage() {
             </div>
           </div>
 
-          {/* TABELA 2: LISTAGEM ANALÃTICA DOS LEADS FILTRADOS */}
+          {/* TABELA 2: LISTAGEM ANALÍTICA DOS LEADS FILTRADOS */}
           <div>
             <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#fff", marginBottom: "10px" }}>
-              Leads AnalÃ­ticos do PerÃ­odo ({filteredReportLeads.length} leads)
+              Leads Analíticos do Período ({filteredReportLeads.length} leads)
             </h3>
 
             <div className="gads-table-scroll">
@@ -1974,13 +2019,13 @@ export default function GoogleAdsPage() {
                           {l.stage === "compra_realizada" ? (
                             <span style={{ color: "#34d399", fontWeight: 700 }}>Compra Realizada</span>
                           ) : l.stage === "orcamento_enviado" ? (
-                            <span style={{ color: "#c084fc", fontWeight: 600 }}>OrÃ§amento</span>
+                            <span style={{ color: "#c084fc", fontWeight: 600 }}>Orçamento</span>
                           ) : (
                             <span style={{ color: "#60a5fa" }}>Conversa</span>
                           )}
                         </td>
                         <td style={{ padding: "10px 12px", color: l.value ? "#34d399" : "#64748b", fontWeight: l.value ? 700 : 400 }}>
-                          {l.value ? `R$ ${l.value.toLocaleString("pt-BR")}` : "â€”"}
+                          {l.value ? `R$ ${l.value.toLocaleString("pt-BR")}` : "—"}
                         </td>
                         <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
                           {l.occurredAt}
@@ -2002,10 +2047,10 @@ export default function GoogleAdsPage() {
         <div className="gads-panel">
           <div style={{ marginBottom: "20px" }}>
             <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-              EquilÃ­brio da Roleta & Desempenho dos Atendentes
+              Equilíbrio da Roleta & Desempenho dos Atendentes
             </h2>
             <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-              DivisÃ£o 50% / 50% entre Josi e SÃ©rgio com mÃ©tricas individuais de orÃ§amentos e vendas geradas.
+              Divisão 50% / 50% entre Josi e Sérgio com métricas individuais de orçamentos e vendas geradas.
             </p>
           </div>
 
@@ -2027,7 +2072,7 @@ export default function GoogleAdsPage() {
                   <small style={{ color: "#38bdf8", fontSize: "11px" }}>{josiStats.percentage}%</small>
                 </div>
                 <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>OrÃ§amentos</span>
+                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>Orçamentos</span>
                   <div style={{ fontSize: "20px", fontWeight: 800, color: "#c084fc" }}>{josiStats.quotes}</div>
                 </div>
                 <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
@@ -2040,7 +2085,7 @@ export default function GoogleAdsPage() {
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div>
-                  <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>SÃ©rgio</h3>
+                  <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>Sérgio</h3>
                   <span style={{ color: "#64748b", fontSize: "12px" }}>5521994060206</span>
                 </div>
                 <span style={{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399", padding: "3px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: 700 }}>
@@ -2054,7 +2099,7 @@ export default function GoogleAdsPage() {
                   <small style={{ color: "#38bdf8", fontSize: "11px" }}>{sergioStats.percentage}%</small>
                 </div>
                 <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>OrÃ§amentos</span>
+                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>Orçamentos</span>
                   <div style={{ fontSize: "20px", fontWeight: 800, color: "#c084fc" }}>{sergioStats.quotes}</div>
                 </div>
                 <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
@@ -2068,8 +2113,8 @@ export default function GoogleAdsPage() {
           <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "16px", marginBottom: "24px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", fontWeight: 600, marginBottom: "8px" }}>
               <span>Josi ({josiStats.percentage}%)</span>
-              <span>DistribuiÃ§Ã£o Atual de Leads</span>
-              <span>SÃ©rgio ({sergioStats.percentage}%)</span>
+              <span>Distribuição Atual de Leads</span>
+              <span>Sérgio ({sergioStats.percentage}%)</span>
             </div>
             <div style={{ width: "100%", height: "10px", background: "#1e293b", borderRadius: "5px", overflow: "hidden", display: "flex" }}>
               <div style={{ width: `${josiStats.percentage}%`, background: "#ec4899", transition: "width 0.3s" }} />
@@ -2122,7 +2167,7 @@ export default function GoogleAdsPage() {
                   <th style={{ padding: "10px 12px" }}>WhatsApp</th>
                   <th style={{ padding: "10px 12px" }}>Status</th>
                   <th style={{ padding: "10px 12px" }}>Leads Recebidos</th>
-                  <th style={{ padding: "10px 12px", textAlign: "right" }}>AÃ§Ãµes</th>
+                  <th style={{ padding: "10px 12px", textAlign: "right" }}>Ações</th>
                 </tr>
               </thead>
               <tbody>
@@ -2168,17 +2213,17 @@ export default function GoogleAdsPage() {
       )}
 
       {/* =========================================================================
-          ABA 5: CONFIGURAÃ‡ÃƒO DE REGRAS DINÃ‚MICAS & AUDITORIA
+          ABA 5: CONFIGURAÇÃO DE REGRAS DINÂMICAS & AUDITORIA
          ========================================================================= */}
       {currentTab === "conversoes" && (
         <div className="gads-panel">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "10px", marginBottom: "20px" }}>
             <div>
               <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-                ConfiguraÃ§Ã£o DinÃ¢mica de Frases & Regras Google Ads
+                Configuração Dinâmica de Frases & Regras Google Ads
               </h2>
               <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-                Edite as frases que disparam as conversÃµes no WhatsApp em tempo real, sem precisar mexer em cÃ³digo.
+                Edite as frases que disparam as conversões no WhatsApp em tempo real, sem precisar mexer em código.
               </p>
             </div>
 
@@ -2201,17 +2246,17 @@ export default function GoogleAdsPage() {
               }}
             >
               {saveSuccess ? <CheckCircle2 size={16} /> : <Save size={16} />}
-              {isSavingRules ? "Salvando..." : saveSuccess ? "Regras Salvas!" : "Salvar Regras de ConversÃ£o"}
+              {isSavingRules ? "Salvando..." : saveSuccess ? "Regras Salvas!" : "Salvar Regras de Conversão"}
             </button>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px", marginBottom: "28px" }}>
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#c084fc", fontWeight: 700, fontSize: "14px", marginBottom: "6px" }}>
-                <Award size={16} /> ConversÃ£o: OrÃ§amento Enviado
+                <Award size={16} /> Conversão: Orçamento Enviado
               </div>
               <small style={{ color: "#64748b", display: "block", marginBottom: "14px" }}>
-                AÃ§Ã£o Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.quote.actionName}</strong>
+                Ação Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.quote.actionName}</strong>
               </small>
 
               <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px", minHeight: "65px" }}>
@@ -2268,10 +2313,10 @@ export default function GoogleAdsPage() {
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#34d399", fontWeight: 700, fontSize: "14px", marginBottom: "6px" }}>
-                <CheckCircle2 size={16} /> ConversÃ£o: Compra Realizada (com R$)
+                <CheckCircle2 size={16} /> Conversão: Compra Realizada (com R$)
               </div>
               <small style={{ color: "#64748b", display: "block", marginBottom: "14px" }}>
-                AÃ§Ã£o Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.purchase.actionName}</strong>
+                Ação Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.purchase.actionName}</strong>
               </small>
 
               <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px", minHeight: "65px" }}>
@@ -2329,20 +2374,20 @@ export default function GoogleAdsPage() {
 
           <div style={{ borderTop: "1px solid #1e293b", paddingTop: "20px" }}>
             <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#ffffff", marginBottom: "4px" }}>
-              Auditoria de Disparos de ConversÃ£o Pelos Atendentes
+              Auditoria de Disparos de Conversão Pelos Atendentes
             </h3>
             <p style={{ color: "#64748b", fontSize: "12px", marginBottom: "14px" }}>
-              Registro exato de quando a Josi ou o SÃ©rgio usaram as palavras-chave na conversa para acionar a conversÃ£o.
+              Registro exato de quando a Josi ou o Sérgio usaram as palavras-chave na conversa para acionar a conversão.
             </p>
 
             {auditLogs.length === 0 ? (
               <div style={{ textAlign: "center", padding: "36px 16px", color: "#64748b", background: "#090f20", borderRadius: "10px" }}>
                 <Clock size={32} color="#334155" style={{ margin: "0 auto 8px", display: "block" }} />
                 <strong style={{ display: "block", color: "#94a3b8", fontSize: "13px" }}>
-                  Nenhum disparo de conversÃ£o registrado ainda
+                  Nenhum disparo de conversão registrado ainda
                 </strong>
                 <p style={{ fontSize: "12px", margin: "6px auto 0", maxWidth: "420px" }}>
-                  Quando o atendente responder um cliente no WhatsApp com qualquer uma das frases cadastradas acima, o registro auditado aparecerÃ¡ aqui.
+                  Quando o atendente responder um cliente no WhatsApp com qualquer uma das frases cadastradas acima, o registro auditado aparecerá aqui.
                 </p>
               </div>
             ) : (
@@ -2352,7 +2397,7 @@ export default function GoogleAdsPage() {
                     <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
                       <th style={{ padding: "10px 12px" }}>Atendente</th>
                       <th style={{ padding: "10px 12px" }}>Cliente / Telefone</th>
-                      <th style={{ padding: "10px 12px" }}>AÃ§Ã£o Disparada</th>
+                      <th style={{ padding: "10px 12px" }}>Ação Disparada</th>
                       <th style={{ padding: "10px 12px" }}>Frase Detectada no Chat</th>
                       <th style={{ padding: "10px 12px" }}>Valor Registrado</th>
                       <th style={{ padding: "10px 12px" }}>Status Google OCI</th>
@@ -2370,7 +2415,7 @@ export default function GoogleAdsPage() {
                         </td>
                         <td style={{ padding: "10px 12px" }}>
                           {item.action === "orcamento_enviado" ? (
-                            <span style={{ color: "#c084fc", fontWeight: 600 }}>OrÃ§amento Enviado</span>
+                            <span style={{ color: "#c084fc", fontWeight: 600 }}>Orçamento Enviado</span>
                           ) : item.action === "compra_realizada" ? (
                             <span style={{ color: "#34d399", fontWeight: 600 }}>Compra Realizada</span>
                           ) : (
@@ -2381,7 +2426,7 @@ export default function GoogleAdsPage() {
                           "{item.detectedPhrase}"
                         </td>
                         <td style={{ padding: "10px 12px", color: "#fff" }}>
-                          {item.value ? `R$ ${item.value.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}` : "â€”"}
+                          {item.value ? `R$ ${item.value.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}` : "—"}
                         </td>
                         <td style={{ padding: "10px 12px" }}>
                           <span style={{ color: "#10b981", display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px" }}>
@@ -2389,7 +2434,7 @@ export default function GoogleAdsPage() {
                           </span>
                         </td>
                         <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
-                          {item.timestamp ? new Date(item.timestamp).toLocaleString("pt-BR") : "â€”"}
+                          {item.timestamp ? new Date(item.timestamp).toLocaleString("pt-BR") : "—"}
                         </td>
                       </tr>
                     ))}
@@ -2407,7 +2452,7 @@ export default function GoogleAdsPage() {
                   <ShieldCheck size={16} /> Armazenamento Persistente & Backup de Leads
                 </h4>
                 <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
-                  Os dados do Google Ads sÃ£o armazenados com redundÃ¢ncia. Para garantir persistÃªncia total entre deploys no Dokploy, certifique-se de mapear o volume para <code>/data</code>.
+                  Os dados do Google Ads são armazenados com redundância. Para garantir persistência total entre deploys no Dokploy, certifique-se de mapear o volume para <code>/data</code>.
                 </p>
               </div>
 
@@ -2455,15 +2500,15 @@ export default function GoogleAdsPage() {
             </div>
           </div>
 
-          {/* CENTRAL OCI â€” ENVIO E REENVIO PARA GOOGLE ADS API (ESTILO META ADS) */}
+          {/* CENTRAL OCI — ENVIO E REENVIO PARA GOOGLE ADS API (ESTILO META ADS) */}
           <div style={{ marginTop: "20px", padding: "18px", background: "#0b1329", border: "1px solid #1e293b", borderRadius: "10px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px", marginBottom: "12px" }}>
               <div>
                 <h4 style={{ color: "#38bdf8", fontSize: "14px", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
-                  <Send size={16} /> Disparo & SincronizaÃ§Ã£o Google Ads OCI (Offline Conversions v17)
+                  <Send size={16} /> Disparo & Sincronização Google Ads OCI (Offline Conversions v17)
                 </h4>
                 <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
-                  Controle de envio para a API do Google Ads. Envie conversÃµes maturadas (&gt;4h) ou force o reenvio manual a qualquer momento (como no Meta Ads).
+                  Controle de envio para a API do Google Ads. Envie conversões maturadas (&gt;4h) ou force o reenvio manual a qualquer momento (como no Meta Ads).
                 </p>
               </div>
 
@@ -2488,7 +2533,7 @@ export default function GoogleAdsPage() {
                   }}
                 >
                   <RefreshCw size={14} style={{ transform: isSyncingOci ? "rotate(180deg)" : "none", transition: "transform 0.4s" }} />
-                  {isSyncingOci ? "Enviando..." : "âš¡ Disparar / Reenviar ConversÃµes para o Google Ads Agora"}
+                  {isSyncingOci ? "Enviando..." : "⚡ Disparar / Reenviar Conversões para o Google Ads Agora"}
                 </button>
               </div>
             </div>
@@ -2505,10 +2550,10 @@ export default function GoogleAdsPage() {
                   marginTop: "10px",
                 }}
               >
-                <strong>Resultado do Disparo OCI:</strong> {ociSyncResult.uploadedCount} conversÃ£o(Ãµes) processada(s).
+                <strong>Resultado do Disparo OCI:</strong> {ociSyncResult.uploadedCount} conversão(ões) processada(s).
                 {!ociSyncResult.hasApiCredentials && (
                   <span style={{ display: "block", marginTop: "4px", color: "#facc15" }}>
-                    âš ï¸ Nota: Credenciais diretas do Google Ads API ainda nÃ£o estÃ£o no Dokploy (as conversÃµes estÃ£o maturadas e validadas no painel local).
+                    ⚠️ Nota: Credenciais diretas do Google Ads API ainda não estão no Dokploy (as conversões estão maturadas e validadas no painel local).
                   </span>
                 )}
               </div>
@@ -2546,7 +2591,7 @@ export default function GoogleAdsPage() {
               overflow: "hidden",
             }}
           >
-            {/* CabeÃ§alho do Modal */}
+            {/* Cabeçalho do Modal */}
             <div
               style={{
                 padding: "16px 20px",
@@ -2566,7 +2611,7 @@ export default function GoogleAdsPage() {
                     Recuperar / Inserir Lead
                   </h3>
                   <p style={{ margin: 0, fontSize: "11px", color: "#94a3b8" }}>
-                    Insira o lead que conversou no WhatsApp para que ele apareÃ§a no Funil e nos RelatÃ³rios.
+                    Insira o lead que conversou no WhatsApp para que ele apareça no Funil e nos Relatórios.
                   </p>
                 </div>
               </div>
@@ -2585,7 +2630,7 @@ export default function GoogleAdsPage() {
               </button>
             </div>
 
-            {/* FormulÃ¡rio do Modal */}
+            {/* Formulário do Modal */}
             <form onSubmit={handleSaveRecoveredLead} style={{ padding: "20px" }}>
               {recovSuccessMsg && (
                 <div
@@ -2640,7 +2685,7 @@ export default function GoogleAdsPage() {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
                 <div>
                   <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                    Atendente ResponsÃ¡vel:
+                    Atendente Responsável:
                   </label>
                   <select
                     value={recovAttendant}
@@ -2649,7 +2694,7 @@ export default function GoogleAdsPage() {
                     style={{ padding: "8px 12px", fontSize: "13px" }}
                   >
                     <option value="Josi">Josi (5521980659269)</option>
-                    <option value="SÃ©rgio">SÃ©rgio (5521994060206)</option>
+                    <option value="Sérgio">Sérgio (5521994060206)</option>
                   </select>
                 </div>
 
@@ -2664,7 +2709,7 @@ export default function GoogleAdsPage() {
                     style={{ padding: "8px 12px", fontSize: "13px" }}
                   >
                     <option value="conversa_iniciada">1. Conversa Iniciada</option>
-                    <option value="orcamento_enviado">2. OrÃ§amento Enviado</option>
+                    <option value="orcamento_enviado">2. Orçamento Enviado</option>
                     <option value="compra_realizada">3. Compra Realizada</option>
                   </select>
                 </div>
@@ -2718,11 +2763,11 @@ export default function GoogleAdsPage() {
 
               <div style={{ marginBottom: "18px" }}>
                 <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                  ObservaÃ§Ãµes / Notas:
+                  Observações / Notas:
                 </label>
                 <input
                   type="text"
-                  placeholder="Ex: Lead entrou hoje Ã s 11h pedindo orÃ§amento de tapete geomÃ©trico"
+                  placeholder="Ex: Lead entrou hoje às 11h pedindo orçamento de tapete geométrico"
                   value={recovNotes}
                   onChange={(e) => setRecovNotes(e.target.value)}
                   className="gads-input-field"
@@ -2730,7 +2775,7 @@ export default function GoogleAdsPage() {
                 />
               </div>
 
-              {/* BotÃµes de AÃ§Ã£o */}
+              {/* Botões de Ação */}
               <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", borderTop: "1px solid #1e293b", paddingTop: "14px" }}>
                 <button
                   type="button"
