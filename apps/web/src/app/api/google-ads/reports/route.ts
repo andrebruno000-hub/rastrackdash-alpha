@@ -505,7 +505,7 @@ async function fetchOrReadBiSnapshot(params: {
       metrics.ctr,
       metrics.cost_micros
     FROM campaign_search_term_view
-    WHERE ${dateClause} AND metrics.impressions > 0
+    WHERE ${dateClause} AND campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND metrics.impressions > 0
     ORDER BY metrics.impressions DESC
     LIMIT 150
   `;
@@ -1016,6 +1016,8 @@ export async function GET(request: NextRequest) {
   const stAggMap: Record<string, any> = {};
 
   const ingestSearchTermRow = (row: any, source: "SEARCH" | "PMAX") => {
+    const channelType = String(row.campaign?.advertisingChannelType || "");
+    if (source === "PMAX" && channelType && channelType !== "PERFORMANCE_MAX") return;
     const cId = String(row.campaign?.id || "");
     const cName = String(row.campaign?.name || "");
     const aId = String(row.adGroup?.id || "");
