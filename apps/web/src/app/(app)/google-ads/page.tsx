@@ -31,6 +31,10 @@ import {
   Percent,
   AlertTriangle,
   Lock,
+  Target,
+  Flame,
+  Copy,
+  ArrowUpDown,
 } from "lucide-react";
 
 interface Attendant {
@@ -65,6 +69,10 @@ interface GoogleLeadEvent {
   ociError?: string | null;
   ociResult?: string | null;
   lastUploadedStage?: string;
+  clickViewEnriched?: boolean;
+  matchType?: string;
+  adId?: string;
+  pendingConversionAdjustment?: any;
 }
 
 interface ConversionRules {
@@ -79,7 +87,7 @@ interface ConversionRules {
 }
 
 export default function GoogleAdsPage() {
-  const [currentTab, setCurrentTab] = useState<"leads" | "funil" | "relatorios" | "roleta" | "conversoes">("leads");
+  const [currentTab, setCurrentTab] = useState<"leads" | "funil" | "relatorios" | "roleta" | "conversoes" | "bi">("leads");
 
   // Roleta de Atendentes
   const [attendants, setAttendants] = useState<Attendant[]>(() => {
@@ -100,7 +108,7 @@ export default function GoogleAdsPage() {
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
 
-  // Base Real de Leads, Auditoria e Relatórios
+  // Base Real de Leads, Auditoria e Relatórios + BI Avançado (Passo 4)
   const [leadEvents, setLeadEvents] = useState<GoogleLeadEvent[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [reportsData, setReportsData] = useState<{
@@ -108,11 +116,26 @@ export default function GoogleAdsPage() {
     apiVersionUsed?: string;
     apiError?: string | null;
     customerId: string;
+    biCacheFetchedAt?: string | null;
+    biFromCache?: boolean;
     reports: any[];
     totalCost: number;
     totalRevenue: number;
     totalProfit: number;
     overallRoas: number;
+    campaignHealth?: any[];
+    searchTerms?: any[];
+    keywordPerformance?: any[];
+    adPerformance?: any[];
+    decisionInsights?: {
+      wastedTermsCount: number;
+      wastedTermsCost: number;
+      topWastedTerms: any[];
+      topWinningTerms: any[];
+      bestAdGroup: any;
+      bestKeyword: any;
+      budgetOpportunityCampaigns: any[];
+    };
   }>({
     apiConnected: false,
     apiVersionUsed: undefined,
@@ -123,7 +146,24 @@ export default function GoogleAdsPage() {
     totalRevenue: 0,
     totalProfit: 0,
     overallRoas: 0,
+    campaignHealth: [],
+    searchTerms: [],
+    keywordPerformance: [],
+    adPerformance: [],
   });
+
+  // Estados da Aba 6 (Inteligência & Decisão BI)
+  const [biSubTab, setBiSubTab] = useState<"termos" | "keywords" | "conjuntos" | "anuncios">("termos");
+  const [biSearchQuery, setBiSearchQuery] = useState("");
+  const [biTermFilter, setBiTermFilter] = useState<"all" | "NEGATIVAR" | "ESCALAR" | "PMAX">("all");
+  const [biSortField, setBiSortField] = useState<"cost" | "clicks" | "impressions" | "whatsappLeads" | "whatsappSalesCount" | "roas" | "profit">("cost");
+  const [biSortDir, setBiSortDir] = useState<"desc" | "asc">("desc");
+  const [isRefreshingBi, setIsRefreshingBi] = useState(false);
+  const [copiedNegativesFeedback, setCopiedNegativesFeedback] = useState<string | null>(null);
+  const [editingAdjustmentLeadId, setEditingAdjustmentLeadId] = useState<string | null>(null);
+  const [adjustmentValueDraft, setAdjustmentValueDraft] = useState<string>("");
+  const [isSendingAdjustment, setIsSendingAdjustment] = useState(false);
+  const [adjustmentFeedback, setAdjustmentFeedback] = useState<string | null>(null);
 
   const [entitiesStatus, setEntitiesStatus] = useState<{
     apiConnected: boolean;
@@ -372,9 +412,10 @@ export default function GoogleAdsPage() {
     }
   };
 
-  // Carregar dados (sincronização 100% automática no backend)
-  const fetchData = async () => {
+  // Carregar dados (sincronização 100% automática no backend com cache 20m para BI Google)
+  const fetchData = async (refreshBi = false) => {
     setIsRefreshing(true);
+    if (refreshBi) setIsRefreshingBi(true);
     try {
       const queryParams = new URLSearchParams();
       if (reportStartDate) queryParams.set("startDate", reportStartDate);
@@ -382,6 +423,7 @@ export default function GoogleAdsPage() {
       if (reportCampaign !== "all") queryParams.set("campaign", reportCampaign);
       if (reportAdGroup !== "all") queryParams.set("adGroup", reportAdGroup);
       if (reportAttendant !== "all") queryParams.set("attendant", reportAttendant);
+      if (refreshBi) queryParams.set("refreshBi", "true");
 
       const [leadsRes, auditsRes, rulesRes, reportsRes, entitiesStatusRes] = await Promise.all([
         fetch("/api/google-ads/leads"),
@@ -436,13 +478,66 @@ export default function GoogleAdsPage() {
       console.error("Erro ao carregar dados:", e);
       setBackendFetchError(e?.message || "Falha de comunicação com o backend");
     } finally {
+      if (refreshBi) setIsRefreshingBi(false);
       setTimeout(() => setIsRefreshing(false), 300);
     }
   };
 
+  const handleCopyNegativeTerms = async () => {
+    const terms = (reportsData.searchTerms || [])
+      .filter((t: any) => t.recommendation === "NEGATIVAR")
+      .map((t: any) => `[${t.searchTerm}]`);
+    if (terms.length === 0) {
+      setCopiedNegativesFeedback("Nenhum termo crítico para negativar no período selecionado.");
+      setTimeout(() => setCopiedNegativesFeedback(null), 3000);
+      return;
+    }
+    const text = terms.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {}
+    setCopiedNegativesFeedback(`${terms.length} termo(s) em correspondência exata copiado(s) para colar nas Palavras Negativas do Google Ads!`);
+    setTimeout(() => setCopiedNegativesFeedback(null), 4000);
+  };
+
+  const handleSendConversionAdjustment = async (
+    leadId: string,
+    adjustmentType: "RESTATEMENT" | "RETRACTION",
+    adjustedValue?: number
+  ) => {
+    setIsSendingAdjustment(true);
+    setAdjustmentFeedback(null);
+    try {
+      const res = await fetch("/api/google-ads/oci", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "upload_adjustment",
+          leadId,
+          adjustmentType,
+          adjustedValue,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        setAdjustmentFeedback(
+          `Ajuste ${adjustmentType} enviado com sucesso para o orderId ${data.orderId} (API ${data.apiVersionUsed}).`
+        );
+        setEditingAdjustmentLeadId(null);
+        await Promise.all([fetchData(false), fetchOciDiagnostics(false)]);
+      } else {
+        setAdjustmentFeedback(`Erro ao enviar ajuste: ${data.error || "Falha na API"}`);
+      }
+    } catch {
+      setAdjustmentFeedback("Erro de rede ao enviar ajuste de conversão.");
+    } finally {
+      setIsSendingAdjustment(false);
+    }
+  };
+
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 4000);
+    fetchData(false);
+    const interval = setInterval(() => fetchData(false), 4000);
     return () => clearInterval(interval);
   }, [reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant]);
 
@@ -1180,6 +1275,16 @@ export default function GoogleAdsPage() {
           >
             <CheckCheck size={15} /> 5. Regras & Auditoria
           </button>
+          <button
+            onClick={() => setCurrentTab("bi")}
+            className="gads-tab-btn"
+            style={{
+              background: currentTab === "bi" ? "#059669" : "transparent",
+              color: currentTab === "bi" ? "#fff" : "#34d399",
+            }}
+          >
+            <Target size={15} /> 6. Inteligência & Decisão (BI)
+          </button>
         </div>
 
         {/* BARRA DE DIAGNÓSTICO E SAÚDE DO BACKEND EM TEMPO REAL */}
@@ -1383,7 +1488,7 @@ export default function GoogleAdsPage() {
               </select>
 
               <button
-                onClick={fetchData}
+                onClick={() => fetchData(false)}
                 disabled={isRefreshing}
                 style={{
                   background: "#1e293b",
@@ -1486,6 +1591,12 @@ export default function GoogleAdsPage() {
                           <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", fontWeight: 600 }}>
                             <KeyRound size={13} /> {event.keyword || "Pesquisa Direta"}
                           </span>
+                          {(event.clickViewEnriched || event.matchType) && (
+                            <div style={{ fontSize: "10px", color: "#34d399", marginTop: "2px", fontWeight: 600 }}>
+                              {event.clickViewEnriched ? "click_view ✓" : ""}
+                              {event.matchType ? ` • ${event.matchType}` : ""}
+                            </div>
+                          )}
                         </td>
 
                         <td style={{ padding: "10px 12px", color: "#cbd5e1" }}>
@@ -2053,17 +2164,18 @@ export default function GoogleAdsPage() {
                     <th style={{ padding: "10px 12px" }}>Campanha Google</th>
                     <th style={{ padding: "10px 12px" }}>Conjunto de Anúncios</th>
                     <th style={{ padding: "10px 12px" }}>Gasto (R$)</th>
-                    <th style={{ padding: "10px 12px" }}>Leads WhatsApp</th>
+                    <th style={{ padding: "10px 12px" }}>Cliques / CTR</th>
+                    <th style={{ padding: "10px 12px" }}>Leads (CPL)</th>
                     <th style={{ padding: "10px 12px" }}>Orçamentos</th>
-                    <th style={{ padding: "10px 12px" }}>Vendas (R$)</th>
-                    <th style={{ padding: "10px 12px" }}>Lucro Líquido (R$)</th>
+                    <th style={{ padding: "10px 12px" }}>Vendas (Conv. / CAC)</th>
+                    <th style={{ padding: "10px 12px" }}>Lucro Líquido</th>
                     <th style={{ padding: "10px 12px" }}>ROAS</th>
                   </tr>
                 </thead>
                 <tbody>
                   {reportsData.reports.length === 0 ? (
                     <tr>
-                      <td colSpan={8} style={{ textAlign: "center", padding: "24px", color: "#64748b" }}>
+                      <td colSpan={9} style={{ textAlign: "center", padding: "24px", color: "#64748b" }}>
                         Nenhum conjunto com dados no filtro selecionado
                       </td>
                     </tr>
@@ -2075,10 +2187,21 @@ export default function GoogleAdsPage() {
                         <td style={{ padding: "10px 12px", color: "#fff" }}>
                           R$ {item.cost.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
                         </td>
-                        <td style={{ padding: "10px 12px", color: "#fff", fontWeight: 700 }}>{item.whatsappLeads}</td>
+                        <td style={{ padding: "10px 12px", color: "#94a3b8", fontSize: "12px" }}>
+                          <div><strong style={{ color: "#e2e8f0" }}>{item.clicks || 0}</strong> cl.</div>
+                          <small>{item.ctr ?? 0}% CTR</small>
+                        </td>
+                        <td style={{ padding: "10px 12px", color: "#fff", fontWeight: 700 }}>
+                          <div>{item.whatsappLeads}</div>
+                          {item.cpl > 0 && <small style={{ color: "#64748b", fontWeight: 500 }}>R$ {item.cpl.toFixed(2)}/lead</small>}
+                        </td>
                         <td style={{ padding: "10px 12px", color: "#c084fc" }}>{item.whatsappQuotes}</td>
                         <td style={{ padding: "10px 12px", color: "#34d399", fontWeight: 700 }}>
-                          R$ {item.whatsappRevenue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                          <div>R$ {item.whatsappRevenue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</div>
+                          <small style={{ color: "#94a3b8", fontWeight: 500 }}>
+                            {item.whatsappSalesCount || 0}v ({item.conversionRate ?? 0}%)
+                            {item.cac > 0 ? ` • CAC R$ ${item.cac.toFixed(0)}` : ""}
+                          </small>
                         </td>
                         <td style={{ padding: "10px 12px", color: item.profit >= 0 ? "#34d399" : "#f87171", fontWeight: 700 }}>
                           R$ {item.profit.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
@@ -3069,6 +3192,811 @@ export default function GoogleAdsPage() {
           })()}
         </div>
       )}
+
+      {/* =========================================================================
+          ABA 6: QUADRO INTELIGENTE DE DECISÃO & BI AVANÇADO (PASSO 4)
+         ========================================================================= */}
+      {currentTab === "bi" && (() => {
+        const insights = reportsData.decisionInsights;
+        const searchLower = biSearchQuery.trim().toLowerCase();
+        const sortComparator = (a: any, b: any) => {
+          const av = Number(a?.[biSortField] ?? 0);
+          const bv = Number(b?.[biSortField] ?? 0);
+          return biSortDir === "desc" ? bv - av : av - bv;
+        };
+
+        const filteredTerms = (reportsData.searchTerms || [])
+          .filter((t: any) => {
+            if (biTermFilter === "NEGATIVAR" && t.recommendation !== "NEGATIVAR") return false;
+            if (biTermFilter === "ESCALAR" && t.recommendation !== "ESCALAR") return false;
+            if (biTermFilter === "PMAX" && t.source !== "PMAX") return false;
+            if (!searchLower) return true;
+            return (
+              String(t.searchTerm || "").toLowerCase().includes(searchLower) ||
+              String(t.campaign || "").toLowerCase().includes(searchLower) ||
+              String(t.adGroup || "").toLowerCase().includes(searchLower)
+            );
+          })
+          .sort(sortComparator);
+
+        const filteredKeywords = (reportsData.keywordPerformance || [])
+          .filter((k: any) => {
+            if (!searchLower) return true;
+            return (
+              String(k.keyword || "").toLowerCase().includes(searchLower) ||
+              String(k.campaign || "").toLowerCase().includes(searchLower) ||
+              String(k.adGroup || "").toLowerCase().includes(searchLower)
+            );
+          })
+          .sort(sortComparator);
+
+        const filteredAdGroups = (reportsData.reports || [])
+          .filter((r: any) => {
+            if (!searchLower) return true;
+            return (
+              String(r.campaign || "").toLowerCase().includes(searchLower) ||
+              String(r.adGroup || "").toLowerCase().includes(searchLower)
+            );
+          })
+          .sort(sortComparator);
+
+        const filteredAds = (reportsData.adPerformance || [])
+          .filter((ad: any) => {
+            if (!searchLower) return true;
+            return (
+              String(ad.headlinePreview || "").toLowerCase().includes(searchLower) ||
+              String(ad.campaign || "").toLowerCase().includes(searchLower) ||
+              String(ad.adGroup || "").toLowerCase().includes(searchLower)
+            );
+          })
+          .sort(sortComparator);
+
+        const adjustableList = Array.isArray(ociDiagnostics?.adjustableConversions)
+          ? ociDiagnostics.adjustableConversions
+          : [];
+
+        return (
+          <div className="gads-panel">
+            {/* Cabeçalho BI */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", marginBottom: "20px" }}>
+              <div>
+                <h2 style={{ fontSize: "18px", fontWeight: "700", color: "#ffffff", margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+                  <Target size={19} color="#34d399" /> Quadro Inteligente de Decisão & BI de Tráfego (Google Ads)
+                </h2>
+                <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
+                  Descubra exatamente onde está o desperdício de verba (para negativar), quais termos/palavras-chave convertem mais e onde escalar orçamento (cache 20m protegendo cota Exploração).
+                </p>
+                {reportsData.biCacheFetchedAt && (
+                  <small style={{ color: "#94a3b8", fontSize: "11px" }}>
+                    Última leitura Google Ads API: {new Date(reportsData.biCacheFetchedAt).toLocaleString("pt-BR")} ({reportsData.biFromCache ? "Cache /data" : "Atualizado ao vivo"})
+                  </small>
+                )}
+              </div>
+
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={handleCopyNegativeTerms}
+                  style={{
+                    background: "rgba(239, 68, 68, 0.15)",
+                    border: "1px solid rgba(239, 68, 68, 0.35)",
+                    color: "#fca5a5",
+                    borderRadius: "8px",
+                    padding: "8px 14px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                >
+                  <Copy size={14} /> Copiar Termos p/ Negativar
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => fetchData(true)}
+                  disabled={isRefreshingBi}
+                  style={{
+                    background: "#2563eb",
+                    border: "none",
+                    color: "#ffffff",
+                    borderRadius: "8px",
+                    padding: "8px 14px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    opacity: isRefreshingBi ? 0.6 : 1,
+                  }}
+                >
+                  <RefreshCw size={14} style={{ transform: isRefreshingBi ? "rotate(180deg)" : "none", transition: "transform 0.4s" }} />
+                  {isRefreshingBi ? "Atualizando API..." : "Atualizar BI Google Ads Agora"}
+                </button>
+              </div>
+            </div>
+
+            {copiedNegativesFeedback && (
+              <div style={{ marginBottom: "14px", padding: "10px 14px", borderRadius: "8px", background: "rgba(16, 185, 129, 0.14)", border: "1px solid rgba(16, 185, 129, 0.4)", color: "#34d399", fontSize: "12px", fontWeight: 600 }}>
+                {copiedNegativesFeedback}
+              </div>
+            )}
+
+            {/* Cards Executivos de Decisão */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "12px", marginBottom: "20px" }}>
+              <div style={{ background: "#090f20", border: "1px solid rgba(239, 68, 68, 0.35)", borderRadius: "10px", padding: "14px" }}>
+                <div style={{ fontSize: "11px", fontWeight: 700, color: "#f87171", textTransform: "uppercase", display: "flex", justifyContent: "space-between" }}>
+                  <span>Desperdício p/ Negativar</span>
+                  <AlertTriangle size={14} color="#f87171" />
+                </div>
+                <div style={{ fontSize: "20px", fontWeight: 800, color: "#fca5a5", marginTop: "4px" }}>
+                  R$ {(insights?.wastedTermsCost || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                </div>
+                <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "2px" }}>
+                  {insights?.wastedTermsCount || 0} termo(s) sem leads/vendas no período
+                </div>
+              </div>
+
+              <div style={{ background: "#090f20", border: "1px solid rgba(16, 185, 129, 0.35)", borderRadius: "10px", padding: "14px" }}>
+                <div style={{ fontSize: "11px", fontWeight: 700, color: "#34d399", textTransform: "uppercase", display: "flex", justifyContent: "space-between" }}>
+                  <span>Melhor Conjunto (Lucro)</span>
+                  <Award size={14} color="#34d399" />
+                </div>
+                <div style={{ fontSize: "15px", fontWeight: 800, color: "#ffffff", marginTop: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {insights?.bestAdGroup?.adGroup || "Aguardando conversões"}
+                </div>
+                <div style={{ fontSize: "11px", color: "#34d399", marginTop: "3px" }}>
+                  {insights?.bestAdGroup
+                    ? `ROAS ${insights.bestAdGroup.roas}x • Lucro R$ ${Number(insights.bestAdGroup.profit || 0).toFixed(2)}`
+                    : "Atribua leads/vendas para ranquear"}
+                </div>
+              </div>
+
+              <div style={{ background: "#090f20", border: "1px solid rgba(56, 189, 248, 0.35)", borderRadius: "10px", padding: "14px" }}>
+                <div style={{ fontSize: "11px", fontWeight: 700, color: "#38bdf8", textTransform: "uppercase", display: "flex", justifyContent: "space-between" }}>
+                  <span>Palavra-Chave Campeã</span>
+                  <KeyRound size={14} color="#38bdf8" />
+                </div>
+                <div style={{ fontSize: "15px", fontWeight: 800, color: "#ffffff", marginTop: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {insights?.bestKeyword?.keyword || "Aguardando atribuição"}
+                </div>
+                <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "3px" }}>
+                  {insights?.bestKeyword
+                    ? `${insights.bestKeyword.whatsappLeads} leads • ${insights.bestKeyword.whatsappSalesCount} vendas • ROAS ${insights.bestKeyword.roas}x`
+                    : "Cruzamento automático com WhatsApp"}
+                </div>
+              </div>
+
+              <div style={{ background: "#090f20", border: "1px solid rgba(192, 132, 252, 0.35)", borderRadius: "10px", padding: "14px" }}>
+                <div style={{ fontSize: "11px", fontWeight: 700, color: "#c084fc", textTransform: "uppercase", display: "flex", justifyContent: "space-between" }}>
+                  <span>Escala Travada (Orçamento)</span>
+                  <Flame size={14} color="#c084fc" />
+                </div>
+                <div style={{ fontSize: "20px", fontWeight: 800, color: "#e9d5ff", marginTop: "4px" }}>
+                  {insights?.budgetOpportunityCampaigns?.length || 0} Campanha(s)
+                </div>
+                <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "2px" }}>
+                  {insights?.budgetOpportunityCampaigns?.[0]
+                    ? `${insights.budgetOpportunityCampaigns[0].campaign} (-${insights.budgetOpportunityCampaigns[0].budgetLostSharePct}% impr.)`
+                    : "Perdendo >= 15% por orçamento com retorno"}
+                </div>
+              </div>
+            </div>
+
+            {/* Filtros de Período + Busca + Ordenação */}
+            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px", marginBottom: "18px" }}>
+              <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "12px" }}>
+                {(
+                  [
+                    { id: "all", label: "Últimos 30 dias / Todos" },
+                    { id: "today", label: "Hoje" },
+                    { id: "yesterday", label: "Ontem" },
+                    { id: "7d", label: "Últimos 7 dias" },
+                    { id: "30d", label: "Últimos 30 dias" },
+                    { id: "this_month", label: "Este Mês" },
+                  ] as const
+                ).map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => handleDatePresetChange(p.id)}
+                    className={`date-preset-btn ${reportDatePreset === p.id ? "active" : ""}`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(175px, 1fr))", gap: "10px" }}>
+                <div className="gads-search-box" style={{ width: "100%" }}>
+                  <Search size={14} color="#64748b" style={{ position: "absolute", left: "11px", top: "11px" }} />
+                  <input
+                    type="text"
+                    placeholder="Filtrar termo, keyword, campanha..."
+                    value={biSearchQuery}
+                    onChange={(e) => setBiSearchQuery(e.target.value)}
+                    className="gads-input-field"
+                  />
+                </div>
+
+                <select
+                  value={reportCampaign}
+                  onChange={(e) => setReportCampaign(e.target.value)}
+                  className="gads-select-field"
+                >
+                  <option value="all">Todas as Campanhas</option>
+                  {uniqueCampaigns.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+
+                <select
+                  value={reportAdGroup}
+                  onChange={(e) => setReportAdGroup(e.target.value)}
+                  className="gads-select-field"
+                >
+                  <option value="all">Todos os Conjuntos</option>
+                  {uniqueAdGroups.map((ad) => (
+                    <option key={ad.id} value={ad.id}>{ad.name}</option>
+                  ))}
+                </select>
+
+                <select
+                  value={biSortField}
+                  onChange={(e) => setBiSortField(e.target.value as any)}
+                  className="gads-select-field"
+                >
+                  <option value="cost">Ordenar por: Maior Gasto (R$)</option>
+                  <option value="clicks">Ordenar por: Cliques</option>
+                  <option value="impressions">Ordenar por: Impressões</option>
+                  <option value="whatsappLeads">Ordenar por: Leads WhatsApp</option>
+                  <option value="whatsappSalesCount">Ordenar por: Vendas</option>
+                  <option value="profit">Ordenar por: Lucro Líquido</option>
+                  <option value="roas">Ordenar por: ROAS Real</option>
+                </select>
+
+                <button
+                  type="button"
+                  onClick={() => setBiSortDir((d) => (d === "desc" ? "asc" : "desc"))}
+                  style={{
+                    background: "#0f172a",
+                    border: "1px solid #334155",
+                    color: "#cbd5e1",
+                    borderRadius: "8px",
+                    padding: "8px 12px",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "6px",
+                  }}
+                >
+                  <ArrowUpDown size={13} /> {biSortDir === "desc" ? "Maior -> Menor" : "Menor -> Maior"}
+                </button>
+              </div>
+            </div>
+
+            {/* Sub-Abas do BI Avançado */}
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "18px" }}>
+              {(
+                [
+                  { id: "termos", label: `1. Termos de Pesquisa (${(reportsData.searchTerms || []).length})` },
+                  { id: "keywords", label: `2. Palavras-Chave (${(reportsData.keywordPerformance || []).length})` },
+                  { id: "conjuntos", label: `3. Conjuntos & Saúde Campanhas (${(reportsData.campaignHealth || []).length})` },
+                  { id: "anuncios", label: `4. Anúncios & Ajustes RESTATE/RETRACT (${(reportsData.adPerformance || []).length})` },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setBiSubTab(tab.id)}
+                  style={{
+                    background: biSubTab === tab.id ? "#1d4ed8" : "#0f172a",
+                    border: `1px solid ${biSubTab === tab.id ? "#3b82f6" : "#1e293b"}`,
+                    color: biSubTab === tab.id ? "#ffffff" : "#94a3b8",
+                    borderRadius: "8px",
+                    padding: "8px 14px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {/* SUB-ABA 1: TERMOS DE PESQUISA (SEARCH + PMAX) */}
+            {biSubTab === "termos" && (
+              <div>
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "12px" }}>
+                  {(
+                    [
+                      { id: "all", label: "Todos os Termos" },
+                      { id: "NEGATIVAR", label: "⚠️ Para Negativar (Gastou sem Lead)" },
+                      { id: "ESCALAR", label: "🏆 Campeões de Venda / ROAS" },
+                      { id: "PMAX", label: "⚡ Termos Performance Max (PMax)" },
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setBiTermFilter(f.id)}
+                      className={`date-preset-btn ${biTermFilter === f.id ? "active" : ""}`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="gads-table-scroll">
+                  <table className="gads-table">
+                    <thead>
+                      <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                        <th style={{ padding: "10px 12px" }}>Termo Digitado no Google</th>
+                        <th style={{ padding: "10px 12px" }}>Campanha / Conjunto</th>
+                        <th style={{ padding: "10px 12px" }}>Impr. / Cliques / CTR</th>
+                        <th style={{ padding: "10px 12px" }}>CPC / Gasto (R$)</th>
+                        <th style={{ padding: "10px 12px" }}>Leads / Vendas</th>
+                        <th style={{ padding: "10px 12px" }}>Decisão Recomendada</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredTerms.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} style={{ textAlign: "center", padding: "28px", color: "#64748b" }}>
+                            Nenhum termo de pesquisa encontrado neste filtro.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredTerms.slice(0, 120).map((t: any, idx: number) => (
+                          <tr key={idx} style={{ borderBottom: "1px solid #0f172a" }}>
+                            <td style={{ padding: "10px 12px" }}>
+                              <div style={{ color: "#ffffff", fontWeight: 700 }}>{t.searchTerm}</div>
+                              <div style={{ fontSize: "10px", color: "#94a3b8", marginTop: "2px" }}>
+                                {t.source} • {t.matchType} • Status: {t.status}
+                              </div>
+                            </td>
+                            <td style={{ padding: "10px 12px", color: "#cbd5e1", fontSize: "12px" }}>
+                              <div>{t.campaign}</div>
+                              <small style={{ color: "#64748b" }}>{t.adGroup}</small>
+                            </td>
+                            <td style={{ padding: "10px 12px", fontSize: "12px", color: "#94a3b8" }}>
+                              <div><strong style={{ color: "#fff" }}>{t.clicks}</strong> cl. / {t.impressions} imp.</div>
+                              <small>{t.ctr}% CTR</small>
+                            </td>
+                            <td style={{ padding: "10px 12px" }}>
+                              <div style={{ color: t.cost >= 30 && t.whatsappLeads === 0 ? "#fca5a5" : "#ffffff", fontWeight: 700 }}>
+                                R$ {t.cost.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                              </div>
+                              <small style={{ color: "#64748b" }}>CPC R$ {t.cpc.toFixed(2)}</small>
+                            </td>
+                            <td style={{ padding: "10px 12px" }}>
+                              <div style={{ color: t.whatsappLeads > 0 ? "#38bdf8" : "#64748b", fontWeight: 700 }}>
+                                {t.whatsappLeads} lead(s)
+                              </div>
+                              <small style={{ color: t.whatsappSalesCount > 0 ? "#34d399" : "#64748b" }}>
+                                {t.whatsappSalesCount} venda(s) {t.roas > 0 ? `• ${t.roas}x ROAS` : ""}
+                              </small>
+                            </td>
+                            <td style={{ padding: "10px 12px" }}>
+                              {t.recommendation === "NEGATIVAR" ? (
+                                <span style={{ background: "rgba(239, 68, 68, 0.16)", color: "#f87171", border: "1px solid rgba(239, 68, 68, 0.35)", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
+                                  ⚠️ NEGATIVAR
+                                </span>
+                              ) : t.recommendation === "ESCALAR" ? (
+                                <span style={{ background: "rgba(16, 185, 129, 0.16)", color: "#34d399", border: "1px solid rgba(16, 185, 129, 0.35)", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
+                                  🏆 ESCALAR
+                                </span>
+                              ) : (
+                                <span style={{ color: "#94a3b8", fontSize: "11px", fontWeight: 600 }}>Manter</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* SUB-ABA 2: PALAVRAS-CHAVE (keyword_view) */}
+            {biSubTab === "keywords" && (
+              <div className="gads-table-scroll">
+                <table className="gads-table">
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                      <th style={{ padding: "10px 12px" }}>Palavra-Chave (Match)</th>
+                      <th style={{ padding: "10px 12px" }}>Conjunto / Campanha</th>
+                      <th style={{ padding: "10px 12px" }}>Cliques / Impr. / CTR</th>
+                      <th style={{ padding: "10px 12px" }}>Gasto / CPC</th>
+                      <th style={{ padding: "10px 12px" }}>Leads / CPL</th>
+                      <th style={{ padding: "10px 12px" }}>Vendas / CAC / ROAS</th>
+                      <th style={{ padding: "10px 12px" }}>Ação</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredKeywords.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} style={{ textAlign: "center", padding: "28px", color: "#64748b" }}>
+                          Nenhuma palavra-chave encontrada no filtro atual.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredKeywords.slice(0, 120).map((k: any, idx: number) => (
+                        <tr key={idx} style={{ borderBottom: "1px solid #0f172a" }}>
+                          <td style={{ padding: "10px 12px" }}>
+                            <div style={{ color: "#38bdf8", fontWeight: 700 }}>{k.keyword}</div>
+                            <small style={{ color: "#94a3b8" }}>{k.matchType} • {k.status}</small>
+                          </td>
+                          <td style={{ padding: "10px 12px", fontSize: "12px", color: "#cbd5e1" }}>
+                            <div>{k.adGroup}</div>
+                            <small style={{ color: "#64748b" }}>{k.campaign}</small>
+                          </td>
+                          <td style={{ padding: "10px 12px", fontSize: "12px", color: "#94a3b8" }}>
+                            <div><strong style={{ color: "#fff" }}>{k.clicks}</strong> / {k.impressions}</div>
+                            <small>{k.ctr}% CTR</small>
+                          </td>
+                          <td style={{ padding: "10px 12px" }}>
+                            <div style={{ color: "#fff", fontWeight: 700 }}>R$ {k.cost.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</div>
+                            <small style={{ color: "#64748b" }}>CPC R$ {k.cpc.toFixed(2)}</small>
+                          </td>
+                          <td style={{ padding: "10px 12px" }}>
+                            <div style={{ color: "#fff", fontWeight: 700 }}>{k.whatsappLeads} ({k.whatsappQuotes} orç.)</div>
+                            <small style={{ color: "#94a3b8" }}>{k.cpl > 0 ? `CPL R$ ${k.cpl.toFixed(2)}` : "—"}</small>
+                          </td>
+                          <td style={{ padding: "10px 12px" }}>
+                            <div style={{ color: "#34d399", fontWeight: 700 }}>
+                              {k.whatsappSalesCount}v • R$ {Number(k.whatsappRevenue || 0).toLocaleString("pt-BR")}
+                            </div>
+                            <small style={{ color: "#94a3b8" }}>
+                              {k.roas}x ROAS {k.cac > 0 ? `• CAC R$ ${k.cac.toFixed(0)}` : ""}
+                            </small>
+                          </td>
+                          <td style={{ padding: "10px 12px" }}>
+                            <span
+                              style={{
+                                padding: "3px 8px",
+                                borderRadius: "6px",
+                                fontSize: "11px",
+                                fontWeight: 700,
+                                background:
+                                  k.decisionTag === "ESCALAR"
+                                    ? "rgba(16, 185, 129, 0.16)"
+                                    : k.decisionTag === "DESPERDÍCIO"
+                                      ? "rgba(239, 68, 68, 0.16)"
+                                      : "rgba(59, 130, 246, 0.15)",
+                                color:
+                                  k.decisionTag === "ESCALAR"
+                                    ? "#34d399"
+                                    : k.decisionTag === "DESPERDÍCIO"
+                                      ? "#f87171"
+                                      : "#60a5fa",
+                              }}
+                            >
+                              {k.decisionTag}
+                            </span>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* SUB-ABA 3: CONJUNTOS & SAÚDE DAS CAMPANHAS (IMPRESSION SHARE LOST) */}
+            {biSubTab === "conjuntos" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+                <div>
+                  <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#ffffff", marginBottom: "8px" }}>
+                    Saúde das Campanhas & Oportunidade de Escala (Parcela de Impressão Perdida)
+                  </h3>
+                  <div className="gads-table-scroll">
+                    <table className="gads-table">
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                          <th style={{ padding: "10px 12px" }}>Campanha (Canal)</th>
+                          <th style={{ padding: "10px 12px" }}>Gasto / Cliques</th>
+                          <th style={{ padding: "10px 12px" }}>Impr. Share Atual</th>
+                          <th style={{ padding: "10px 12px" }}>Perdida Orçamento</th>
+                          <th style={{ padding: "10px 12px" }}>Perdida Rank</th>
+                          <th style={{ padding: "10px 12px" }}>Leads / Vendas / ROAS</th>
+                          <th style={{ padding: "10px 12px" }}>Decisão</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(reportsData.campaignHealth || []).map((c: any) => (
+                          <tr key={c.campaignId} style={{ borderBottom: "1px solid #0f172a" }}>
+                            <td style={{ padding: "10px 12px" }}>
+                              <div style={{ color: "#fff", fontWeight: 700 }}>{c.campaign}</div>
+                              <small style={{ color: "#64748b" }}>{c.channelType} • {c.status}</small>
+                            </td>
+                            <td style={{ padding: "10px 12px" }}>
+                              <div style={{ color: "#fff", fontWeight: 700 }}>R$ {c.cost.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</div>
+                              <small style={{ color: "#94a3b8" }}>{c.clicks} cl. ({c.ctr}% CTR)</small>
+                            </td>
+                            <td style={{ padding: "10px 12px", color: "#38bdf8", fontWeight: 700 }}>
+                              {c.searchImpressionSharePct !== null ? `${c.searchImpressionSharePct}%` : "N/A"}
+                            </td>
+                            <td style={{ padding: "10px 12px", color: (c.budgetLostSharePct || 0) >= 15 ? "#facc15" : "#94a3b8", fontWeight: 700 }}>
+                              {c.budgetLostSharePct !== null ? `${c.budgetLostSharePct}%` : "N/A"}
+                            </td>
+                            <td style={{ padding: "10px 12px", color: (c.rankLostSharePct || 0) >= 35 ? "#f87171" : "#94a3b8", fontWeight: 700 }}>
+                              {c.rankLostSharePct !== null ? `${c.rankLostSharePct}%` : "N/A"}
+                            </td>
+                            <td style={{ padding: "10px 12px" }}>
+                              <div style={{ color: "#34d399", fontWeight: 700 }}>
+                                {c.whatsappLeads}L / {c.whatsappSalesCount}V • {c.roas}x
+                              </div>
+                              <small style={{ color: "#94a3b8" }}>Lucro R$ {Number(c.profit || 0).toFixed(2)}</small>
+                            </td>
+                            <td style={{ padding: "10px 12px" }}>
+                              <span
+                                style={{
+                                  padding: "3px 8px",
+                                  borderRadius: "6px",
+                                  fontSize: "11px",
+                                  fontWeight: 700,
+                                  background:
+                                    c.decisionTag === "ESCALAR ORÇAMENTO"
+                                      ? "rgba(16, 185, 129, 0.16)"
+                                      : c.decisionTag === "REVISAR / PAUSAR"
+                                        ? "rgba(239, 68, 68, 0.16)"
+                                        : "rgba(59, 130, 246, 0.15)",
+                                  color:
+                                    c.decisionTag === "ESCALAR ORÇAMENTO"
+                                      ? "#34d399"
+                                      : c.decisionTag === "REVISAR / PAUSAR"
+                                        ? "#f87171"
+                                        : "#60a5fa",
+                                }}
+                              >
+                                {c.decisionTag}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div>
+                  <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#ffffff", marginBottom: "8px" }}>
+                    Ranking Completo de Conjuntos de Anúncios
+                  </h3>
+                  <div className="gads-table-scroll">
+                    <table className="gads-table">
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                          <th style={{ padding: "10px 12px" }}>Conjunto / Campanha</th>
+                          <th style={{ padding: "10px 12px" }}>Gasto (R$)</th>
+                          <th style={{ padding: "10px 12px" }}>Leads / CPL</th>
+                          <th style={{ padding: "10px 12px" }}>Vendas / Taxa / CAC</th>
+                          <th style={{ padding: "10px 12px" }}>Lucro Líquido</th>
+                          <th style={{ padding: "10px 12px" }}>ROAS</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredAdGroups.map((r: any, idx: number) => (
+                          <tr key={idx} style={{ borderBottom: "1px solid #0f172a" }}>
+                            <td style={{ padding: "10px 12px" }}>
+                              <div style={{ color: "#38bdf8", fontWeight: 700 }}>{r.adGroup}</div>
+                              <small style={{ color: "#64748b" }}>{r.campaign}</small>
+                            </td>
+                            <td style={{ padding: "10px 12px", color: "#fff", fontWeight: 600 }}>
+                              R$ {Number(r.cost || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                            </td>
+                            <td style={{ padding: "10px 12px" }}>
+                              <div style={{ color: "#fff", fontWeight: 700 }}>{r.whatsappLeads} ({r.whatsappQuotes} orç.)</div>
+                              <small style={{ color: "#94a3b8" }}>{r.cpl > 0 ? `CPL R$ ${r.cpl.toFixed(2)}` : "—"}</small>
+                            </td>
+                            <td style={{ padding: "10px 12px" }}>
+                              <div style={{ color: "#34d399", fontWeight: 700 }}>
+                                {r.whatsappSalesCount}v • R$ {Number(r.whatsappRevenue || 0).toLocaleString("pt-BR")}
+                              </div>
+                              <small style={{ color: "#94a3b8" }}>
+                                {r.conversionRate || 0}% conv. {r.cac > 0 ? `• CAC R$ ${r.cac.toFixed(0)}` : ""}
+                              </small>
+                            </td>
+                            <td style={{ padding: "10px 12px", color: r.profit >= 0 ? "#34d399" : "#f87171", fontWeight: 700 }}>
+                              R$ {Number(r.profit || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                            </td>
+                            <td style={{ padding: "10px 12px", fontWeight: 800, color: r.roas >= 4 ? "#34d399" : "#60a5fa" }}>
+                              {r.roas}x
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SUB-ABA 4: ANÚNCIOS (ad_group_ad) + AJUSTES DE CONVERSÃO RESTATE / RETRACT */}
+            {biSubTab === "anuncios" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+                <div>
+                  <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#ffffff", marginBottom: "8px" }}>
+                    Desempenho por Anúncio (Cruzado via click_view)
+                  </h3>
+                  <div className="gads-table-scroll">
+                    <table className="gads-table">
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                          <th style={{ padding: "10px 12px" }}>Anúncio (Títulos Principais)</th>
+                          <th style={{ padding: "10px 12px" }}>Conjunto / Campanha</th>
+                          <th style={{ padding: "10px 12px" }}>Cliques / Impr. / CTR</th>
+                          <th style={{ padding: "10px 12px" }}>Gasto / CPC</th>
+                          <th style={{ padding: "10px 12px" }}>Leads / Vendas</th>
+                          <th style={{ padding: "10px 12px" }}>ROAS</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredAds.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} style={{ textAlign: "center", padding: "24px", color: "#64748b" }}>
+                              Nenhum anúncio com impressões neste período.
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredAds.map((ad: any) => (
+                            <tr key={`${ad.adGroupId}_${ad.adId}`} style={{ borderBottom: "1px solid #0f172a" }}>
+                              <td style={{ padding: "10px 12px" }}>
+                                <div style={{ color: "#fff", fontWeight: 700 }}>{ad.headlinePreview}</div>
+                                <small style={{ color: "#64748b" }}>ID {ad.adId} • {ad.adType}</small>
+                              </td>
+                              <td style={{ padding: "10px 12px", fontSize: "12px", color: "#cbd5e1" }}>
+                                <div>{ad.adGroup}</div>
+                                <small style={{ color: "#64748b" }}>{ad.campaign}</small>
+                              </td>
+                              <td style={{ padding: "10px 12px", fontSize: "12px", color: "#94a3b8" }}>
+                                <div><strong style={{ color: "#fff" }}>{ad.clicks}</strong> / {ad.impressions}</div>
+                                <small>{ad.ctr}% CTR</small>
+                              </td>
+                              <td style={{ padding: "10px 12px" }}>
+                                <div style={{ color: "#fff", fontWeight: 700 }}>R$ {ad.cost.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</div>
+                                <small style={{ color: "#64748b" }}>CPC R$ {ad.cpc.toFixed(2)}</small>
+                              </td>
+                              <td style={{ padding: "10px 12px" }}>
+                                <div style={{ color: "#38bdf8", fontWeight: 700 }}>{ad.whatsappLeads} lead(s)</div>
+                                <small style={{ color: "#34d399" }}>{ad.whatsappSalesCount} venda(s)</small>
+                              </td>
+                              <td style={{ padding: "10px 12px", fontWeight: 800, color: ad.roas >= 3 ? "#34d399" : "#60a5fa" }}>
+                                {ad.roas}x
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Painel de Ajustes de Conversão RESTATEMENT / RETRACTION */}
+                <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "16px" }}>
+                  <h3 style={{ fontSize: "14px", fontWeight: 700, color: "#38bdf8", margin: "0 0 6px" }}>
+                    Ajustes de Conversões Enviadas (ConversionAdjustment — RESTATE / RETRACT via orderId)
+                  </h3>
+                  <p style={{ fontSize: "12px", color: "#94a3b8", margin: "0 0 12px" }}>
+                    Se uma venda já enviada ao Google Ads teve alteração de valor ou foi cancelada/estornada no WhatsApp, envie o ajuste exato vinculado ao mesmo <code>orderId</code> para manter o Smart Bidding calibrado.
+                  </p>
+
+                  {adjustmentFeedback && (
+                    <div style={{ marginBottom: "12px", padding: "9px 12px", borderRadius: "8px", background: "rgba(56, 189, 248, 0.14)", border: "1px solid rgba(56, 189, 248, 0.35)", color: "#bae6fd", fontSize: "12px", fontWeight: 600 }}>
+                      {adjustmentFeedback}
+                    </div>
+                  )}
+
+                  {adjustableList.length === 0 ? (
+                    <div style={{ fontSize: "12px", color: "#64748b", padding: "16px", background: "#060b18", borderRadius: "8px", textAlign: "center" }}>
+                      Nenhuma venda enviada ao Google Ads (com <code>orderId</code> de compra) disponível para ajuste ainda.
+                    </div>
+                  ) : (
+                    <div className="gads-table-scroll">
+                      <table className="gads-table">
+                        <thead>
+                          <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                            <th style={{ padding: "8px 10px" }}>Cliente</th>
+                            <th style={{ padding: "8px 10px" }}>orderId Google</th>
+                            <th style={{ padding: "8px 10px" }}>Valor Enviado</th>
+                            <th style={{ padding: "8px 10px" }}>Ajustes</th>
+                            <th style={{ padding: "8px 10px", textAlign: "right" }}>Ações RESTATE / RETRACT</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {adjustableList.map((adj: any) => (
+                            <tr key={adj.id} style={{ borderBottom: "1px solid #0f172a" }}>
+                              <td style={{ padding: "8px 10px" }}>
+                                <div style={{ color: "#fff", fontWeight: 600 }}>{adj.leadName}</div>
+                                <small style={{ color: "#64748b" }}>{adj.leadPhone}</small>
+                              </td>
+                              <td style={{ padding: "8px 10px", fontFamily: "monospace", fontSize: "11px", color: "#94a3b8" }}>
+                                {adj.orderId}
+                              </td>
+                              <td style={{ padding: "8px 10px", color: "#34d399", fontWeight: 700 }}>
+                                R$ {Number(adj.sentValue || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                              </td>
+                              <td style={{ padding: "8px 10px", fontSize: "11px", color: "#cbd5e1" }}>
+                                {adj.conversionAdjustments?.length || 0} ajuste(s)
+                              </td>
+                              <td style={{ padding: "8px 10px", textAlign: "right" }}>
+                                {editingAdjustmentLeadId === adj.id ? (
+                                  <div style={{ display: "inline-flex", gap: "6px", alignItems: "center" }}>
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      value={adjustmentValueDraft}
+                                      onChange={(e) => setAdjustmentValueDraft(e.target.value)}
+                                      placeholder="Novo R$"
+                                      className="gads-input-field"
+                                      style={{ width: "110px", padding: "5px 8px", fontSize: "12px" }}
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={isSendingAdjustment}
+                                      onClick={() =>
+                                        handleSendConversionAdjustment(
+                                          adj.id,
+                                          "RESTATEMENT",
+                                          parseFloat(adjustmentValueDraft || "0")
+                                        )
+                                      }
+                                      style={{ background: "#059669", color: "#fff", border: "none", borderRadius: "6px", padding: "6px 10px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}
+                                    >
+                                      Confirmar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingAdjustmentLeadId(null)}
+                                      style={{ background: "#1e293b", color: "#94a3b8", border: "none", borderRadius: "6px", padding: "6px 8px", fontSize: "11px", cursor: "pointer" }}
+                                    >
+                                      Cancelar
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div style={{ display: "inline-flex", gap: "6px" }}>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingAdjustmentLeadId(adj.id);
+                                        setAdjustmentValueDraft(String(adj.value || adj.sentValue || 0));
+                                      }}
+                                      style={{ background: "rgba(56, 189, 248, 0.15)", border: "1px solid rgba(56, 189, 248, 0.35)", color: "#38bdf8", borderRadius: "6px", padding: "5px 10px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}
+                                    >
+                                      Ajustar Valor (RESTATE)
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isSendingAdjustment}
+                                      onClick={() => handleSendConversionAdjustment(adj.id, "RETRACTION")}
+                                      style={{ background: "rgba(239, 68, 68, 0.15)", border: "1px solid rgba(239, 68, 68, 0.35)", color: "#f87171", borderRadius: "6px", padding: "5px 10px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}
+                                    >
+                                      Estornar (RETRACT)
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
