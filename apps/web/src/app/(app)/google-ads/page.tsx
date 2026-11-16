@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import Link from "next/link";
 import {
   Send,
   CheckCircle2,
@@ -1242,21 +1243,43 @@ export default function GoogleAdsPage() {
 
       {/* CABEÇALHO */}
       <div className="gads-header-block">
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-            <div className="gads-title-wrap">
-              <span style={{ background: "#2563eb", borderRadius: "8px", padding: "6px", display: "inline-flex" }}>
-                <Send size={20} color="#fff" />
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+              <div className="gads-title-wrap">
+                <span style={{ background: "#2563eb", borderRadius: "8px", padding: "6px", display: "inline-flex" }}>
+                  <Send size={20} color="#fff" />
+                </span>
+                <h1 className="gads-title">Google Ads — Inteligência & Funil</h1>
+              </div>
+              <span className="gads-badge-iso">
+                <ShieldCheck size={13} /> 100% Isolado da Meta Ads
               </span>
-              <h1 className="gads-title">Google Ads — Inteligência & Funil</h1>
             </div>
-            <span className="gads-badge-iso">
-              <ShieldCheck size={13} /> 100% Isolado da Meta Ads
-            </span>
+            <p className="gads-subtitle">
+              Relatórios customizáveis de ROAS, atribuição de palavras-chave, funil CRM por etapas e roleta justa de WhatsApp.
+            </p>
           </div>
-          <p className="gads-subtitle">
-            Relatórios customizáveis de ROAS, atribuição de palavras-chave, funil CRM por etapas e roleta justa de WhatsApp.
-          </p>
+
+          <Link
+            href="/overview"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "9px 14px",
+              borderRadius: "8px",
+              background: "#0f172a",
+              border: "1px solid #334155",
+              color: "#e2e8f0",
+              fontSize: "13px",
+              fontWeight: 600,
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <ArrowLeft size={15} /> Voltar para Meta Ads
+          </Link>
         </div>
 
         {/* NAVEGAÇÃO ENTRE AS 5 ABAS */}
