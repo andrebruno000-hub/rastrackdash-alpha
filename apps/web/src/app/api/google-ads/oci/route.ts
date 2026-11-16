@@ -219,6 +219,7 @@ function isAttendantPhone(phone?: string): boolean {
 }
 
 function isWaitingWhatsApp(lead: any): boolean {
+  if (lead?.stage === "clique_anuncio") return true;
   const p = String(lead?.leadPhone || "").trim();
   const placeholder = !p || /aguardando/i.test(p) || isAttendantPhone(p);
   return !lead?.firstMessageAt && placeholder;
