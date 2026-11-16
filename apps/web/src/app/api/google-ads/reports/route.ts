@@ -691,6 +691,15 @@ export async function GET(request: NextRequest) {
   // =========================================================================
   // 1. DESEMPENHO POR CONJUNTO DE ANÚNCIOS (COMPATÍVEL + MÉTRICAS AVANÇADAS)
   // =========================================================================
+  const isClickOnlyLead = (l: any): boolean => {
+    const rawPhone = String(l?.leadPhone || "").trim();
+    const waitingWpp = !l?.firstMessageAt && (!rawPhone || /aguardando/i.test(rawPhone));
+    return (
+      l?.stage === "clique_anuncio" ||
+      (waitingWpp && l?.stage !== "orcamento_enviado" && l?.stage !== "compra_realizada")
+    );
+  };
+
   const performanceMap: Record<
     string,
     {
@@ -702,6 +711,7 @@ export async function GET(request: NextRequest) {
       cost: number;
       clicks: number;
       impressions: number;
+      adButtonClicks: number;
       whatsappLeads: number;
       whatsappQuotes: number;
       whatsappSalesCount: number;
@@ -725,6 +735,7 @@ export async function GET(request: NextRequest) {
         cost: 0,
         clicks: 0,
         impressions: 0,
+        adButtonClicks: 0,
         whatsappLeads: 0,
         whatsappQuotes: 0,
         whatsappSalesCount: 0,
@@ -732,7 +743,10 @@ export async function GET(request: NextRequest) {
       };
     }
 
-    performanceMap[key].whatsappLeads += 1;
+    performanceMap[key].adButtonClicks += 1;
+    if (!isClickOnlyLead(l)) {
+      performanceMap[key].whatsappLeads += 1;
+    }
     if (l.stage === "orcamento_enviado" || l.stage === "compra_realizada") {
       performanceMap[key].whatsappQuotes += 1;
     }
@@ -770,6 +784,7 @@ export async function GET(request: NextRequest) {
         cost: costBrl,
         clicks,
         impressions,
+        adButtonClicks: 0,
         whatsappLeads: 0,
         whatsappQuotes: 0,
         whatsappSalesCount: 0,
@@ -857,6 +872,7 @@ export async function GET(request: NextRequest) {
   });
 
   leads.forEach((l) => {
+    if (isClickOnlyLead(l)) return;
     const rawCamp = String(l.campaign || "").trim();
     const campName = entities[rawCamp] || l.campaignName || rawCamp;
     const target =
@@ -956,8 +972,9 @@ export async function GET(request: NextRequest) {
     kwAggMap[key].cost += Number(row.metrics?.costMicros || 0) / 1000000;
   });
 
-  // Cruza leads com palavras-chave por texto normalizado (+ mesma campanha/conjunto se houver)
+  // Cruza leads reais (que iniciaram conversa) com palavras-chave por texto normalizado
   leads.forEach((l) => {
+    if (isClickOnlyLead(l)) return;
     const normLeadKw = normalizeText(l.keyword || "");
     if (!normLeadKw || normLeadKw === "google ads search" || normLeadKw === "pesquisa direta") return;
     const rawCamp = String(l.campaign || "");
@@ -1058,9 +1075,10 @@ export async function GET(request: NextRequest) {
   biSnapshot.searchTermRows.forEach((r) => ingestSearchTermRow(r, "SEARCH"));
   biSnapshot.pmaxSearchTermRows.forEach((r) => ingestSearchTermRow(r, "PMAX"));
 
-  // Cruza termos com leads cuja keyword esteja associada ao termo digitado
+  // Cruza termos com leads reais (que iniciaram conversa) cuja keyword esteja associada ao termo digitado
   const stValues = Object.values(stAggMap);
   leads.forEach((l) => {
+    if (isClickOnlyLead(l)) return;
     const normKw = normalizeText(l.keyword || "");
     if (!normKw || normKw === "google ads search" || normKw === "pesquisa direta") return;
     const rawCamp = String(l.campaign || "");
@@ -1150,6 +1168,7 @@ export async function GET(request: NextRequest) {
   });
 
   leads.forEach((l) => {
+    if (isClickOnlyLead(l)) return;
     if (!l.adId) return;
     const match = Object.values(adAggMap).find(
       (ad: any) => String(l.adId).includes(ad.adId) || ad.adId === String(l.adId)
