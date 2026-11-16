@@ -659,10 +659,14 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
           const pushName = msg?._chatName || msg?.pushName || msg?.senderName || "";
 
           if (idx !== -1) {
-            if (!leads[idx].firstMessageAt || /aguardando/i.test(String(leads[idx].leadPhone || ""))) {
+            if (!leads[idx].firstMessageAt || /aguardando/i.test(String(leads[idx].leadPhone || "")) || leads[idx].stage === "clique_anuncio") {
               leads[idx].leadPhone = cleanPhone;
               if (pushName) leads[idx].leadName = pushName;
-              leads[idx].firstMessageAt = msgIso;
+              if (leads[idx].stage !== "orcamento_enviado" && leads[idx].stage !== "compra_realizada") {
+                leads[idx].stage = "conversa_iniciada";
+                leads[idx].conversionType = "conversa_iniciada";
+              }
+              if (!leads[idx].firstMessageAt) leads[idx].firstMessageAt = msgIso;
               leads[idx].updatedAt = new Date().toISOString();
               if (tracking.keyword) leads[idx].keyword = tracking.keyword;
               if (tracking.campaign) leads[idx].campaign = tracking.campaign;
@@ -1405,8 +1409,18 @@ export async function GET(request: NextRequest) {
   const enriched = leads.map((l: any) => {
     const rawCamp = String(l.campaign || "").trim();
     const rawAdGrp = String(l.adGroup || "").trim();
+    const rawPhone = String(l.leadPhone || "").trim();
+    const waitingWpp = !l.firstMessageAt && (!rawPhone || /aguardando/i.test(rawPhone) || isAttendantPhone(rawPhone));
+    const normalizedStage =
+      l.stage === "orcamento_enviado" || l.stage === "compra_realizada"
+        ? l.stage
+        : waitingWpp || l.stage === "clique_anuncio"
+          ? "clique_anuncio"
+          : "conversa_iniciada";
+
     return {
       ...l,
+      stage: normalizedStage,
       campaignName: entities[rawCamp] || rawCamp,
       adGroupName: entities[rawAdGrp] || rawAdGrp,
     };
@@ -1519,7 +1533,13 @@ export async function PATCH(request: NextRequest) {
     const prevValue = Number(leads[index].value || 0);
     const sentPurchase = leads[index].sentStages?.compra_realizada;
 
-    if (stage) leads[index].stage = stage;
+    if (stage) {
+      leads[index].stage = stage;
+      leads[index].conversionType = stage;
+      if (stage !== "clique_anuncio" && !leads[index].firstMessageAt) {
+        leads[index].firstMessageAt = new Date().toISOString();
+      }
+    }
     if (value !== undefined) leads[index].value = Number(value);
     if (attendantName) leads[index].attendantName = attendantName;
     leads[index].updatedAt = new Date().toISOString();
