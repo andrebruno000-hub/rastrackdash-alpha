@@ -61,7 +61,8 @@ function recordLead(lead: {
   campaign: string;
   adGroup: string;
   gclid: string;
-  conversionType: "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
+  stage: "clique_anuncio" | "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
+  conversionType: "clique_anuncio" | "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
   status: "queued" | "sent" | "failed";
   occurredAt: string;
 }) {
@@ -113,7 +114,7 @@ export async function GET(request: NextRequest) {
     searchParams.get("utm_adgroup") ||
     "";
 
-  // Só registra pré-lead se for clique real de anúncio Google (com gclid ou keyword)
+  // Só registra pré-lead (etapa Clique no Anúncio) se for clique real de anúncio Google
   // e nunca grava o telefone do atendente como leadPhone
   const isRealGoogleAd = Boolean(gclid || keyword);
 
@@ -126,7 +127,8 @@ export async function GET(request: NextRequest) {
       campaign: campaign || "Campanha Google",
       adGroup: adGroup || "Conjunto Geral",
       gclid: gclid || "sem_gclid",
-      conversionType: "conversa_iniciada",
+      stage: "clique_anuncio",
+      conversionType: "clique_anuncio",
       status: "queued",
       occurredAt: new Date().toISOString(),
     });
