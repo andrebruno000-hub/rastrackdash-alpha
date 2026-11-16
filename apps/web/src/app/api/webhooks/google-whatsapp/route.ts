@@ -540,6 +540,7 @@ export async function POST(request: NextRequest) {
           leads[leadIndex].leadPhone = cleanPhone;
           if (leads[leadIndex].stage !== "orcamento_enviado" && leads[leadIndex].stage !== "compra_realizada") {
             leads[leadIndex].stage = "conversa_iniciada";
+            leads[leadIndex].conversionType = "conversa_iniciada";
           }
           if (!leads[leadIndex].firstMessageAt) leads[leadIndex].firstMessageAt = nowIso;
           leads[leadIndex].updatedAt = nowIso;
@@ -612,7 +613,13 @@ export async function POST(request: NextRequest) {
         const nowIso = new Date().toISOString();
         leads[pendingLeadIndex].leadPhone = cleanPhone;
         if (pushName) leads[pendingLeadIndex].leadName = pushName;
-        leads[pendingLeadIndex].stage = "conversa_iniciada";
+        if (
+          leads[pendingLeadIndex].stage !== "orcamento_enviado" &&
+          leads[pendingLeadIndex].stage !== "compra_realizada"
+        ) {
+          leads[pendingLeadIndex].stage = "conversa_iniciada";
+          leads[pendingLeadIndex].conversionType = "conversa_iniciada";
+        }
         leads[pendingLeadIndex].firstMessageAt = nowIso;
         leads[pendingLeadIndex].updatedAt = nowIso;
 
@@ -689,6 +696,7 @@ export async function POST(request: NextRequest) {
           // Avalia COMPRA REALIZADA primeiro (prioridade máxima)
           if (matchedPurchasePhrase) {
             const value = extractMonetaryValue(messageText);
+            if (!leads[leadIndex].firstMessageAt) leads[leadIndex].firstMessageAt = nowIso;
             leads[leadIndex].stage = "compra_realizada";
             leads[leadIndex].conversionType = "compra_realizada";
             if (value !== null) leads[leadIndex].value = value;
@@ -728,6 +736,7 @@ export async function POST(request: NextRequest) {
 
           // Avalia ORÇAMENTO ENVIADO (nunca rebaixa uma venda já concluída)
           if (matchedQuotePhrase && lead.stage !== "compra_realizada") {
+            if (!leads[leadIndex].firstMessageAt) leads[leadIndex].firstMessageAt = nowIso;
             leads[leadIndex].stage = "orcamento_enviado";
             leads[leadIndex].conversionType = "orcamento_enviado";
             leads[leadIndex].quotedAt = nowIso;
