@@ -6,17 +6,16 @@ import crypto from "crypto";
 export const dynamic = "force-dynamic";
 
 /**
- * PASSO 3: OCI À PROVA DE FALHAS + ENHANCED CONVERSIONS (SHA-256) + DIAGNÓSTICO OFICIAL GOOGLE
+ * PASSO 3 + DATA MANAGER API v1: OCI À PROVA DE FALHAS + ENHANCED CONVERSIONS (SHA-256)
  * Caminho no GitHub: apps/web/src/app/api/google-ads/oci/route.ts
  *
- * - Google Ads API ativa (v25/v26 com fallback v24/v23) + descoberta automática de MCC
- * - Lookup real de conversion_action via GAQL (sem slugs fictícios nem v17)
- * - Enhanced Conversions for Leads: telefone E.164 (+55...) normalizado e hasheado em SHA-256
- * - Anti-duplicidade nativa via orderId determinístico por (leadId + stage)
+ * - Leitura de conversion_action e diagnósticos via Google Ads API (v25/v26) + descoberta automática de MCC
+ * - Envio oficial de conversões offline via Google Data Manager API v1 (datamanager.googleapis.com/v1/events:ingest)
+ *   (exigido pelo Google para novas integrações no lugar de UploadClickConversions legado)
+ * - Enhanced Conversions for Leads: telefone E.164 (+55...) normalizado e hasheado em SHA-256 HEX
+ * - Anti-duplicidade nativa via transactionId determinístico por (leadId + stage)
  * - Trava absoluta de idempotência no backend (/data/alpha_google_oci_sent_index.json):
  *   eventos "sent" NUNCA são reenviados (mesmo com force: true)
- * - Parsing completo de partialFailureError (mesmo em HTTP 200)
- * - Diagnóstico assíncrono oficial via offline_conversion_upload_client_summary e conversion_action_summary
  */
 
 type FunnelStage = "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
@@ -849,9 +848,15 @@ function parsePartialFailureErrors(resJson: any, totalItems: number): {
 }
 
 function buildFriendlyGoogleOciError(rawMessage: string): string {
-  const msg = String(rawMessage || "Erro desconhecido na Google Ads API");
+  const msg = String(rawMessage || "Erro desconhecido na API do Google");
+  if (/ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficient authentication scopes|Request had insufficient authentication scopes/i.test(msg)) {
+    return `${msg} — Falta o escopo https://www.googleapis.com/auth/datamanager no Refresh Token. Gere um novo GOOGLE_ADS_REFRESH_TOKEN no OAuth Playground marcando juntos os escopos "adwords" e "datamanager" e salve no Dokploy.`;
+  }
+  if (/SERVICE_DISABLED|has not been used in project|is disabled/i.test(msg)) {
+    return `${msg} — Ative a API "Data Manager API" (datamanager.googleapis.com) no projeto RastrackDash Google Ads no Google Cloud Console.`;
+  }
   if (/CUSTOMER_NOT_ALLOWLISTED_FOR_THIS_FEATURE/i.test(msg)) {
-    return `${msg} — A conta/projeto ainda não foi habilitado para UploadClickConversions legado ou requer vínculo/uso da Data Manager API (escopo datamanager).`;
+    return `${msg} — A conta exige envio via Data Manager API (datamanager.googleapis.com/v1/events:ingest) com escopo datamanager.`;
   }
   if (/EXPIRED_EVENT/i.test(msg)) {
     return `${msg} — Evento expirado (>90 dias desde o clique no anúncio).`;
@@ -1197,7 +1202,11 @@ export async function POST(request: NextRequest) {
       stageKey: string;
       orderId: string;
       conversionAction: ConversionActionOption;
-      payloadConversion: Record<string, any>;
+      stageMs: number;
+      conversionValue: number;
+      clickIdKind: "gclid" | "gbraid" | "wbraid";
+      clickIdValue: string;
+      hashedPhoneHex: string | null;
       hashedPhoneUsed: boolean;
     }
 
@@ -1267,33 +1276,19 @@ export async function POST(request: NextRequest) {
       const stageMs = Math.max(occurredTime, new Date(stageRawTime || now).getTime());
 
       const orderId = buildDeterministicOrderId(l.id, stage);
-      const conversionPayload: Record<string, any> = {
-        conversionAction: resolvedAction.resourceName,
-        conversionDateTime: formatGoogleAdsDateTime(stageMs),
-        conversionValue:
-          l.value !== undefined && l.value !== null && !isNaN(Number(l.value))
-            ? Number(l.value)
-            : stage === "compra_realizada"
-              ? 1
-              : 0,
-        currencyCode: "BRL",
-        orderId,
-      };
+      const conversionValue =
+        l.value !== undefined && l.value !== null && !isNaN(Number(l.value))
+          ? Number(l.value)
+          : stage === "compra_realizada"
+            ? 1
+            : 0;
 
-      conversionPayload[clickId.kind] = clickId.value;
-
-      // Enhanced Conversions for Leads (SHA-256 E.164): somente com GCLID (regra oficial Google)
-      let hashedPhoneUsed = false;
+      // Enhanced Conversions for Leads (SHA-256 E.164 HEX): somente com GCLID (regra oficial Google)
+      let hashedPhoneHex: string | null = null;
       if (clickId.kind === "gclid") {
         const e164 = normalizePhoneE164(l.leadPhone);
         if (e164) {
-          conversionPayload.userIdentifiers = [
-            {
-              hashedPhoneNumber: hashPhoneSha256(e164),
-              userIdentifierSource: "FIRST_PARTY",
-            },
-          ];
-          hashedPhoneUsed = true;
+          hashedPhoneHex = hashPhoneSha256(e164);
         }
       }
 
@@ -1304,8 +1299,12 @@ export async function POST(request: NextRequest) {
         stageKey,
         orderId,
         conversionAction: resolvedAction,
-        payloadConversion: conversionPayload,
-        hashedPhoneUsed,
+        stageMs,
+        conversionValue,
+        clickIdKind: clickId.kind,
+        clickIdValue: clickId.value,
+        hashedPhoneHex,
+        hashedPhoneUsed: Boolean(hashedPhoneHex),
       });
     }
 
@@ -1314,34 +1313,83 @@ export async function POST(request: NextRequest) {
     const results: any[] = [...preCheckErrors];
 
     if (candidates.length > 0) {
-      const headers: Record<string, string> = {
-        Authorization: `Bearer ${ctx.accessToken}`,
-        "developer-token": ctx.devToken,
-        "Content-Type": "application/json",
-      };
-      if (ctx.loginCustomerId) {
-        headers["login-customer-id"] = ctx.loginCustomerId;
+      // Monta destinos únicos por Conversion Action ID usando referência para rotear cada evento
+      const destinationsMap = new Map<string, Record<string, any>>();
+      for (const c of candidates) {
+        const ref = `dest_${c.conversionAction.id}`;
+        if (!destinationsMap.has(ref)) {
+          const destObj: Record<string, any> = {
+            reference: ref,
+            operatingAccount: {
+              accountType: "GOOGLE_ADS",
+              accountId: CUSTOMER_ID,
+            },
+            productDestinationId: String(c.conversionAction.id),
+          };
+          if (ctx.loginCustomerId) {
+            destObj.loginAccount = {
+              accountType: "GOOGLE_ADS",
+              accountId: ctx.loginCustomerId,
+            };
+          }
+          destinationsMap.set(ref, destObj);
+        }
       }
 
-      const uploadRes = await fetch(
-        `https://googleads.googleapis.com/${ctx.version}/customers/${CUSTOMER_ID}:uploadClickConversions`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            conversions: candidates.map((c) => c.payloadConversion),
-            partialFailure: true,
-          }),
+      const anyUserData = candidates.some((c) => Boolean(c.hashedPhoneHex));
+      const eventsPayload = candidates.map((c) => {
+        const eventObj: Record<string, any> = {
+          destinationReferences: [`dest_${c.conversionAction.id}`],
+          eventTimestamp: new Date(c.stageMs).toISOString(),
+          eventSource: "WEB",
+          transactionId: c.orderId,
+          conversionValue: c.conversionValue,
+          currency: "BRL",
+          adIdentifiers: {
+            [c.clickIdKind]: c.clickIdValue,
+          },
+        };
+        if (c.hashedPhoneHex) {
+          eventObj.userData = {
+            userIdentifiers: [
+              {
+                phoneNumber: c.hashedPhoneHex,
+              },
+            ],
+          };
         }
-      );
+        return eventObj;
+      });
+
+      const dmRequestBody: Record<string, any> = {
+        destinations: Array.from(destinationsMap.values()),
+        events: eventsPayload,
+        consent: {
+          adUserData: "CONSENT_GRANTED",
+          adPersonalization: "CONSENT_GRANTED",
+        },
+      };
+      if (anyUserData) {
+        dmRequestBody.encoding = "HEX";
+      }
+
+      const uploadRes = await fetch("https://datamanager.googleapis.com/v1/events:ingest", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${ctx.accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(dmRequestBody),
+      });
 
       const resJson = await uploadRes.json().catch(() => ({}));
 
       if (!uploadRes.ok) {
         const rawErr =
           resJson?.error?.message ||
-          resJson?.error?.details?.[0]?.errors?.[0]?.message ||
-          `Erro HTTP ${uploadRes.status} na Google Ads API ${ctx.version}`;
+          resJson?.error?.details?.[0]?.reason ||
+          resJson?.error?.details?.[0]?.message ||
+          `Erro HTTP ${uploadRes.status} na Data Manager API v1`;
         const friendlyErr = buildFriendlyGoogleOciError(rawErr);
 
         for (const c of candidates) {
@@ -1353,72 +1401,52 @@ export async function POST(request: NextRequest) {
         }
         leadsMutated = true;
       } else {
-        const pfCheck = parsePartialFailureErrors(resJson, candidates.length);
         const nowIso = new Date().toISOString();
+        const requestId = resJson?.requestId ? String(resJson.requestId) : null;
+        const warningsCount = Array.isArray(resJson?.fieldWarnings) ? resJson.fieldWarnings.length : 0;
 
-        for (let idx = 0; idx < candidates.length; idx++) {
-          const c = candidates[idx];
-          const itemError = pfCheck.perItemError[idx];
-          const itemResult = Array.isArray(resJson?.results) ? resJson.results[idx] : null;
-          const hasResultData = Boolean(itemResult && Object.keys(itemResult).length > 0);
+        for (const c of candidates) {
+          leads[c.leadIndex].status = "sent";
+          leads[c.leadIndex].sentAt = nowIso;
+          leads[c.leadIndex].lastUploadedStage = c.stage;
+          leads[c.leadIndex].ociOrderId = c.orderId;
+          leads[c.leadIndex].ociError = null;
+          leads[c.leadIndex].ociResult = `Enviado Data Manager API v1${requestId ? ` (${requestId})` : ""}${c.hashedPhoneUsed ? " + Enhanced SHA-256" : ""}${warningsCount > 0 ? ` [${warningsCount} aviso(s)]` : ""}`;
+          if (!leads[c.leadIndex].sentStages) leads[c.leadIndex].sentStages = {};
+          leads[c.leadIndex].sentStages[c.stage] = {
+            orderId: c.orderId,
+            sentAt: nowIso,
+            conversionAction: c.conversionAction.resourceName,
+            conversionActionName: c.conversionAction.name,
+            value: c.conversionValue,
+            hashedPhoneUsed: c.hashedPhoneUsed,
+            requestId,
+          };
 
-          if (!itemError && (!pfCheck.hasAnyFailure || hasResultData)) {
-            leads[c.leadIndex].status = "sent";
-            leads[c.leadIndex].sentAt = nowIso;
-            leads[c.leadIndex].lastUploadedStage = c.stage;
-            leads[c.leadIndex].ociOrderId = c.orderId;
-            leads[c.leadIndex].ociError = null;
-            leads[c.leadIndex].ociResult = `Enviado Google Ads API ${ctx.version}${c.hashedPhoneUsed ? " + Enhanced SHA-256" : ""}`;
-            if (!leads[c.leadIndex].sentStages) leads[c.leadIndex].sentStages = {};
-            leads[c.leadIndex].sentStages[c.stage] = {
-              orderId: c.orderId,
-              sentAt: nowIso,
-              conversionAction: c.conversionAction.resourceName,
-              conversionActionName: c.conversionAction.name,
-              value: c.payloadConversion.conversionValue,
-              hashedPhoneUsed: c.hashedPhoneUsed,
-            };
+          sentIndex[c.stageKey] = {
+            key: c.stageKey,
+            leadId: c.lead.id,
+            stage: c.stage,
+            orderId: c.orderId,
+            conversionAction: c.conversionAction.resourceName,
+            conversionActionName: c.conversionAction.name,
+            value: c.conversionValue,
+            hashedPhoneUsed: c.hashedPhoneUsed,
+            sentAt: nowIso,
+            apiVersion: "datamanager-v1",
+          };
 
-            sentIndex[c.stageKey] = {
-              key: c.stageKey,
-              leadId: c.lead.id,
-              stage: c.stage,
-              orderId: c.orderId,
-              conversionAction: c.conversionAction.resourceName,
-              conversionActionName: c.conversionAction.name,
-              value: c.payloadConversion.conversionValue,
-              hashedPhoneUsed: c.hashedPhoneUsed,
-              sentAt: nowIso,
-              apiVersion: ctx.version,
-            };
-
-            uploadedCount += 1;
-            leadsMutated = true;
-            results.push({
-              id: c.lead.id,
-              stage: c.stage,
-              orderId: c.orderId,
-              hashedPhoneUsed: c.hashedPhoneUsed,
-              conversionAction: c.conversionAction.name,
-              status: "sent",
-            });
-          } else {
-            const friendlyErr = buildFriendlyGoogleOciError(
-              itemError || pfCheck.globalMessage || "Conversão rejeitada em partialFailureError"
-            );
-            leads[c.leadIndex].status = "failed";
-            leads[c.leadIndex].ociError = friendlyErr;
-            leads[c.leadIndex].ociOrderId = c.orderId;
-            failedCount += 1;
-            leadsMutated = true;
-            results.push({
-              id: c.lead.id,
-              stage: c.stage,
-              orderId: c.orderId,
-              status: "failed",
-              error: friendlyErr,
-            });
-          }
+          uploadedCount += 1;
+          leadsMutated = true;
+          results.push({
+            id: c.lead.id,
+            stage: c.stage,
+            orderId: c.orderId,
+            hashedPhoneUsed: c.hashedPhoneUsed,
+            conversionAction: c.conversionAction.name,
+            requestId,
+            status: "sent",
+          });
         }
       }
     }
