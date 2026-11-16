@@ -35,6 +35,8 @@ import {
   Flame,
   Copy,
   ArrowUpDown,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
 interface Attendant {
@@ -56,8 +58,8 @@ interface GoogleLeadEvent {
   adGroup: string;
   adGroupName?: string;
   gclid: string;
-  conversionType?: "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
-  stage?: "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
+  conversionType?: "clique_anuncio" | "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
+  stage?: "clique_anuncio" | "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
   status: "queued" | "sent" | "failed";
   occurredAt: string;
   firstMessageAt?: string;
@@ -248,6 +250,10 @@ export default function GoogleAdsPage() {
   const [isSavingUazapi, setIsSavingUazapi] = useState(false);
   const [uazapiFeedback, setUazapiFeedback] = useState<string | null>(null);
   const uazapiConfigLoadedRef = useRef<boolean>(false);
+  const [editingUazapiTokens, setEditingUazapiTokens] = useState(false);
+  const [showAdvancedTech, setShowAdvancedTech] = useState(false);
+  const [closingSaleLeadId, setClosingSaleLeadId] = useState<string | null>(null);
+  const [closingSaleValue, setClosingSaleValue] = useState<string>("1200");
 
   const handleDownloadBackup = () => {
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(leadEvents, null, 2));
@@ -764,6 +770,20 @@ export default function GoogleAdsPage() {
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
   }, [realLeadEvents, reportsData.reports]);
 
+  const getEffectiveStage = (
+    l: GoogleLeadEvent
+  ): "clique_anuncio" | "conversa_iniciada" | "orcamento_enviado" | "compra_realizada" => {
+    if (l.stage === "compra_realizada") return "compra_realizada";
+    if (l.stage === "orcamento_enviado") return "orcamento_enviado";
+    if (
+      l.stage === "clique_anuncio" ||
+      (!l.firstMessageAt && (isAttendantLead(l.leadPhone) || isWaitingWhatsApp(l.leadPhone)))
+    ) {
+      return "clique_anuncio";
+    }
+    return "conversa_iniciada";
+  };
+
   // Leads filtrados para o Relatório Customizável
   const filteredReportLeads = useMemo(() => {
     return realLeadEvents.filter((event) => {
@@ -777,20 +797,25 @@ export default function GoogleAdsPage() {
       const matchesAdGroup =
         reportAdGroup === "all" || event.adGroup === reportAdGroup || event.adGroupName === reportAdGroup;
       const matchesAttendant = reportAttendant === "all" || event.attendantName === reportAttendant;
-      const currentLeadStage = event.stage || "conversa_iniciada";
+      const currentLeadStage = getEffectiveStage(event);
       const matchesStage = reportStage === "all" || currentLeadStage === reportStage;
 
       return matchesDate && matchesCampaign && matchesAdGroup && matchesAttendant && matchesStage;
     });
   }, [realLeadEvents, reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant, reportStage]);
 
-  // Métricas Consolidadas do Relatório no Período
+  // Métricas Consolidadas do Relatório no Período (separando cliques de conversas reais)
   const reportMetrics = useMemo(() => {
-    const totalLeadsCount = filteredReportLeads.length;
-    const quotesCount = filteredReportLeads.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length;
-    const salesCount = filteredReportLeads.filter((l) => l.stage === "compra_realizada").length;
+    const totalClicksCount = filteredReportLeads.length;
+    const clicksOnlyCount = filteredReportLeads.filter((l) => getEffectiveStage(l) === "clique_anuncio").length;
+    const totalLeadsCount = filteredReportLeads.filter((l) => getEffectiveStage(l) !== "clique_anuncio").length;
+    const quotesCount = filteredReportLeads.filter((l) => {
+      const st = getEffectiveStage(l);
+      return st === "orcamento_enviado" || st === "compra_realizada";
+    }).length;
+    const salesCount = filteredReportLeads.filter((l) => getEffectiveStage(l) === "compra_realizada").length;
     const totalRevenue = filteredReportLeads
-      .filter((l) => l.stage === "compra_realizada" && l.value)
+      .filter((l) => getEffectiveStage(l) === "compra_realizada" && l.value)
       .reduce((acc, curr) => acc + (curr.value || 0), 0);
     const totalCost = reportsData.totalCost || 0;
     const profit = totalRevenue - totalCost;
@@ -800,6 +825,8 @@ export default function GoogleAdsPage() {
     const conversionRate = totalLeadsCount > 0 ? Number(((salesCount / totalLeadsCount) * 100).toFixed(1)) : 0;
 
     return {
+      totalClicksCount,
+      clicksOnlyCount,
       totalLeadsCount,
       quotesCount,
       salesCount,
@@ -824,7 +851,7 @@ export default function GoogleAdsPage() {
       `"${l.adGroupName || l.adGroup}"`,
       `"${l.keyword}"`,
       `"${l.attendantName}"`,
-      l.stage || "conversa_iniciada",
+      getEffectiveStage(l),
       l.value || 0,
     ]);
 
@@ -838,16 +865,20 @@ export default function GoogleAdsPage() {
     document.body.removeChild(link);
   };
 
-
-  // Contadores Globais (Cliques Reais vs Conversas Efetivas no WhatsApp)
+  // Contadores Globais (Cliques no Anúncio vs Conversas Reais no WhatsApp)
   const totalLeads = realLeadEvents.length;
-  const conversasIniciadas = realLeadEvents.filter(
-    (l) => Boolean(l.firstMessageAt) && !isAttendantLead(l.leadPhone) && !isWaitingWhatsApp(l.leadPhone)
-  ).length;
-  const orcamentosEnviados = realLeadEvents.filter((l) => l.stage === "orcamento_enviado").length;
-  const comprasRealizadas = realLeadEvents.filter((l) => l.stage === "compra_realizada").length;
+  const apenasCliques = realLeadEvents.filter((l) => getEffectiveStage(l) === "clique_anuncio").length;
+  const conversasTotais = realLeadEvents.filter((l) => getEffectiveStage(l) !== "clique_anuncio").length;
+  const conversasEmAberto = realLeadEvents.filter((l) => getEffectiveStage(l) === "conversa_iniciada").length;
+  const orcamentosTotais = realLeadEvents.filter((l) => {
+    const st = getEffectiveStage(l);
+    return st === "orcamento_enviado" || st === "compra_realizada";
+  }).length;
+  const orcamentosEnviados = realLeadEvents.filter((l) => getEffectiveStage(l) === "orcamento_enviado").length;
+  const comprasRealizadas = realLeadEvents.filter((l) => getEffectiveStage(l) === "compra_realizada").length;
+  const chatStartRate = totalLeads > 0 ? Math.round((conversasTotais / totalLeads) * 100) : 0;
   const faturamentoTotal = realLeadEvents
-    .filter((l) => l.stage === "compra_realizada" && l.value)
+    .filter((l) => getEffectiveStage(l) === "compra_realizada" && l.value)
     .reduce((acc, curr) => acc + (curr.value || 0), 0);
 
   const filteredEvents = useMemo(() => {
@@ -864,7 +895,7 @@ export default function GoogleAdsPage() {
         (event.adGroupName && event.adGroupName.toLowerCase().includes(term));
 
       const matchesAttendant = filterAttendant === "all" || event.attendantName === filterAttendant;
-      const currentLeadStage = event.stage || "conversa_iniciada";
+      const currentLeadStage = getEffectiveStage(event);
       const matchesStage = filterStage === "all" || currentLeadStage === filterStage;
 
       return matchesSearch && matchesAttendant && matchesStage;
@@ -1199,7 +1230,12 @@ export default function GoogleAdsPage() {
             width: auto;
           }
           .kanban-grid {
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(2, 1fr);
+          }
+        }
+        @media (min-width: 1200px) {
+          .kanban-grid {
+            grid-template-columns: repeat(4, 1fr);
           }
         }
       `}</style>
@@ -1287,19 +1323,19 @@ export default function GoogleAdsPage() {
           </button>
         </div>
 
-        {/* BARRA DE DIAGNÓSTICO E SAÚDE DO BACKEND EM TEMPO REAL */}
+        {/* BARRA DE STATUS COMPACTA DO SISTEMA */}
         <div
           style={{
             background: "#090f20",
             border: `1px solid ${
-              backendFetchError
+              backendFetchError || (entitiesStatus.ociStats?.failed ?? 0) > 0
                 ? "rgba(239, 68, 68, 0.45)"
                 : !entitiesStatus.apiConnected || entitiesStatus.isPersistentStorage === false
                   ? "rgba(234, 179, 8, 0.4)"
-                  : "rgba(16, 185, 129, 0.35)"
+                  : "rgba(16, 185, 129, 0.3)"
             }`,
             borderRadius: "10px",
-            padding: "10px 14px",
+            padding: "8px 14px",
             display: "flex",
             flexDirection: "column",
             gap: "6px",
@@ -1307,8 +1343,7 @@ export default function GoogleAdsPage() {
           }}
         >
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "12px" }}>
-              {/* Status Google Ads API */}
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "10px" }}>
               <span
                 style={{
                   display: "inline-flex",
@@ -1328,50 +1363,42 @@ export default function GoogleAdsPage() {
                   }}
                 />
                 {entitiesStatus.apiConnected
-                  ? `Google Ads API Online (${entitiesStatus.apiVersionUsed || "ativa"} • ${entitiesStatus.campaignsCount} campanhas / ${entitiesStatus.adGroupsCount} conjuntos sincronizados automaticamente)`
-                  : "Google Ads API Offline (Resolução Automática de Nomes)"}
+                  ? `Google Ads Conectado (${entitiesStatus.apiVersionUsed || "v25"})`
+                  : "Google Ads Offline"}
               </span>
 
-              <span style={{ color: "#334155" }}>|</span>
+              <span style={{ color: "#334155" }}>•</span>
+              <span style={{ color: "#cbd5e1", fontWeight: 600 }}>
+                {entitiesStatus.leadsCount ?? realLeadEvents.length} lead(s) rastreados
+              </span>
 
-              {/* Status Recepção e Armazenamento de Leads */}
-              <span
+              <span style={{ color: "#334155" }}>•</span>
+              <span style={{ color: entitiesStatus.uazapiStatus?.configured ? "#34d399" : "#94a3b8", fontWeight: 600 }}>
+                WhatsApp: {entitiesStatus.uazapiStatus?.configured ? "Webhook + Backup Uazapi Ativos" : "Webhook Ativo"}
+              </span>
+            </div>
+
+            {(entitiesStatus.ociStats?.failed ?? 0) > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setCurrentTab("conversoes");
+                  setShowAdvancedTech(true);
+                }}
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  fontWeight: 600,
-                  color: entitiesStatus.isPersistentStorage === false ? "#fde047" : "#38bdf8",
+                  background: "rgba(239, 68, 68, 0.15)",
+                  border: "1px solid rgba(239, 68, 68, 0.4)",
+                  color: "#fca5a5",
+                  borderRadius: "6px",
+                  padding: "3px 10px",
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  cursor: "pointer",
                 }}
               >
-                {entitiesStatus.isPersistentStorage === false
-                  ? `Armazenamento Temporário (${entitiesStatus.storageDir || "/tmp"})`
-                  : `Armazenamento Persistente (${entitiesStatus.storageDir || "/data"})`}
-                {` • ${entitiesStatus.leadsCount ?? realLeadEvents.length} lead(s)`}
-                {entitiesStatus.lastLeadAt ? ` • Último recebido: ${entitiesStatus.lastLeadAt}` : ""}
-              </span>
-            </div>
-
-            {/* Status Fila OCI + Reconciliação WhatsApp */}
-            <div style={{ display: "flex", alignItems: "center", gap: "12px", color: "#94a3b8", fontSize: "11px", fontWeight: 600, flexWrap: "wrap" }}>
-              <span>
-                WhatsApp Anti-Perda:{" "}
-                <strong style={{ color: entitiesStatus.uazapiStatus?.configured ? "#34d399" : "#94a3b8" }}>
-                  {entitiesStatus.uazapiStatus?.configured
-                    ? `Ativa (${entitiesStatus.uazapiStatus.instancesCount || 1} inst.)`
-                    : "Webhook Ativo"}
-                </strong>
-              </span>
-              <span style={{ color: "#334155" }}>|</span>
-              <span>
-                OCI: <strong style={{ color: "#38bdf8" }}>{entitiesStatus.ociStats?.queued ?? 0}</strong> fila •{" "}
-                <strong style={{ color: "#34d399" }}>{entitiesStatus.ociStats?.sent ?? 0}</strong> enviados •{" "}
-                <strong style={{ color: (entitiesStatus.ociStats?.failed ?? 0) > 0 ? "#f87171" : "#94a3b8" }}>
-                  {entitiesStatus.ociStats?.failed ?? 0}
-                </strong>{" "}
-                falhas
-              </span>
-            </div>
+                {entitiesStatus.ociStats?.failed} falha(s) no envio OCI — Ver na Aba 5
+              </button>
+            )}
           </div>
 
           {backendFetchError && (
@@ -1388,54 +1415,60 @@ export default function GoogleAdsPage() {
 
           {entitiesStatus.isPersistentStorage === false && (
             <div style={{ color: "#fde047" }}>
-              <strong>Aviso de Persistência:</strong> O volume <code>/data</code> não está montado no serviço <code>web</code> do Dokploy. Leads salvos em <code>/tmp</code> são apagados a cada novo deploy.
+              <strong>Aviso de Persistência:</strong> O volume <code>/data</code> não está montado no serviço <code>web</code> do Dokploy.
             </div>
           )}
         </div>
       </div>
 
-      {/* CARDS DE MÉTRICAS GLOBAIS */}
+      {/* CARDS DE MÉTRICAS GLOBAIS (4 ETAPAS DO FUNIL) */}
       <div className="gads-metrics-grid">
         <div className="gads-metric-card">
-          <span className="gads-metric-title" style={{ color: "#94a3b8" }}>
-            Total de Leads <Users size={14} />
+          <span className="gads-metric-title" style={{ color: "#facc15" }}>
+            1. Cliques no Anúncio <Users size={14} color="#facc15" />
           </span>
           <div className="gads-metric-val" style={{ color: "#ffffff" }}>
             {totalLeads}
           </div>
-          <span className="gads-metric-sub">Cliques reais Google Search</span>
+          <span className="gads-metric-sub">
+            {apenasCliques} aguardando msg • {chatStartRate}% iniciou chat
+          </span>
         </div>
 
         <div className="gads-metric-card">
           <span className="gads-metric-title" style={{ color: "#38bdf8" }}>
-            Conversas Iniciadas <MessageSquare size={14} color="#38bdf8" />
+            2. Conversas Iniciadas <MessageSquare size={14} color="#38bdf8" />
           </span>
           <div className="gads-metric-val" style={{ color: "#38bdf8" }}>
-            {conversasIniciadas}
+            {conversasTotais}
           </div>
-          <span className="gads-metric-sub">Mensagem enviada no WhatsApp</span>
+          <span className="gads-metric-sub">
+            {conversasEmAberto} em atendimento (sem orçamento)
+          </span>
         </div>
 
         <div className="gads-metric-card">
           <span className="gads-metric-title" style={{ color: "#a855f7" }}>
-            Orçamentos Enviados <Award size={14} color="#a855f7" />
+            3. Orçamentos Enviados <Award size={14} color="#a855f7" />
           </span>
           <div className="gads-metric-val" style={{ color: "#a855f7" }}>
-            {orcamentosEnviados}
+            {orcamentosTotais}
           </div>
-          <span className="gads-metric-sub">Propostas comerciais ativas</span>
+          <span className="gads-metric-sub">
+            {orcamentosEnviados} em aberto • {comprasRealizadas} fechados
+          </span>
         </div>
 
         <div className="gads-metric-card">
           <span className="gads-metric-title" style={{ color: "#10b981" }}>
-            Vendas / Faturamento <DollarSign size={14} color="#10b981" />
+            4. Vendas / Faturamento <DollarSign size={14} color="#10b981" />
           </span>
           <div className="gads-metric-val" style={{ color: "#10b981" }}>
             {faturamentoTotal > 0
               ? `R$ ${faturamentoTotal.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
               : `${comprasRealizadas} Vendas`}
           </div>
-          <span className="gads-metric-sub">Convertidos via Google Ads</span>
+          <span className="gads-metric-sub">{comprasRealizadas} venda(s) confirmada(s)</span>
         </div>
       </div>
 
@@ -1482,9 +1515,10 @@ export default function GoogleAdsPage() {
                 className="gads-select-field"
               >
                 <option value="all">Todas as Etapas</option>
-                <option value="conversa_iniciada">Conversa Iniciada</option>
-                <option value="orcamento_enviado">Orçamento Enviado</option>
-                <option value="compra_realizada">Compra Realizada</option>
+                <option value="clique_anuncio">1. Clique no Anúncio (Sem msg)</option>
+                <option value="conversa_iniciada">2. Conversa Iniciada</option>
+                <option value="orcamento_enviado">3. Orçamento Enviado</option>
+                <option value="compra_realizada">4. Compra Realizada</option>
               </select>
 
               <button
@@ -1562,12 +1596,12 @@ export default function GoogleAdsPage() {
                 </thead>
                 <tbody>
                   {filteredEvents.map((event) => {
-                    const stage = event.stage || "conversa_iniciada";
+                    const stage = getEffectiveStage(event);
                     return (
                       <tr key={event.id} style={{ borderBottom: "1px solid #0f172a" }}>
                         <td style={{ padding: "10px 12px" }}>
                           <div style={{ fontWeight: 600, color: "#fff", display: "flex", alignItems: "center", gap: "6px" }}>
-                            {event.leadName || "Lead em Identificação"}
+                            {event.leadName || (stage === "clique_anuncio" ? "Clicou no Anúncio" : "Lead em Identificação")}
                             {event.leadPhone && !isAttendantLead(event.leadPhone) && !isWaitingWhatsApp(event.leadPhone) && (
                               <a
                                 href={`https://wa.me/${event.leadPhone}`}
@@ -1580,8 +1614,8 @@ export default function GoogleAdsPage() {
                               </a>
                             )}
                           </div>
-                          <small style={{ color: (!event.firstMessageAt || isAttendantLead(event.leadPhone) || isWaitingWhatsApp(event.leadPhone)) ? "#eab308" : "#94a3b8" }}>
-                            {(!event.firstMessageAt || isAttendantLead(event.leadPhone) || isWaitingWhatsApp(event.leadPhone))
+                          <small style={{ color: stage === "clique_anuncio" ? "#eab308" : "#94a3b8" }}>
+                            {stage === "clique_anuncio"
                               ? "Aguardando 1ª msg WhatsApp..."
                               : event.leadPhone}
                           </small>
@@ -1622,21 +1656,21 @@ export default function GoogleAdsPage() {
                         </td>
 
                         <td style={{ padding: "10px 12px" }}>
-                          {(!event.firstMessageAt || isAttendantLead(event.leadPhone) || isWaitingWhatsApp(event.leadPhone)) ? (
+                          {stage === "clique_anuncio" ? (
                             <span style={{ background: "rgba(234, 179, 8, 0.15)", color: "#facc15", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
-                              Clique no Anúncio
+                              1. Clique no Anúncio
                             </span>
                           ) : stage === "conversa_iniciada" ? (
                             <span style={{ background: "rgba(59, 130, 246, 0.15)", color: "#60a5fa", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
-                              Conversa Iniciada
+                              2. Conversa Iniciada
                             </span>
                           ) : stage === "orcamento_enviado" ? (
                             <span style={{ background: "rgba(168, 85, 247, 0.15)", color: "#c084fc", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
-                              Orçamento Enviado
+                              3. Orçamento Enviado
                             </span>
                           ) : stage === "compra_realizada" ? (
                             <span style={{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
-                              Compra: {event.value ? `R$ ${event.value.toLocaleString("pt-BR")}` : "Fechada"}
+                              4. Compra: {event.value ? `R$ ${event.value.toLocaleString("pt-BR")}` : "Fechada"}
                             </span>
                           ) : null}
                         </td>
@@ -1729,35 +1763,88 @@ export default function GoogleAdsPage() {
       )}
 
       {/* =========================================================================
-          ABA 2: FUNIL CRM COMPLETO (KANBAN)
+          ABA 2: FUNIL CRM COMPLETO (4 ETAPAS KANBAN)
          ========================================================================= */}
       {currentTab === "funil" && (
         <div>
           <div style={{ marginBottom: "16px" }}>
             <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-              Funil de Clientes & Conversões Google Ads
+              Funil de Clientes & Conversões Google Ads (4 Etapas)
             </h2>
             <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-              Acompanhe a jornada do cliente desde o clique na pesquisa até o fechamento da compra no WhatsApp.
+              Separação real entre quem só clicou no anúncio, quem iniciou conversa no WhatsApp, orçamentos e compras fechadas.
             </p>
           </div>
 
           <div className="kanban-grid">
+            {/* COLUNA 1: CLIQUE NO ANÚNCIO */}
             <div className="kanban-col">
               <div className="kanban-col-header">
-                <span className="kanban-col-title" style={{ color: "#38bdf8" }}>
-                  <MessageSquare size={15} /> 1. Conversa Iniciada
+                <span className="kanban-col-title" style={{ color: "#facc15" }}>
+                  <Clock size={15} /> 1. Clique no Anúncio
                 </span>
-                <span className="kanban-col-count">{conversasIniciadas}</span>
+                <span className="kanban-col-count">{apenasCliques}</span>
               </div>
               <div className="kanban-cards-wrap">
                 {realLeadEvents
-                  .filter((l) => (l.stage || "conversa_iniciada") === "conversa_iniciada")
+                  .filter((l) => getEffectiveStage(l) === "clique_anuncio")
+                  .map((lead) => (
+                    <div key={lead.id} className="kanban-card" style={{ borderColor: "rgba(250, 204, 21, 0.3)" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                        <strong style={{ color: "#fff", fontSize: "13px" }}>
+                          {lead.leadName || "Clicou no Anúncio"}
+                        </strong>
+                        <span style={{ fontSize: "11px", color: "#64748b" }}>{lead.attendantName}</span>
+                      </div>
+                      <div style={{ color: "#eab308", fontSize: "11px", marginTop: "4px" }}>
+                        Aguardando enviar 1ª mensagem no WhatsApp...
+                      </div>
+                      <div style={{ background: "#090f20", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#38bdf8" }}>
+                        <KeyRound size={11} style={{ display: "inline", marginRight: "4px" }} />
+                        {lead.keyword || "Pesquisa Google"}
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
+                        <button
+                          type="button"
+                          onClick={() => updateLeadStage(lead.id, "conversa_iniciada")}
+                          style={{
+                            background: "#1e293b",
+                            border: "1px solid #334155",
+                            color: "#38bdf8",
+                            borderRadius: "6px",
+                            padding: "4px 8px",
+                            fontSize: "11px",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "4px",
+                          }}
+                        >
+                          Iniciar Conversa <ArrowRight size={11} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+
+            {/* COLUNA 2: CONVERSA INICIADA */}
+            <div className="kanban-col">
+              <div className="kanban-col-header">
+                <span className="kanban-col-title" style={{ color: "#38bdf8" }}>
+                  <MessageSquare size={15} /> 2. Conversa Iniciada
+                </span>
+                <span className="kanban-col-count">{conversasEmAberto}</span>
+              </div>
+              <div className="kanban-cards-wrap">
+                {realLeadEvents
+                  .filter((l) => getEffectiveStage(l) === "conversa_iniciada")
                   .map((lead) => (
                     <div key={lead.id} className="kanban-card">
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                         <strong style={{ color: "#fff", fontSize: "13px" }}>
-                          {lead.leadName || "Lead em Identificação"}
+                          {lead.leadName || "Lead em Atendimento"}
                         </strong>
                         <span style={{ fontSize: "11px", color: "#64748b" }}>{lead.attendantName}</span>
                       </div>
@@ -1769,8 +1856,16 @@ export default function GoogleAdsPage() {
                         <KeyRound size={11} style={{ display: "inline", marginRight: "4px" }} />
                         {lead.keyword || "Pesquisa Google"}
                       </div>
-                      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10px" }}>
                         <button
+                          type="button"
+                          onClick={() => updateLeadStage(lead.id, "clique_anuncio")}
+                          style={{ background: "transparent", border: "none", color: "#64748b", fontSize: "11px", cursor: "pointer" }}
+                        >
+                          <ArrowLeft size={11} /> Voltar
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => updateLeadStage(lead.id, "orcamento_enviado")}
                           style={{
                             background: "#1e293b",
@@ -1794,16 +1889,17 @@ export default function GoogleAdsPage() {
               </div>
             </div>
 
+            {/* COLUNA 3: ORÇAMENTO ENVIADO */}
             <div className="kanban-col">
               <div className="kanban-col-header">
                 <span className="kanban-col-title" style={{ color: "#c084fc" }}>
-                  <Award size={15} /> 2. Orçamento Enviado
+                  <Award size={15} /> 3. Orçamento Enviado
                 </span>
                 <span className="kanban-col-count">{orcamentosEnviados}</span>
               </div>
               <div className="kanban-cards-wrap">
                 {realLeadEvents
-                  .filter((l) => l.stage === "orcamento_enviado")
+                  .filter((l) => getEffectiveStage(l) === "orcamento_enviado")
                   .map((lead) => (
                     <div key={lead.id} className="kanban-card">
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -1819,53 +1915,97 @@ export default function GoogleAdsPage() {
                       <div style={{ background: "#090f20", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#c084fc" }}>
                         Proposta / Orçamento Enviado
                       </div>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10px" }}>
-                        <button
-                          onClick={() => updateLeadStage(lead.id, "conversa_iniciada")}
-                          style={{ background: "transparent", border: "none", color: "#64748b", fontSize: "11px", cursor: "pointer" }}
-                        >
-                          <ArrowLeft size={11} /> Voltar
-                        </button>
-                        <button
-                          onClick={() => {
-                            const valStr = prompt("Valor da Venda em R$:", "1200");
-                            if (valStr !== null) {
-                              const val = parseFloat(valStr.replace(",", "."));
-                              updateLeadStage(lead.id, "compra_realizada", isNaN(val) ? 0 : val);
-                            }
-                          }}
-                          style={{
-                            background: "rgba(16, 185, 129, 0.2)",
-                            border: "1px solid rgba(16, 185, 129, 0.4)",
-                            color: "#34d399",
-                            borderRadius: "6px",
-                            padding: "4px 8px",
-                            fontSize: "11px",
-                            fontWeight: 700,
-                            cursor: "pointer",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: "4px",
-                          }}
-                        >
-                          <DollarSign size={11} /> Fechar Venda
-                        </button>
-                      </div>
+
+                      {closingSaleLeadId === lead.id ? (
+                        <div style={{ marginTop: "10px", display: "flex", flexDirection: "column", gap: "6px", background: "#090f20", padding: "8px", borderRadius: "6px", border: "1px solid rgba(16,185,129,0.4)" }}>
+                          <label style={{ fontSize: "11px", color: "#cbd5e1", fontWeight: 600 }}>Valor da Venda (R$):</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={closingSaleValue}
+                            onChange={(e) => setClosingSaleValue(e.target.value)}
+                            className="gads-input-field"
+                            style={{ padding: "5px 8px", fontSize: "12px" }}
+                          />
+                          <div style={{ display: "flex", justifyContent: "flex-end", gap: "6px" }}>
+                            <button
+                              type="button"
+                              onClick={() => setClosingSaleLeadId(null)}
+                              style={{ background: "transparent", border: "none", color: "#94a3b8", fontSize: "11px", cursor: "pointer" }}
+                            >
+                              Cancelar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const val = parseFloat(closingSaleValue.replace(",", "."));
+                                updateLeadStage(lead.id, "compra_realizada", isNaN(val) ? 0 : val);
+                                setClosingSaleLeadId(null);
+                              }}
+                              style={{
+                                background: "#059669",
+                                border: "none",
+                                color: "#fff",
+                                borderRadius: "5px",
+                                padding: "4px 10px",
+                                fontSize: "11px",
+                                fontWeight: 700,
+                                cursor: "pointer",
+                              }}
+                            >
+                              Confirmar R$
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10px" }}>
+                          <button
+                            type="button"
+                            onClick={() => updateLeadStage(lead.id, "conversa_iniciada")}
+                            style={{ background: "transparent", border: "none", color: "#64748b", fontSize: "11px", cursor: "pointer" }}
+                          >
+                            <ArrowLeft size={11} /> Voltar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setClosingSaleLeadId(lead.id);
+                              setClosingSaleValue(lead.value ? String(lead.value) : "1200");
+                            }}
+                            style={{
+                              background: "rgba(16, 185, 129, 0.2)",
+                              border: "1px solid rgba(16, 185, 129, 0.4)",
+                              color: "#34d399",
+                              borderRadius: "6px",
+                              padding: "4px 8px",
+                              fontSize: "11px",
+                              fontWeight: 700,
+                              cursor: "pointer",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "4px",
+                            }}
+                          >
+                            <DollarSign size={11} /> Fechar Venda
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ))}
               </div>
             </div>
 
+            {/* COLUNA 4: COMPRA REALIZADA */}
             <div className="kanban-col">
               <div className="kanban-col-header">
                 <span className="kanban-col-title" style={{ color: "#34d399" }}>
-                  <CheckCircle2 size={15} /> 3. Compra Realizada
+                  <CheckCircle2 size={15} /> 4. Compra Realizada
                 </span>
                 <span className="kanban-col-count">{comprasRealizadas}</span>
               </div>
               <div className="kanban-cards-wrap">
                 {realLeadEvents
-                  .filter((l) => l.stage === "compra_realizada")
+                  .filter((l) => getEffectiveStage(l) === "compra_realizada")
                   .map((lead) => (
                     <div key={lead.id} className="kanban-card" style={{ borderColor: "rgba(16, 185, 129, 0.4)" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -1881,10 +2021,11 @@ export default function GoogleAdsPage() {
                         {lead.leadPhone}
                       </div>
                       <div style={{ background: "rgba(16, 185, 129, 0.1)", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#34d399" }}>
-                        Conversão de Compra Registrada no Google Ads OCI
+                        Venda confirmada no funil Google Ads
                       </div>
                       <div style={{ display: "flex", justifyContent: "flex-start", marginTop: "8px" }}>
                         <button
+                          type="button"
                           onClick={() => updateLeadStage(lead.id, "orcamento_enviado")}
                           style={{ background: "transparent", border: "none", color: "#64748b", fontSize: "11px", cursor: "pointer" }}
                         >
@@ -2082,9 +2223,10 @@ export default function GoogleAdsPage() {
                   style={{ padding: "8px 10px" }}
                 >
                   <option value="all">Todas as Etapas</option>
-                  <option value="conversa_iniciada">Conversa Iniciada</option>
-                  <option value="orcamento_enviado">Orçamento Enviado</option>
-                  <option value="compra_realizada">Compra Realizada</option>
+                  <option value="clique_anuncio">1. Clique no Anúncio</option>
+                  <option value="conversa_iniciada">2. Conversa Iniciada</option>
+                  <option value="orcamento_enviado">3. Orçamento Enviado</option>
+                  <option value="compra_realizada">4. Compra Realizada</option>
                 </select>
               </div>
             </div>
@@ -2103,11 +2245,13 @@ export default function GoogleAdsPage() {
             </div>
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
-              <span style={{ fontSize: "11px", color: "#38bdf8", fontWeight: 700, textTransform: "uppercase" }}>Leads WhatsApp</span>
+              <span style={{ fontSize: "11px", color: "#38bdf8", fontWeight: 700, textTransform: "uppercase" }}>Conversas Reais</span>
               <div style={{ fontSize: "22px", fontWeight: 800, color: "#38bdf8", marginTop: "4px" }}>
                 {reportMetrics.totalLeadsCount}
               </div>
-              <small style={{ color: "#64748b", fontSize: "11px" }}>CPL: R$ {reportMetrics.cpl.toFixed(2)}</small>
+              <small style={{ color: "#64748b", fontSize: "11px" }}>
+                CPL: R$ {reportMetrics.cpl.toFixed(2)} • {reportMetrics.clicksOnlyCount} só clicou
+              </small>
             </div>
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
@@ -2272,13 +2416,19 @@ export default function GoogleAdsPage() {
                           </span>
                         </td>
                         <td style={{ padding: "10px 12px" }}>
-                          {l.stage === "compra_realizada" ? (
-                            <span style={{ color: "#34d399", fontWeight: 700 }}>Compra Realizada</span>
-                          ) : l.stage === "orcamento_enviado" ? (
-                            <span style={{ color: "#c084fc", fontWeight: 600 }}>Orçamento</span>
-                          ) : (
-                            <span style={{ color: "#60a5fa" }}>Conversa</span>
-                          )}
+                          {(() => {
+                            const st = getEffectiveStage(l);
+                            if (st === "compra_realizada") {
+                              return <span style={{ color: "#34d399", fontWeight: 700 }}>4. Compra Realizada</span>;
+                            }
+                            if (st === "orcamento_enviado") {
+                              return <span style={{ color: "#c084fc", fontWeight: 600 }}>3. Orçamento</span>;
+                            }
+                            if (st === "clique_anuncio") {
+                              return <span style={{ color: "#facc15", fontWeight: 600 }}>1. Só Clicou</span>;
+                            }
+                            return <span style={{ color: "#60a5fa" }}>2. Conversa</span>;
+                          })()}
                         </td>
                         <td style={{ padding: "10px 12px", color: l.value ? "#34d399" : "#64748b", fontWeight: l.value ? 700 : 400 }}>
                           {l.value ? `R$ ${l.value.toLocaleString("pt-BR")}` : "—"}
@@ -2715,163 +2865,147 @@ export default function GoogleAdsPage() {
             )}
           </div>
 
-          {/* ARMAZENAMENTO PERSISTENTE & BACKUPS */}
-          <div style={{ marginTop: "24px", padding: "18px", background: "#0f172a", border: "1px solid #1e293b", borderRadius: "10px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px" }}>
+          {/* RECONCILIAÇÃO WHATSAPP (UAZAPI ANTI-PERDA) — COMPACTO QUANDO ATIVO */}
+          <div style={{ marginTop: "22px", padding: "16px", background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }}>
               <div>
-                <h4 style={{ color: "#38bdf8", fontSize: "14px", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
-                  <ShieldCheck size={16} /> Armazenamento Persistente & Backup de Leads
+                <h4 style={{ color: "#34d399", fontSize: "14px", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
+                  <RefreshCw size={15} /> Backup WhatsApp Anti-Perda (Uazapi)
                 </h4>
-                <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
-                  Os dados do Google Ads são armazenados com redundância. Para garantir persistência total entre deploys no Dokploy, certifique-se de mapear o volume para <code>/data</code>.
+                <p style={{ color: "#94a3b8", fontSize: "12px", margin: "3px 0 0" }}>
+                  {entitiesStatus.uazapiStatus?.configured
+                    ? `Ativo (${entitiesStatus.uazapiStatus.instancesCount || 1} instância(s) conectada(s)) — resgata leads automaticamente se algum webhook falhar.`
+                    : "Opcional: informe os dados da Uazapi caso queira resgate automático extra além do webhook."}
                 </p>
               </div>
 
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  onClick={handleDownloadBackup}
-                  style={{
-                    background: "#1e293b",
-                    border: "1px solid #334155",
-                    color: "#fff",
-                    borderRadius: "8px",
-                    padding: "8px 14px",
-                    fontSize: "12px",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "6px",
-                  }}
-                >
-                  <Download size={14} /> Baixar Backup JSON ({realLeadEvents.length} Leads Reais)
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* RECONCILIAÇÃO AUTOMÁTICA WHATSAPP (UAZAPI PULL SYNC ANTI-PERDA) */}
-          <div style={{ marginTop: "20px", padding: "18px", background: "#0b1329", border: "1px solid #1e293b", borderRadius: "10px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", marginBottom: "14px" }}>
-              <div>
-                <h4 style={{ color: "#34d399", fontSize: "14px", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
-                  <RefreshCw size={15} /> Reconciliação Automática WhatsApp (Uazapi Anti-Perda em Deploys)
-                </h4>
-                <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
-                  Se um webhook falhar durante um deploy ou instabilidade, o sistema relê automaticamente mensagens recentes na Uazapi e resgata os leads com tag invisível Google Ads.
-                </p>
-              </div>
-
-              {entitiesStatus.uazapiStatus?.configured && (
-                <button
-                  type="button"
-                  onClick={handleTriggerUazapiReconcile}
-                  disabled={isSavingUazapi}
-                  style={{
-                    background: "#059669",
-                    border: "none",
-                    color: "#fff",
-                    borderRadius: "8px",
-                    padding: "8px 14px",
-                    fontSize: "12px",
-                    fontWeight: 700,
-                    cursor: "pointer",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    opacity: isSavingUazapi ? 0.6 : 1,
-                  }}
-                >
-                  <RefreshCw size={13} /> {isSavingUazapi ? "Verificando..." : "Verificar Histórico Uazapi Agora"}
-                </button>
-              )}
-            </div>
-
-            <form onSubmit={handleSaveUazapiConfig} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px", alignItems: "end" }}>
-              <div>
-                <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                  URL Base da Uazapi
-                </label>
-                <input
-                  type="text"
-                  placeholder="Ex: https://anunciosalpha.uazapi.com"
-                  value={uazapiBaseUrl}
-                  onChange={(e) => setUazapiBaseUrl(e.target.value)}
-                  className="gads-input-field"
-                  style={{ padding: "8px 12px", fontSize: "12px" }}
-                />
-              </div>
-
-              <div>
-                <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                  Token Instância Josi
-                </label>
-                <input
-                  type="text"
-                  placeholder="Cole o token da instância Josi"
-                  value={uazapiJosiToken}
-                  onChange={(e) => setUazapiJosiToken(e.target.value)}
-                  className="gads-input-field"
-                  style={{ padding: "8px 12px", fontSize: "12px" }}
-                />
-              </div>
-
-              <div>
-                <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                  Token Instância Sérgio
-                </label>
-                <input
-                  type="text"
-                  placeholder="Cole o token da instância Sérgio"
-                  value={uazapiSergioToken}
-                  onChange={(e) => setUazapiSergioToken(e.target.value)}
-                  className="gads-input-field"
-                  style={{ padding: "8px 12px", fontSize: "12px" }}
-                />
-              </div>
-
-              <div>
-                <button
-                  type="submit"
-                  disabled={isSavingUazapi}
-                  style={{
-                    width: "100%",
-                    background: "#1e293b",
-                    border: "1px solid #334155",
-                    color: "#38bdf8",
-                    borderRadius: "8px",
-                    padding: "9px 14px",
-                    fontSize: "12px",
-                    fontWeight: 700,
-                    cursor: "pointer",
-                  }}
-                >
-                  {isSavingUazapi ? "Salvando..." : "Salvar & Testar Reconciliação"}
-                </button>
-              </div>
-            </form>
-
-            {(uazapiFeedback || entitiesStatus.uazapiStatus?.lastSyncAt || entitiesStatus.uazapiStatus?.lastError) && (
-              <div style={{ marginTop: "10px", fontSize: "12px", color: entitiesStatus.uazapiStatus?.lastError ? "#fde047" : "#94a3b8" }}>
-                {uazapiFeedback && <div style={{ color: "#34d399", fontWeight: 600 }}>{uazapiFeedback}</div>}
-                {entitiesStatus.uazapiStatus?.lastSyncAt && (
-                  <span>
-                    Última checagem automática: {new Date(entitiesStatus.uazapiStatus.lastSyncAt).toLocaleString("pt-BR")} •{" "}
-                    Recuperados: <strong style={{ color: "#34d399" }}>{entitiesStatus.uazapiStatus.recoveredCount || 0}</strong> •{" "}
-                    Atualizados: <strong style={{ color: "#38bdf8" }}>{entitiesStatus.uazapiStatus.updatedCount || 0}</strong>
-                  </span>
+                {entitiesStatus.uazapiStatus?.configured && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleTriggerUazapiReconcile}
+                      disabled={isSavingUazapi}
+                      style={{
+                        background: "#059669",
+                        border: "none",
+                        color: "#fff",
+                        borderRadius: "8px",
+                        padding: "7px 12px",
+                        fontSize: "12px",
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      }}
+                    >
+                      <RefreshCw size={13} /> {isSavingUazapi ? "Verificando..." : "Sincronizar Agora"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingUazapiTokens((v) => !v)}
+                      style={{
+                        background: "#1e293b",
+                        border: "1px solid #334155",
+                        color: "#cbd5e1",
+                        borderRadius: "8px",
+                        padding: "7px 12px",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {editingUazapiTokens ? "Fechar" : "Editar Tokens"}
+                    </button>
+                  </>
                 )}
+              </div>
+            </div>
+
+            {(!entitiesStatus.uazapiStatus?.configured || editingUazapiTokens) && (
+              <form
+                onSubmit={async (e) => {
+                  await handleSaveUazapiConfig(e);
+                  setEditingUazapiTokens(false);
+                }}
+                style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "10px", alignItems: "end", marginTop: "14px" }}
+              >
+                <div>
+                  <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                    URL Base da Uazapi
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: https://anunciosalpha.uazapi.com"
+                    value={uazapiBaseUrl}
+                    onChange={(e) => setUazapiBaseUrl(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 12px", fontSize: "12px" }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                    Token Instância Josi
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Cole o token da instância Josi"
+                    value={uazapiJosiToken}
+                    onChange={(e) => setUazapiJosiToken(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 12px", fontSize: "12px" }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                    Token Instância Sérgio
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Cole o token da instância Sérgio"
+                    value={uazapiSergioToken}
+                    onChange={(e) => setUazapiSergioToken(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 12px", fontSize: "12px" }}
+                  />
+                </div>
+
+                <div>
+                  <button
+                    type="submit"
+                    disabled={isSavingUazapi}
+                    style={{
+                      width: "100%",
+                      background: "#1e293b",
+                      border: "1px solid #334155",
+                      color: "#38bdf8",
+                      borderRadius: "8px",
+                      padding: "9px 14px",
+                      fontSize: "12px",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {isSavingUazapi ? "Salvando..." : "Salvar & Testar"}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {(uazapiFeedback || entitiesStatus.uazapiStatus?.lastError) && (
+              <div style={{ marginTop: "8px", fontSize: "12px", color: entitiesStatus.uazapiStatus?.lastError ? "#fde047" : "#34d399" }}>
+                {uazapiFeedback && <div style={{ fontWeight: 600 }}>{uazapiFeedback}</div>}
                 {entitiesStatus.uazapiStatus?.lastError && (
-                  <div style={{ color: "#fde047", marginTop: "4px" }}>
-                    Diagnóstico Uazapi: {entitiesStatus.uazapiStatus.lastError}
-                  </div>
+                  <div style={{ marginTop: "3px" }}>Aviso Uazapi: {entitiesStatus.uazapiStatus.lastError}</div>
                 )}
               </div>
             )}
           </div>
 
-          {/* CENTRAL OCI — GOOGLE ADS API v25/v26 + ENHANCED CONVERSIONS SHA-256 + DIAGNÓSTICO OFICIAL */}
+          {/* ACORDEÃO RECOLHIDO POR PADRÃO: CONFIGURAÇÕES TÉCNICAS & DIAGNÓSTICO DO SISTEMA */}
           {(() => {
             const ociFailedCount = Math.max(
               entitiesStatus.ociStats?.failed ?? 0,
@@ -2892,299 +3026,265 @@ export default function GoogleAdsPage() {
             ];
 
             return (
-              <div style={{ marginTop: "20px", padding: "18px", background: "#0b1329", border: "1px solid #1e293b", borderRadius: "10px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", marginBottom: "16px" }}>
-                  <div>
-                    <h4 style={{ color: "#38bdf8", fontSize: "14px", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
-                      <Send size={16} /> Central OCI Blindada — Google Ads API {ociDiagnostics?.apiVersionUsed || "v25/v26"}
-                    </h4>
-                    <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
-                      Enhanced Conversions for Leads (SHA-256 E.164 + GCLID) • Anti-duplicidade nativa via <code>orderId</code> determinístico • Trava absoluta no backend para conversões já enviadas.
-                    </p>
-                  </div>
-
-                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                    <button
-                      type="button"
-                      onClick={() => fetchOciDiagnostics(true)}
-                      disabled={isRefreshingOciDiag}
-                      style={{
-                        background: "#1e293b",
-                        border: "1px solid #334155",
-                        color: "#cbd5e1",
-                        borderRadius: "8px",
-                        padding: "9px 14px",
-                        fontSize: "12px",
-                        fontWeight: 600,
-                        cursor: "pointer",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: "6px",
-                        opacity: isRefreshingOciDiag ? 0.6 : 1,
-                      }}
-                    >
-                      <RefreshCw size={13} style={{ transform: isRefreshingOciDiag ? "rotate(180deg)" : "none", transition: "transform 0.4s" }} />
-                      {isRefreshingOciDiag ? "Consultando Google..." : "Atualizar Diagnóstico Oficial Google"}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleTriggerOciRetry()}
-                      disabled={isSyncingOci || ociFailedCount === 0}
-                      title={
-                        ociFailedCount === 0
-                          ? "Botão bloqueado: não existem conversões com falha real. Eventos enviados são protegidos contra duplicidade e novos leads aguardam automaticamente a maturação de 4h."
-                          : "Reprocessar apenas as conversões que falharam"
-                      }
-                      style={{
-                        background: ociFailedCount > 0 ? "#dc2626" : "#0f172a",
-                        border: `1px solid ${ociFailedCount > 0 ? "#ef4444" : "#1e293b"}`,
-                        color: ociFailedCount > 0 ? "#ffffff" : "#64748b",
-                        borderRadius: "8px",
-                        padding: "9px 16px",
-                        fontSize: "12px",
-                        fontWeight: 700,
-                        cursor: ociFailedCount > 0 && !isSyncingOci ? "pointer" : "not-allowed",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: "6px",
-                        opacity: isSyncingOci ? 0.6 : 1,
-                      }}
-                    >
-                      {ociFailedCount > 0 ? <RefreshCw size={14} /> : <Lock size={13} />}
-                      {isSyncingOci
-                        ? "Reenviando Falhas..."
-                        : ociFailedCount > 0
-                          ? `⚡ Reenviar ${ociFailedCount} Falha(s) OCI Agora`
-                          : "Sem Falhas Pendentes (Envio Automático Blindado)"}
-                    </button>
-                  </div>
-                </div>
-
-                {/* 4 Cards de Diagnóstico Oficial & Fila */}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "12px", marginBottom: "16px" }}>
-                  <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px" }}>
-                    <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
-                      Diagnóstico Oficial Google
-                    </div>
-                    <div style={{ fontSize: "18px", fontWeight: 800, color: clientSum ? "#34d399" : "#94a3b8", marginTop: "4px" }}>
-                      {officialRatePct !== null ? `${officialRatePct}% Aceitação` : ociDiagnostics?.apiConnected ? "API Ativa (Sem lotes)" : "Verificando..."}
-                    </div>
-                    <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "2px" }}>
-                      {clientSum
-                        ? `${clientSum.successfulEventCount}/${clientSum.totalEventCount} aceitos • ${clientSum.pendingEventCount} pendentes`
-                        : "offline_conversion_upload_client_summary"}
-                    </div>
-                  </div>
-
-                  <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px" }}>
-                    <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
-                      Enhanced Conversions + Lock
-                    </div>
-                    <div style={{ fontSize: "15px", fontWeight: 700, color: "#38bdf8", marginTop: "6px" }}>
-                      SHA-256 E.164 + orderId
-                    </div>
-                    <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "3px" }}>
-                      Telefone do cliente hasheado + bloqueio absoluto de reenvio de eventos <code>sent</code>.
-                    </div>
-                  </div>
-
-                  <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px" }}>
-                    <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
-                      Fila & Maturação (4h)
-                    </div>
-                    <div style={{ fontSize: "16px", fontWeight: 800, color: "#ffffff", marginTop: "4px" }}>
-                      <span style={{ color: "#34d399" }}>{ociDiagnostics?.stats?.totalSent ?? entitiesStatus.ociStats?.sent ?? 0}</span> env •{" "}
-                      <span style={{ color: "#38bdf8" }}>{ociDiagnostics?.stats?.waitingMaturation ?? 0}</span> mat •{" "}
-                      <span style={{ color: ociFailedCount > 0 ? "#f87171" : "#94a3b8" }}>{ociFailedCount}</span> falhas
-                    </div>
-                    <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "2px" }}>
-                      Prontos p/ envio automático: <strong style={{ color: "#38bdf8" }}>{ociDiagnostics?.stats?.readyToUpload ?? 0}</strong> • Aguard. WPP: {ociDiagnostics?.stats?.waitingWhatsApp ?? 0}
-                    </div>
-                  </div>
-
-                  <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px" }}>
-                    <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
-                      Ações Google Encontradas
-                    </div>
-                    <div style={{ fontSize: "18px", fontWeight: 800, color: availableActions.length > 0 ? "#c084fc" : "#facc15", marginTop: "4px" }}>
-                      {availableActions.length} Ação(ões)
-                    </div>
-                    <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "2px" }}>
-                      Conta {ociDiagnostics?.customerId || "3228136878"} ({ociDiagnostics?.apiVersionUsed || "v25"})
-                    </div>
-                  </div>
-                </div>
-
-                {/* Alertas Oficiais do Google Ads (CLICK_NOT_FOUND / EXPIRED_EVENT / etc.) */}
-                {officialAlerts.length > 0 && (
-                  <div style={{ marginBottom: "14px", padding: "10px 14px", background: "rgba(234, 179, 8, 0.12)", border: "1px solid rgba(234, 179, 8, 0.35)", borderRadius: "8px", fontSize: "12px", color: "#fde047" }}>
-                    <strong>Alertas Oficiais de Processamento Google Ads:</strong>
-                    <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
-                      {officialAlerts.map((al: any, idx: number) => (
-                        <li key={idx}>
-                          <code>{al.errorCode || "ALERTA"}</code> {al.count ? `(${al.count}x)` : ""}: {al.errorMessage || "Verifique janela do GCLID"}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {/* Mapeamento Real de Ações de Conversão da Conta Google Ads */}
-                <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "14px", marginBottom: "14px" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px", marginBottom: "10px" }}>
-                    <div>
-                      <strong style={{ fontSize: "12px", color: "#e2e8f0" }}>
-                        Vínculo com Ações de Conversão Reais na Conta Google Ads ({ociDiagnostics?.customerId || "3228136878"})
-                      </strong>
-                      <p style={{ fontSize: "11px", color: "#64748b", margin: "2px 0 0" }}>
-                        Auto-detectado pelo nome ou selecione manualmente abaixo qual ação no Google Ads recebe cada etapa do WhatsApp.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleSaveOciMapping}
-                      disabled={isSavingOciMapping}
-                      style={{
-                        background: "#1e293b",
-                        border: "1px solid #334155",
-                        color: "#38bdf8",
-                        borderRadius: "6px",
-                        padding: "6px 12px",
-                        fontSize: "11px",
-                        fontWeight: 700,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {isSavingOciMapping ? "Salvando..." : "Salvar Vínculo de Ações OCI"}
-                    </button>
-                  </div>
-
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px" }}>
-                    {(
-                      [
-                        { key: "conversa_iniciada", label: "1. Conversa Iniciada" },
-                        { key: "orcamento_enviado", label: "2. Orçamento Enviado" },
-                        { key: "compra_realizada", label: "3. Compra Realizada (R$)" },
-                      ] as const
-                    ).map((st) => {
-                      const summaryItem = (ociDiagnostics?.stageMappingSummary || []).find((m: any) => m.stage === st.key);
-                      return (
-                        <div key={st.key}>
-                          <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                            {st.label}
-                          </label>
-                          <select
-                            value={ociActionMapDraft[st.key]}
-                            onChange={(e) =>
-                              setOciActionMapDraft((prev) => ({ ...prev, [st.key]: e.target.value }))
-                            }
-                            className="gads-select-field"
-                            style={{ width: "100%", fontSize: "12px", padding: "7px 10px" }}
-                          >
-                            <option value="">
-                              {summaryItem?.resolvedActionName
-                                ? `Auto: ${summaryItem.resolvedActionName} (ID ${summaryItem.resolvedActionId})`
-                                : "Auto-detectar (Nenhuma ação compatível encontrada)"}
-                            </option>
-                            {availableActions.map((act: any) => (
-                              <option key={act.id} value={act.id}>
-                                {act.name} [{act.type}] (ID {act.id})
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {ociMappingFeedback && (
-                    <div style={{ marginTop: "8px", fontSize: "12px", color: "#34d399", fontWeight: 600 }}>
-                      {ociMappingFeedback}
-                    </div>
-                  )}
-                </div>
-
-                {ociSyncResult && (
-                  <div
-                    style={{
-                      background: ociSyncResult.failedCount === 0 && ociSyncResult.hasApiCredentials ? "rgba(16, 185, 129, 0.14)" : "rgba(234, 179, 8, 0.14)",
-                      border: `1px solid ${ociSyncResult.failedCount === 0 && ociSyncResult.hasApiCredentials ? "#10b981" : "#facc15"}`,
-                      color: ociSyncResult.failedCount === 0 && ociSyncResult.hasApiCredentials ? "#34d399" : "#fde047",
-                      padding: "10px 14px",
-                      borderRadius: "8px",
-                      fontSize: "12px",
-                      marginBottom: "12px",
-                    }}
-                  >
-                    <strong>Resultado do Processamento OCI ({ociSyncResult.apiVersionUsed || "API"}):</strong>{" "}
-                    {ociSyncResult.uploadedCount || 0} enviado(s) • {ociSyncResult.failedCount || 0} falha(s) •{" "}
-                    {ociSyncResult.skippedSentCount || 0} bloqueado(s) contra duplicidade.
-                    {ociSyncResult.error && (
-                      <div style={{ marginTop: "4px", color: "#fca5a5" }}>Erro: {ociSyncResult.error}</div>
+              <div style={{ marginTop: "16px", background: "#090f20", border: `1px solid ${ociFailedCount > 0 ? "rgba(239,68,68,0.45)" : "#1e293b"}`, borderRadius: "10px", overflow: "hidden" }}>
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedTech((v) => !v)}
+                  style={{
+                    width: "100%",
+                    background: "transparent",
+                    border: "none",
+                    padding: "13px 16px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    gap: "10px",
+                    cursor: "pointer",
+                    color: "#cbd5e1",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px", fontWeight: 700 }}>
+                    <Lock size={14} color={ociFailedCount > 0 ? "#f87171" : "#64748b"} />
+                    <span>Configurações Técnicas, Vínculo Google OCI & Backup (Avançado)</span>
+                    {ociFailedCount > 0 ? (
+                      <span style={{ background: "rgba(239,68,68,0.2)", color: "#fca5a5", padding: "2px 8px", borderRadius: "6px", fontSize: "11px" }}>
+                        {ociFailedCount} falha(s) pendente(s)
+                      </span>
+                    ) : (
+                      <span style={{ background: "rgba(16,185,129,0.15)", color: "#34d399", padding: "2px 8px", borderRadius: "6px", fontSize: "11px" }}>
+                        Envio automático ativo
+                      </span>
                     )}
-                    {Array.isArray(ociSyncResult.results) && ociSyncResult.results.some((r: any) => r.error) && (
-                      <div style={{ marginTop: "4px", color: "#fca5a5" }}>
-                        Detalhe: {ociSyncResult.results.find((r: any) => r.error)?.error}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#64748b" }}>
+                    <span>{showAdvancedTech ? "Ocultar" : "Expandir"}</span>
+                    {showAdvancedTech ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                  </div>
+                </button>
+
+                {showAdvancedTech && (
+                  <div style={{ padding: "16px", borderTop: "1px solid #1e293b", background: "#0b1329" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px", marginBottom: "14px" }}>
+                      <div style={{ fontSize: "12px", color: "#94a3b8" }}>
+                        Envio automático blindado (SHA-256 + <code>orderId</code> anti-duplicidade) • Armazenamento:{" "}
+                        <strong style={{ color: "#38bdf8" }}>{entitiesStatus.storageDir || "/data"}</strong>
+                      </div>
+                      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          onClick={handleDownloadBackup}
+                          style={{
+                            background: "#1e293b",
+                            border: "1px solid #334155",
+                            color: "#fff",
+                            borderRadius: "8px",
+                            padding: "7px 12px",
+                            fontSize: "12px",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "6px",
+                          }}
+                        >
+                          <Download size={13} /> Baixar Backup JSON ({realLeadEvents.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => fetchOciDiagnostics(true)}
+                          disabled={isRefreshingOciDiag}
+                          style={{
+                            background: "#1e293b",
+                            border: "1px solid #334155",
+                            color: "#cbd5e1",
+                            borderRadius: "8px",
+                            padding: "7px 12px",
+                            fontSize: "12px",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "6px",
+                          }}
+                        >
+                          <RefreshCw size={13} /> {isRefreshingOciDiag ? "Consultando..." : "Atualizar Diagnóstico Google"}
+                        </button>
+                        {ociFailedCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => handleTriggerOciRetry()}
+                            disabled={isSyncingOci}
+                            style={{
+                              background: "#dc2626",
+                              border: "none",
+                              color: "#ffffff",
+                              borderRadius: "8px",
+                              padding: "7px 12px",
+                              fontSize: "12px",
+                              fontWeight: 700,
+                              cursor: "pointer",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "6px",
+                            }}
+                          >
+                            <RefreshCw size={13} /> {isSyncingOci ? "Reenviando..." : `Reenviar ${ociFailedCount} Falha(s)`}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Resumo compacto da fila OCI */}
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "10px", marginBottom: "14px" }}>
+                      <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "10px 12px" }}>
+                        <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700 }}>Aceitação Google</div>
+                        <div style={{ fontSize: "15px", fontWeight: 700, color: clientSum ? "#34d399" : "#94a3b8", marginTop: "3px" }}>
+                          {officialRatePct !== null ? `${officialRatePct}% Aceitação` : ociDiagnostics?.apiConnected ? "API Ativa" : "Verificando..."}
+                        </div>
+                      </div>
+                      <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "10px 12px" }}>
+                        <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700 }}>Fila de Envio (4h)</div>
+                        <div style={{ fontSize: "14px", fontWeight: 700, color: "#fff", marginTop: "3px" }}>
+                          {ociDiagnostics?.stats?.totalSent ?? entitiesStatus.ociStats?.sent ?? 0} env •{" "}
+                          {ociDiagnostics?.stats?.waitingMaturation ?? 0} mat •{" "}
+                          {ociDiagnostics?.stats?.readyToUpload ?? 0} prontos
+                        </div>
+                      </div>
+                      <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "10px 12px" }}>
+                        <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700 }}>Ações de Conversão</div>
+                        <div style={{ fontSize: "14px", fontWeight: 700, color: "#c084fc", marginTop: "3px" }}>
+                          {availableActions.length} encontradas na conta
+                        </div>
+                      </div>
+                    </div>
+
+                    {officialAlerts.length > 0 && (
+                      <div style={{ marginBottom: "12px", padding: "10px 12px", background: "rgba(234, 179, 8, 0.12)", border: "1px solid rgba(234, 179, 8, 0.35)", borderRadius: "8px", fontSize: "12px", color: "#fde047" }}>
+                        <strong>Alertas Google Ads:</strong>{" "}
+                        {officialAlerts.map((al: any) => `${al.errorCode || "ALERTA"} (${al.errorMessage || ""})`).join(" • ")}
                       </div>
                     )}
-                  </div>
-                )}
 
-                {/* Tabela Auditável da Fila OCI */}
-                {Array.isArray(ociDiagnostics?.items) && ociDiagnostics.items.length > 0 && (
-                  <div className="gads-table-scroll">
-                    <table className="gads-table">
-                      <thead>
-                        <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
-                          <th style={{ padding: "8px 10px" }}>Lead / Enhanced SHA-256</th>
-                          <th style={{ padding: "8px 10px" }}>Etapa & Ação Google</th>
-                          <th style={{ padding: "8px 10px" }}>orderId (Anti-Duplicidade)</th>
-                          <th style={{ padding: "8px 10px" }}>Status OCI</th>
-                          <th style={{ padding: "8px 10px" }}>Diagnóstico / Erro</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {ociDiagnostics.items.slice(0, 12).map((it: any) => (
-                          <tr key={`${it.id}_${it.stage}`} style={{ borderBottom: "1px solid #0f172a" }}>
-                            <td style={{ padding: "8px 10px" }}>
-                              <div style={{ color: "#fff", fontWeight: 600, fontSize: "12px" }}>{it.leadName}</div>
-                              <div style={{ color: "#64748b", fontSize: "11px" }}>
-                                {it.leadPhone}{" "}
-                                {it.hasHashedPhone && (
-                                  <span style={{ color: "#34d399", fontWeight: 700 }}>• SHA-256 ✓</span>
-                                )}
-                              </div>
-                            </td>
-                            <td style={{ padding: "8px 10px", fontSize: "12px", color: "#cbd5e1" }}>
-                              <div>{it.stage}</div>
-                              <div style={{ fontSize: "11px", color: it.resolvedConversionAction ? "#c084fc" : "#facc15" }}>
-                                {it.resolvedConversionAction?.name || "Ação não mapeada"}
-                              </div>
-                            </td>
-                            <td style={{ padding: "8px 10px", fontSize: "11px", color: "#94a3b8", fontFamily: "monospace" }}>
-                              {it.orderId}
-                            </td>
-                            <td style={{ padding: "8px 10px", fontSize: "11px", fontWeight: 700 }}>
-                              {it.status === "sent" ? (
-                                <span style={{ color: "#34d399" }}>✓ Enviado</span>
-                              ) : it.status === "failed" ? (
-                                <span style={{ color: "#f87171" }}>✕ Falha</span>
-                              ) : it.status === "waiting_whatsapp" ? (
-                                <span style={{ color: "#facc15" }}>Aguard. WhatsApp</span>
-                              ) : it.isMatured ? (
-                                <span style={{ color: "#38bdf8" }}>Pronto p/ Envio</span>
-                              ) : (
-                                <span style={{ color: "#94a3b8" }}>Maturando ({it.hoursRemaining}h)</span>
-                              )}
-                            </td>
-                            <td style={{ padding: "8px 10px", fontSize: "11px", color: it.ociError ? "#fca5a5" : "#64748b", maxWidth: "280px" }}>
-                              {it.ociError || it.ociResult || "—"}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                    {/* Vínculo manual (caso precise alterar no futuro) */}
+                    <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px", marginBottom: "12px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px", marginBottom: "10px" }}>
+                        <strong style={{ fontSize: "12px", color: "#e2e8f0" }}>
+                          Vínculo com Ações de Conversão (Conta {ociDiagnostics?.customerId || "3228136878"})
+                        </strong>
+                        <button
+                          type="button"
+                          onClick={handleSaveOciMapping}
+                          disabled={isSavingOciMapping}
+                          style={{
+                            background: "#1e293b",
+                            border: "1px solid #334155",
+                            color: "#38bdf8",
+                            borderRadius: "6px",
+                            padding: "5px 10px",
+                            fontSize: "11px",
+                            fontWeight: 700,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {isSavingOciMapping ? "Salvando..." : "Salvar Vínculo"}
+                        </button>
+                      </div>
+
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px" }}>
+                        {(
+                          [
+                            { key: "conversa_iniciada", label: "Conversa Iniciada" },
+                            { key: "orcamento_enviado", label: "Orçamento Enviado" },
+                            { key: "compra_realizada", label: "Compra Realizada (R$)" },
+                          ] as const
+                        ).map((st) => {
+                          const summaryItem = (ociDiagnostics?.stageMappingSummary || []).find((m: any) => m.stage === st.key);
+                          return (
+                            <div key={st.key}>
+                              <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                                {st.label}
+                              </label>
+                              <select
+                                value={ociActionMapDraft[st.key]}
+                                onChange={(e) =>
+                                  setOciActionMapDraft((prev) => ({ ...prev, [st.key]: e.target.value }))
+                                }
+                                className="gads-select-field"
+                                style={{ width: "100%", fontSize: "12px", padding: "7px 10px" }}
+                              >
+                                <option value="">
+                                  {summaryItem?.resolvedActionName
+                                    ? `Auto: ${summaryItem.resolvedActionName} (ID ${summaryItem.resolvedActionId})`
+                                    : "Auto-detectar"}
+                                </option>
+                                {availableActions.map((act: any) => (
+                                  <option key={act.id} value={act.id}>
+                                    {act.name} [{act.type}] (ID {act.id})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {ociMappingFeedback && (
+                        <div style={{ marginTop: "8px", fontSize: "12px", color: "#34d399", fontWeight: 600 }}>
+                          {ociMappingFeedback}
+                        </div>
+                      )}
+                    </div>
+
+                    {ociSyncResult && (
+                      <div style={{ padding: "8px 12px", background: "#090f20", border: "1px solid #334155", borderRadius: "8px", fontSize: "12px", color: "#cbd5e1", marginBottom: "12px" }}>
+                        Último lote: {ociSyncResult.uploadedCount || 0} enviado(s) • {ociSyncResult.failedCount || 0} falha(s)
+                        {ociSyncResult.error && <span style={{ color: "#fca5a5" }}> • {ociSyncResult.error}</span>}
+                      </div>
+                    )}
+
+                    {Array.isArray(ociDiagnostics?.items) && ociDiagnostics.items.length > 0 && (
+                      <div className="gads-table-scroll">
+                        <table className="gads-table">
+                          <thead>
+                            <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                              <th style={{ padding: "8px 10px" }}>Lead</th>
+                              <th style={{ padding: "8px 10px" }}>Etapa & Ação</th>
+                              <th style={{ padding: "8px 10px" }}>Status OCI</th>
+                              <th style={{ padding: "8px 10px" }}>Detalhe</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {ociDiagnostics.items.slice(0, 10).map((it: any) => (
+                              <tr key={`${it.id}_${it.stage}`} style={{ borderBottom: "1px solid #0f172a" }}>
+                                <td style={{ padding: "8px 10px", fontSize: "12px", color: "#fff" }}>
+                                  {it.leadName} <small style={{ color: "#64748b" }}>({it.leadPhone})</small>
+                                </td>
+                                <td style={{ padding: "8px 10px", fontSize: "12px", color: "#cbd5e1" }}>
+                                  {it.stage} → <span style={{ color: "#c084fc" }}>{it.resolvedConversionAction?.name || "—"}</span>
+                                </td>
+                                <td style={{ padding: "8px 10px", fontSize: "11px", fontWeight: 700 }}>
+                                  {it.status === "sent" ? (
+                                    <span style={{ color: "#34d399" }}>✓ Enviado</span>
+                                  ) : it.status === "failed" ? (
+                                    <span style={{ color: "#f87171" }}>✕ Falha</span>
+                                  ) : it.status === "waiting_whatsapp" ? (
+                                    <span style={{ color: "#facc15" }}>Só Clicou</span>
+                                  ) : it.isMatured ? (
+                                    <span style={{ color: "#38bdf8" }}>Pronto p/ Envio</span>
+                                  ) : (
+                                    <span style={{ color: "#94a3b8" }}>Maturando ({it.hoursRemaining}h)</span>
+                                  )}
+                                </td>
+                                <td style={{ padding: "8px 10px", fontSize: "11px", color: it.ociError ? "#fca5a5" : "#64748b" }}>
+                                  {it.ociError || it.ociResult || "—"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
