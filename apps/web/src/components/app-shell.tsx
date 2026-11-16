@@ -20,6 +20,7 @@ import {
   Settings2,
   ShieldCheck,
   SquareKanban,
+  Target,
   UsersRound,
   X,
   Zap,
@@ -121,30 +122,42 @@ export function AppShell({
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [workspaceSwitchError, setWorkspaceSwitchError] = useState(false);
   const [isWorkspaceSwitchPending, startWorkspaceTransition] = useTransition();
-  const workspaceSelectorRef = useRef<HTMLElement | null>(null);
+  const workspaceSelectorRef = useRef<HTMLElement>(null);
+  const previousAccessPathnameRef = useRef(pathname);
 
   useEffect(() => {
-    try {
-      const persisted = window.localStorage.getItem(sidebarStorageKey);
-      if (persisted !== null) {
-        setSidebarCollapsed(persisted === "true");
-      }
-    } catch {
-      // LocalStorage access can fail in private windows or restrictive environments.
+    if (previousAccessPathnameRef.current === pathname) {
+      return;
     }
+
+    previousAccessPathnameRef.current = pathname;
+    router.refresh();
+  }, [pathname, router]);
+
+  useEffect(() => {
+    setSidebarCollapsed(
+      window.localStorage.getItem(sidebarStorageKey) === "true",
+    );
   }, []);
 
   useEffect(() => {
+    window.localStorage.setItem(sidebarStorageKey, String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 900px)");
     const updateViewport = () => {
-      setIsMobile(window.innerWidth <= 840);
+      setIsMobile(mediaQuery.matches);
+
+      if (!mediaQuery.matches) {
+        setMobileMenuOpen(false);
+      }
     };
 
     updateViewport();
-    window.addEventListener("resize", updateViewport);
+    mediaQuery.addEventListener("change", updateViewport);
 
-    return () => {
-      window.removeEventListener("resize", updateViewport);
-    };
+    return () => mediaQuery.removeEventListener("change", updateViewport);
   }, []);
 
   useEffect(() => {
@@ -152,13 +165,13 @@ export function AppShell({
       return;
     }
 
+    const previousOverflow = document.body.style.overflow;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setMobileMenuOpen(false);
       }
     };
 
-    const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     window.addEventListener("keydown", closeOnEscape);
 
@@ -178,7 +191,6 @@ export function AppShell({
         setWorkspaceMenuOpen(false);
       }
     };
-
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setWorkspaceMenuOpen(false);
@@ -218,7 +230,6 @@ export function AppShell({
     }
 
     setWorkspaceSwitchError(false);
-
     startWorkspaceTransition(async () => {
       const result = await switchActiveWorkspace(workspaceId);
 
@@ -228,6 +239,7 @@ export function AppShell({
       }
 
       setWorkspaceMenuOpen(false);
+      closeMobileMenu();
       router.refresh();
     });
   };
@@ -327,7 +339,6 @@ export function AppShell({
                 }
                 aria-controls="workspace-selector-menu"
                 aria-expanded={workspaceMenuOpen}
-                disabled={isWorkspaceSwitchPending}
                 onClick={openWorkspaceMenu}
                 title="Selecionar empresa"
               >
@@ -356,7 +367,6 @@ export function AppShell({
                   strokeWidth={2.1}
                 />
               </button>
-
               <div
                 id="workspace-selector-menu"
                 className="workspace-selector-menu"
@@ -402,26 +412,21 @@ export function AppShell({
               </div>
             </>
           ) : (
-            <div className="workspace-strip-copy">
-              <span className="workspace-selector-icon" aria-hidden="true">
-                <Building2 size={18} strokeWidth={2.1} />
-              </span>
-              <span className="workspace-selector-copy">
-                <span>Workspace</span>
-                <strong>
-                  <PresentationMask placeholder="Workspace demonstrativo">
-                    {workspace?.name ?? "Nenhum workspace selecionado"}
-                  </PresentationMask>
-                </strong>
-                <small>
-                  <PresentationMask placeholder="acesso demonstrativo">
-                    {workspace
-                      ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
-                      : "Acesso de suporte"}
-                  </PresentationMask>
-                </small>
-              </span>
-            </div>
+            <>
+              <span>Workspace</span>
+              <strong>
+                <PresentationMask placeholder="Workspace demonstrativo">
+                  {workspace?.name ?? "Workspace indisponível"}
+                </PresentationMask>
+              </strong>
+              <small>
+                <PresentationMask placeholder="acesso demonstrativo">
+                  {workspace
+                    ? `${workspace.slug} - ${workspaceAccessLabel(workspace)}`
+                    : "Sessão autenticada"}
+                </PresentationMask>
+              </small>
+            </>
           )}
         </section>
 
@@ -457,6 +462,29 @@ export function AppShell({
               })}
             </nav>
           ))}
+          <nav className="sidebar-nav" aria-label="Google Ads">
+            <p className="nav-label">Google Ads</p>
+            <Link
+              className={
+                pathname === "/google-ads" || pathname.startsWith("/google-ads/")
+                  ? "active"
+                  : undefined
+              }
+              href="/google-ads"
+              aria-current={
+                pathname === "/google-ads" || pathname.startsWith("/google-ads/")
+                  ? "page"
+                  : undefined
+              }
+              title="Painel Google Ads"
+              onClick={closeMobileMenu}
+            >
+              <span className="nav-icon" aria-hidden="true">
+                <Target size={17} strokeWidth={2.1} />
+              </span>
+              <span className="nav-text">Google Ads</span>
+            </Link>
+          </nav>
         </div>
 
         {workspace?.platformRole ? (
@@ -498,10 +526,8 @@ export function AppShell({
           <PresentationModeToggle />
           <LogoutButton />
         </section>
-
         <BrandFooter brand={brand} className="sidebar-footer" />
       </aside>
-
       <button
         className="mobile-sidebar-backdrop"
         type="button"
@@ -509,7 +535,6 @@ export function AppShell({
         tabIndex={mobileMenuOpen ? 0 : -1}
         onClick={closeMobileMenu}
       />
-
       <main className="content">
         {workspace?.accessMode === "platform_support" ? (
           <div className="support-context-bar" role="status">
@@ -528,14 +553,11 @@ export function AppShell({
             </form>
           </div>
         ) : null}
-
-        {/* The CRM board refreshes itself (counts + first pages only). */}
-        {workspace && !pathname.startsWith("/crm") ? (
+        {/* The CRM board and Google Ads module refresh themselves independently. */}
+        {workspace && !pathname.startsWith("/crm") && !pathname.startsWith("/google-ads") ? (
           <DataAutoRefresh source={dataSource ?? null} />
         ) : null}
-
         {children}
-
         <BrandFooter brand={brand} className="content-footer" />
       </main>
     </div>
