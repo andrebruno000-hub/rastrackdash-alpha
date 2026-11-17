@@ -138,6 +138,35 @@ function isPendingPlaceholder(phone?: string): boolean {
   return !p || /aguardando/i.test(p) || isAttendantPhone(p);
 }
 
+function extractCleanPhoneFromCandidates(candidates: unknown[]): string {
+  const strings = candidates
+    .map((c) => String(c || "").trim())
+    .filter(Boolean);
+
+  for (const s of strings) {
+    if (s.includes("@g.us") || s.includes("status@broadcast") || s.includes("@lid")) continue;
+    const digits = s.replace(/\D/g, "");
+    if (digits.length >= 10 && digits.length <= 15) return digits;
+  }
+
+  for (const s of strings) {
+    if (s.includes("@g.us") || s.includes("status@broadcast") || s.includes("@lid")) continue;
+    const digits = s.replace(/\D/g, "");
+    if (digits.length >= 8) return digits;
+  }
+
+  return "";
+}
+
+function normalizeUazapiBaseUrl(rawUrl: string): string {
+  let clean = String(rawUrl || "").trim().replace(/\/+$/, "");
+  if (!clean) return "";
+  if (!/^https?:\/\//i.test(clean)) {
+    clean = `https://${clean}`;
+  }
+  return clean.replace(/\/+$/, "");
+}
+
 function readLeads(): any[] {
   const file = getLeadsFilePath();
   try {
@@ -319,14 +348,12 @@ function readUazapiConfig(): UazapiConfig | null {
     }
   } catch {}
 
-  const baseUrl = (
+  const baseUrl = normalizeUazapiBaseUrl(
     process.env.GOOGLE_ADS_UAZAPI_BASE_URL ||
-    process.env.UAZAPI_BASE_URL ||
-    fileCfg?.baseUrl ||
-    ""
-  )
-    .trim()
-    .replace(/\/+$/, "");
+      process.env.UAZAPI_BASE_URL ||
+      fileCfg?.baseUrl ||
+      ""
+  );
 
   const instances: UazapiInstanceConfig[] = [];
   const josiToken = (
@@ -359,7 +386,8 @@ function readUazapiConfig(): UazapiConfig | null {
 
 async function recoverMissedGoogleLeadFromUazapi(
   cleanPhone: string,
-  preferredAttendant: string
+  preferredAttendant: string,
+  rawChatId?: string
 ): Promise<{
   gclid: string;
   keyword?: string;
@@ -378,7 +406,15 @@ async function recoverMissedGoogleLeadFromUazapi(
     return aMatch - bMatch;
   });
 
-  const chatIds = [`${cleanPhone}@s.whatsapp.net`, `${cleanPhone}@c.us`];
+  const chatIds = Array.from(
+    new Set(
+      [
+        rawChatId && !rawChatId.includes("@g.us") && !rawChatId.includes("status@broadcast") ? rawChatId : "",
+        cleanPhone ? `${cleanPhone}@s.whatsapp.net` : "",
+        cleanPhone ? `${cleanPhone}@c.us` : "",
+      ].filter(Boolean)
+    )
+  );
 
   for (const inst of sortedInstances) {
     for (const chatId of chatIds) {
@@ -389,7 +425,7 @@ async function recoverMissedGoogleLeadFromUazapi(
             "Content-Type": "application/json",
             token: inst.token,
           },
-          body: JSON.stringify({ wa_chatid: chatId, chatid: chatId, limit: 25 }),
+          body: JSON.stringify({ wa_chatid: chatId, chatid: chatId, limit: 50 }),
           signal: AbortSignal.timeout(4000),
         });
         if (!res.ok) continue;
@@ -465,25 +501,37 @@ export async function POST(request: NextRequest) {
     const key = message.key || body.key || body.data?.key || {};
 
     const rawPhone =
-      key.remoteJid ||
-      body.chat?.wa_chatid ||
-      message.chatid ||
       message.sender_pn ||
+      body.sender_pn ||
+      body.chat?.phone ||
+      body.chat?.wa_chatid ||
+      key.remoteJid ||
+      message.chatid ||
       body.sender ||
       body.phone ||
       "";
 
+    const allJidCandidates = [
+      key.remoteJid,
+      body.chat?.wa_chatid,
+      message.chatid,
+      message.sender_pn,
+      body.sender_pn,
+      body.chat?.phone,
+      body.sender,
+      body.phone,
+    ];
+
     // Ignora grupos e status do WhatsApp
     if (
-      String(rawPhone).includes("@g.us") ||
-      String(rawPhone).includes("status@broadcast") ||
+      allJidCandidates.some((v) => String(v || "").includes("@g.us") || String(v || "").includes("status@broadcast")) ||
       body.isGroup === true ||
       body.chat?.wa_isGroup === true
     ) {
       return NextResponse.json({ success: true, action: "group_ignored" });
     }
 
-    const cleanPhone = String(rawPhone).replace(/\D/g, "");
+    const cleanPhone = extractCleanPhoneFromCandidates(allJidCandidates) || String(rawPhone).replace(/\D/g, "");
     const messageId = String(
       key.id || message.messageid || message.id || body.messageid || body.id || body.eventId || ""
     ).trim();
@@ -661,30 +709,49 @@ export async function POST(request: NextRequest) {
         const attendantName = resolveAttendantDisplay(instanceName);
         let leadIndex = leads.findIndex((l: any) => isSamePhone(l.leadPhone, cleanPhone));
 
-        // Se o lead não estava no disco (ex: webhook da 1ª msg falhou), tenta resgatar a tag real na Uazapi
-        // Sem inventar lead falso de Meta Ads / orgânico!
+        // Se o lead não estava vinculado ao telefone no disco (ex: webhook da 1ª msg falhou),
+        // tenta resgatar a tag real na Uazapi e atualizar o clique existente (sem duplicar card).
         if (leadIndex === -1) {
-          const recovered = await recoverMissedGoogleLeadFromUazapi(cleanPhone, attendantName);
+          const rawChatId = String(body.chat?.wa_chatid || message.chatid || key.remoteJid || "").trim();
+          const recovered = await recoverMissedGoogleLeadFromUazapi(cleanPhone, attendantName, rawChatId);
           if (recovered?.gclid) {
             const nowIso = new Date().toISOString();
-            leads.unshift({
-              id: `g_${recovered.gclid.slice(0, 15)}_${Date.now()}`,
-              leadName: pushName || recovered.leadName || "Cliente WhatsApp",
-              leadPhone: cleanPhone,
-              attendantName: recovered.attendantName || attendantName,
-              keyword: recovered.keyword || "Pesquisa Google",
-              campaign: recovered.campaign || "Campanha Pesquisa",
-              adGroup: recovered.adGroup || "Geral",
-              gclid: recovered.gclid,
-              conversionType: "conversa_iniciada",
-              stage: "conversa_iniciada",
-              status: "queued",
-              occurredAt: nowIso,
-              firstMessageAt: nowIso,
-              updatedAt: nowIso,
-              recoveredFromUazapi: true,
-            });
-            leadIndex = 0;
+            const existingByGclid = leads.findIndex(
+              (l: any) => l.gclid === recovered.gclid || (l.id && l.id.includes(recovered.gclid.slice(0, 15)))
+            );
+
+            if (existingByGclid !== -1) {
+              if (pushName || recovered.leadName) {
+                leads[existingByGclid].leadName = pushName || recovered.leadName;
+              }
+              leads[existingByGclid].leadPhone = cleanPhone;
+              if (!leads[existingByGclid].firstMessageAt) leads[existingByGclid].firstMessageAt = nowIso;
+              if (recovered.keyword) leads[existingByGclid].keyword = recovered.keyword;
+              if (recovered.campaign) leads[existingByGclid].campaign = recovered.campaign;
+              if (recovered.adGroup) leads[existingByGclid].adGroup = recovered.adGroup;
+              leads[existingByGclid].recoveredFromUazapi = true;
+              leads[existingByGclid].updatedAt = nowIso;
+              leadIndex = existingByGclid;
+            } else {
+              leads.unshift({
+                id: `g_${recovered.gclid.slice(0, 15)}_${Date.now()}`,
+                leadName: pushName || recovered.leadName || "Cliente WhatsApp",
+                leadPhone: cleanPhone,
+                attendantName: recovered.attendantName || attendantName,
+                keyword: recovered.keyword || "Pesquisa Google",
+                campaign: recovered.campaign || "Campanha Pesquisa",
+                adGroup: recovered.adGroup || "Geral",
+                gclid: recovered.gclid,
+                conversionType: "conversa_iniciada",
+                stage: "conversa_iniciada",
+                status: "queued",
+                occurredAt: nowIso,
+                firstMessageAt: nowIso,
+                updatedAt: nowIso,
+                recoveredFromUazapi: true,
+              });
+              leadIndex = 0;
+            }
           }
         }
 
