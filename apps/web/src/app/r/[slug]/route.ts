@@ -91,9 +91,9 @@ function recordTenantClickLead(
 
 export async function GET(
   request: NextRequest,
-  context: { params: Promise<{ slug: string }> | { slug: string } }
+  context: { params: Promise<{ slug: string }> }
 ) {
-  const resolvedParams = await Promise.resolve(context.params);
+  const resolvedParams = await context.params;
   const rawSlug = resolvedParams?.slug || "";
   const slug = sanitizeTenantSlug(rawSlug);
 
