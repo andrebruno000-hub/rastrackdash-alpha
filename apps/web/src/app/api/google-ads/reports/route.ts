@@ -1,17 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
+import {
+  type GoogleTenantConfig,
+  getTenantFilePath,
+  normalizeText,
+  readJsonSafe,
+  readTenantLeads,
+  resolveRequestTenant,
+  writeJsonAtomic,
+} from "../../../../lib/google-tenants";
 
 export const dynamic = "force-dynamic";
 
 /**
- * PASSO 1 + PASSO 4: MOTOR DE BI AVANÇADO & QUADRO INTELIGENTE DE DECISÃO
+ * PASSO M1 — MOTOR DE BI AVANÇADO MULTI-CLIENTE & QUADRO INTELIGENTE DE DECISÃO
  * Caminho no GitHub: apps/web/src/app/api/google-ads/reports/route.ts
  *
- * - Cache inteligente de 20 minutos em /data/alpha_google_reports_bi_cache.json
- *   para proteger a cota Exploração (2.880 ops/dia) contra o polling de 4s do painel.
- * - Cruzamento em tempo real do Google Ads (Campanhas, Conjuntos, Termos Search + PMax,
- *   Palavras-Chave, Anúncios e Parcela de Impressão Perdida) com os Leads/Vendas do WhatsApp.
+ * - 100% isolado por cliente em /data/tenants/<slug>/reports_bi_cache.json
+ * - Troca dinamicamente o Customer ID do tenant mantendo 1 único Refresh Token da MCC
+ * - Cache inteligente de 20 minutos para proteger a cota Exploração (2.880 ops/dia)
  */
 
 interface BiCacheEntry {
@@ -29,111 +35,54 @@ interface BiCacheEntry {
   adRows: any[];
 }
 
-const BI_CACHE_TTL_MS = 20 * 60 * 1000; // 20 minutos
+const BI_CACHE_TTL_MS = 20 * 60 * 1000;
 
-function getStorageDir(): string {
-  if (process.env.GOOGLE_ADS_DATA_DIR) {
-    try {
-      if (!fs.existsSync(process.env.GOOGLE_ADS_DATA_DIR)) {
-        fs.mkdirSync(process.env.GOOGLE_ADS_DATA_DIR, { recursive: true });
-      }
-      return process.env.GOOGLE_ADS_DATA_DIR;
-    } catch {}
+function toBrDateKey(isoOrDate?: string | null): string {
+  if (!isoOrDate) return "";
+  const d = new Date(isoOrDate);
+  if (isNaN(d.getTime())) return String(isoOrDate).slice(0, 10);
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Sao_Paulo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(d);
+  } catch {
+    return String(isoOrDate).slice(0, 10);
   }
+}
+
+function readEntitiesMap(slug: string): Record<string, string> {
+  return readJsonSafe<Record<string, string>>(getTenantFilePath(slug, "entities_map"), {});
+}
+
+function writeEntitiesMap(slug: string, map: Record<string, string>): void {
   try {
-    if (fs.existsSync("/data")) return "/data";
-  } catch {}
-  return "/tmp";
-}
-
-function getLeadsFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_leads.json");
-}
-
-function getEntitiesFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_entities_map.json");
-}
-
-function getEntitiesMetaFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_entities_meta.json");
-}
-
-function getBiCacheFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_reports_bi_cache.json");
-}
-
-function writeJsonAtomic(filePath: string, payload: unknown): void {
-  const json = JSON.stringify(payload, null, 2);
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmpPath, json, "utf8");
-  fs.renameSync(tmpPath, filePath);
-}
-
-function readEntitiesMap(): Record<string, string> {
-  try {
-    const file = getEntitiesFilePath();
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf8"));
-    if (fs.existsSync("/tmp/alpha_google_entities_map.json")) {
-      return JSON.parse(fs.readFileSync("/tmp/alpha_google_entities_map.json", "utf8"));
-    }
-  } catch {}
-  return {};
-}
-
-function writeEntitiesMap(map: Record<string, string>): void {
-  try {
-    const file = getEntitiesFilePath();
-    writeJsonAtomic(file, map);
-    if (file !== "/tmp/alpha_google_entities_map.json") {
-      try {
-        writeJsonAtomic("/tmp/alpha_google_entities_map.json", map);
-      } catch {}
-    }
+    writeJsonAtomic(getTenantFilePath(slug, "entities_map"), map);
   } catch {}
 }
 
-function readEntitiesMeta(): { loginCustomerIdUsed?: string; apiVersionUsed?: string } {
-  try {
-    const file = getEntitiesMetaFilePath();
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf8"));
-    if (fs.existsSync("/tmp/alpha_google_entities_meta.json")) {
-      return JSON.parse(fs.readFileSync("/tmp/alpha_google_entities_meta.json", "utf8"));
-    }
-  } catch {}
-  return {};
+function readEntitiesMeta(slug: string): { loginCustomerIdUsed?: string; apiVersionUsed?: string } {
+  return readJsonSafe<{ loginCustomerIdUsed?: string; apiVersionUsed?: string }>(
+    getTenantFilePath(slug, "entities_meta"),
+    {}
+  );
 }
 
-function readBiCacheMap(): Record<string, BiCacheEntry> {
-  try {
-    const file = getBiCacheFilePath();
-    if (fs.existsSync(file)) {
-      return JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, BiCacheEntry>;
-    }
-  } catch {}
-  return {};
+function readBiCacheMap(slug: string): Record<string, BiCacheEntry> {
+  return readJsonSafe<Record<string, BiCacheEntry>>(getTenantFilePath(slug, "reports_bi_cache"), {});
 }
 
-function writeBiCacheEntry(entry: BiCacheEntry): void {
+function writeBiCacheEntry(slug: string, entry: BiCacheEntry): void {
   try {
-    const all = readBiCacheMap();
+    const all = readBiCacheMap(slug);
     all[entry.cacheKey] = entry;
-    // Mantém no máximo 8 janelas de data em cache
     const keys = Object.keys(all);
     const trimmed =
-      keys.length > 8
-        ? Object.fromEntries(keys.slice(keys.length - 8).map((k) => [k, all[k]]))
-        : all;
-    writeJsonAtomic(getBiCacheFilePath(), trimmed);
+      keys.length > 8 ? Object.fromEntries(keys.slice(keys.length - 8).map((k) => [k, all[k]])) : all;
+    writeJsonAtomic(getTenantFilePath(slug, "reports_bi_cache"), trimmed);
   } catch {}
-}
-
-function normalizeText(text: string): string {
-  return String(text || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function getActiveApiVersions(): string[] {
@@ -276,20 +225,38 @@ function parseShareMetric(val: unknown): number | null {
 }
 
 async function fetchOrReadBiSnapshot(params: {
+  tenant: GoogleTenantConfig;
   customerId: string;
   startDate: string | null;
   endDate: string | null;
   forceRefresh: boolean;
 }): Promise<BiCacheEntry & { fromCache: boolean }> {
+  const { tenant, customerId } = params;
   const isCustomRange = Boolean(
     params.startDate &&
       params.endDate &&
       /^\d{4}-\d{2}-\d{2}$/.test(params.startDate) &&
       /^\d{4}-\d{2}-\d{2}$/.test(params.endDate)
   );
-  const cacheKey = isCustomRange ? `${params.startDate}__${params.endDate}` : "LAST_30_DAYS";
-  const allCache = readBiCacheMap();
+  const cacheKey = `${tenant.slug}__${customerId || "nocid"}__${isCustomRange ? `${params.startDate}__${params.endDate}` : "LAST_30_DAYS"}`;
+  const allCache = readBiCacheMap(tenant.slug);
   const cached = allCache[cacheKey];
+
+  if (!customerId) {
+    return {
+      cacheKey,
+      fetchedAt: new Date().toISOString(),
+      apiConnected: false,
+      apiError: `Customer ID do Google Ads não configurado para o cliente "${tenant.name}".`,
+      adGroupRows: [],
+      campaignRows: [],
+      searchTermRows: [],
+      pmaxSearchTermRows: [],
+      keywordRows: [],
+      adRows: [],
+      fromCache: false,
+    };
+  }
 
   if (!params.forceRefresh && cached?.fetchedAt) {
     const ageMs = Date.now() - new Date(cached.fetchedAt).getTime();
@@ -320,7 +287,7 @@ async function fetchOrReadBiSnapshot(params: {
       keywordRows: cached?.keywordRows || [],
       adRows: cached?.adRows || [],
     };
-    writeBiCacheEntry(empty);
+    writeBiCacheEntry(tenant.slug, empty);
     return { ...empty, fromCache: false };
   }
 
@@ -338,11 +305,11 @@ async function fetchOrReadBiSnapshot(params: {
       keywordRows: cached?.keywordRows || [],
       adRows: cached?.adRows || [],
     };
-    writeBiCacheEntry(failed);
+    writeBiCacheEntry(tenant.slug, failed);
     return { ...failed, fromCache: false };
   }
 
-  const meta = readEntitiesMeta();
+  const meta = readEntitiesMeta(tenant.slug);
   const explicitLoginId = process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID?.replace(/\D/g, "") || undefined;
   let loginCustomerId = explicitLoginId || meta.loginCustomerIdUsed;
 
@@ -373,7 +340,7 @@ async function fetchOrReadBiSnapshot(params: {
   for (const version of getActiveApiVersions()) {
     let res = await executeGaqlStream({
       version,
-      customerId: params.customerId,
+      customerId,
       accessToken: oauth.token,
       devToken,
       query: adGroupQuery,
@@ -396,7 +363,7 @@ async function fetchOrReadBiSnapshot(params: {
       if (loginCustomerId) {
         const directRes = await executeGaqlStream({
           version,
-          customerId: params.customerId,
+          customerId,
           accessToken: oauth.token,
           devToken,
           query: adGroupQuery,
@@ -409,7 +376,7 @@ async function fetchOrReadBiSnapshot(params: {
       if (!res.ok) {
         const discoveredMcc = await discoverManagerLoginCustomerId({
           version,
-          targetCustomerId: params.customerId,
+          targetCustomerId: customerId,
           accessToken: oauth.token,
           devToken,
         });
@@ -417,7 +384,7 @@ async function fetchOrReadBiSnapshot(params: {
           loginCustomerId = discoveredMcc;
           res = await executeGaqlStream({
             version,
-            customerId: params.customerId,
+            customerId,
             accessToken: oauth.token,
             devToken,
             query: adGroupQuery,
@@ -451,11 +418,10 @@ async function fetchOrReadBiSnapshot(params: {
       keywordRows: cached?.keywordRows || [],
       adRows: cached?.adRows || [],
     };
-    writeBiCacheEntry(failedEntry);
+    writeBiCacheEntry(tenant.slug, failedEntry);
     return { ...failedEntry, fromCache: false };
   }
 
-  // Consultas de BI avançado em paralelo (4 chamadas leves para o cache de 20m)
   const campaignQuery = `
     SELECT
       campaign.id,
@@ -553,7 +519,7 @@ async function fetchOrReadBiSnapshot(params: {
   const [campRes, stRes, pmaxStRes, kwRes, adRes] = await Promise.all([
     executeGaqlStream({
       version: workingVersion,
-      customerId: params.customerId,
+      customerId,
       accessToken: oauth.token,
       devToken,
       loginCustomerId,
@@ -561,7 +527,7 @@ async function fetchOrReadBiSnapshot(params: {
     }),
     executeGaqlStream({
       version: workingVersion,
-      customerId: params.customerId,
+      customerId,
       accessToken: oauth.token,
       devToken,
       loginCustomerId,
@@ -569,7 +535,7 @@ async function fetchOrReadBiSnapshot(params: {
     }),
     executeGaqlStream({
       version: workingVersion,
-      customerId: params.customerId,
+      customerId,
       accessToken: oauth.token,
       devToken,
       loginCustomerId,
@@ -577,7 +543,7 @@ async function fetchOrReadBiSnapshot(params: {
     }),
     executeGaqlStream({
       version: workingVersion,
-      customerId: params.customerId,
+      customerId,
       accessToken: oauth.token,
       devToken,
       loginCustomerId,
@@ -585,7 +551,7 @@ async function fetchOrReadBiSnapshot(params: {
     }),
     executeGaqlStream({
       version: workingVersion,
-      customerId: params.customerId,
+      customerId,
       accessToken: oauth.token,
       devToken,
       loginCustomerId,
@@ -608,10 +574,9 @@ async function fetchOrReadBiSnapshot(params: {
     adRows: adRes.ok ? adRes.rows : [],
   };
 
-  writeBiCacheEntry(entry);
+  writeBiCacheEntry(tenant.slug, entry);
 
-  // Atualiza também mapa de entidades (ID -> Nome Real)
-  const entities = readEntitiesMap();
+  const entities = readEntitiesMap(tenant.slug);
   let entChanged = false;
   for (const r of [...entry.campaignRows, ...entry.adGroupRows]) {
     const cId = String(r.campaign?.id || "");
@@ -627,13 +592,20 @@ async function fetchOrReadBiSnapshot(params: {
       entChanged = true;
     }
   }
-  if (entChanged) writeEntitiesMap(entities);
+  if (entChanged) writeEntitiesMap(tenant.slug, entities);
 
   return { ...entry, fromCache: false };
 }
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
+  const clientParam = searchParams.get("client");
+  const tenant = resolveRequestTenant(clientParam);
+
+  if (!tenant) {
+    return NextResponse.json({ error: `Cliente "${clientParam}" não encontrado.` }, { status: 404 });
+  }
+
   const startDate = searchParams.get("startDate");
   const endDate = searchParams.get("endDate");
   const filterCampaign = searchParams.get("campaign");
@@ -641,29 +613,18 @@ export async function GET(request: NextRequest) {
   const filterAttendant = searchParams.get("attendant");
   const refreshBi = searchParams.get("refreshBi") === "true";
 
-  const customerId = (process.env.GOOGLE_ADS_CUSTOMER_ID || "3228136878").replace(/\D/g, "");
-  const leadsFile = getLeadsFilePath();
-
-  let allLeads: any[] = [];
-  if (fs.existsSync(leadsFile)) {
-    try {
-      allLeads = JSON.parse(fs.readFileSync(leadsFile, "utf8"));
-    } catch {}
-  } else if (fs.existsSync("/tmp/alpha_google_leads.json")) {
-    try {
-      allLeads = JSON.parse(fs.readFileSync("/tmp/alpha_google_leads.json", "utf8"));
-    } catch {}
-  }
+  const customerId = String(tenant.googleCustomerId || "").replace(/\D/g, "");
+  const allLeads = readTenantLeads(tenant.slug, tenant);
 
   let leads = [...allLeads];
   if (startDate && endDate) {
     leads = leads.filter((l) => {
-      const d = (l.occurredAt || l.firstMessageAt || "").slice(0, 10);
+      const d = toBrDateKey(l.occurredAt || l.firstMessageAt || "");
       return !d || (d >= startDate && d <= endDate);
     });
   }
 
-  const entities = readEntitiesMap();
+  const entities = readEntitiesMap(tenant.slug);
 
   if (filterCampaign && filterCampaign !== "all") {
     leads = leads.filter(
@@ -682,15 +643,13 @@ export async function GET(request: NextRequest) {
   }
 
   const biSnapshot = await fetchOrReadBiSnapshot({
+    tenant,
     customerId,
     startDate,
     endDate,
     forceRefresh: refreshBi,
   });
 
-  // =========================================================================
-  // 1. DESEMPENHO POR CONJUNTO DE ANÚNCIOS (COMPATÍVEL + MÉTRICAS AVANÇADAS)
-  // =========================================================================
   const isClickOnlyLead = (l: any): boolean => {
     const rawPhone = String(l?.leadPhone || "").trim();
     const waitingWpp = !l?.firstMessageAt && (!rawPhone || /aguardando/i.test(rawPhone));
@@ -826,9 +785,6 @@ export async function GET(request: NextRequest) {
   const totalRevenue = reports.reduce((acc, r) => acc + r.whatsappRevenue, 0);
   const totalProfit = reports.reduce((acc, r) => acc + r.profit, 0);
 
-  // =========================================================================
-  // 2. SAÚDE DAS CAMPANHAS + PARCELA DE IMPRESSÃO PERDIDA (BUDGET / RANK)
-  // =========================================================================
   const campaignHealthMap: Record<string, any> = {};
   biSnapshot.campaignRows.forEach((row: any) => {
     const cId = String(row.campaign?.id || "");
@@ -931,9 +887,6 @@ export async function GET(request: NextRequest) {
     })
     .sort((a, b) => b.cost - a.cost);
 
-  // =========================================================================
-  // 3. PALAVRAS-CHAVE (keyword_view) CRUZADAS COM LEADS WHATSAPP
-  // =========================================================================
   const kwAggMap: Record<string, any> = {};
   biSnapshot.keywordRows.forEach((row: any) => {
     const cId = String(row.campaign?.id || "");
@@ -972,7 +925,6 @@ export async function GET(request: NextRequest) {
     kwAggMap[key].cost += Number(row.metrics?.costMicros || 0) / 1000000;
   });
 
-  // Cruza leads reais (que iniciaram conversa) com palavras-chave por texto normalizado
   leads.forEach((l) => {
     if (isClickOnlyLead(l)) return;
     const normLeadKw = normalizeText(l.keyword || "");
@@ -1027,11 +979,7 @@ export async function GET(request: NextRequest) {
     })
     .sort((a, b) => b.whatsappSalesCount - a.whatsappSalesCount || b.cost - a.cost);
 
-  // =========================================================================
-  // 4. TERMOS DE PESQUISA REAIS (SEARCH + PMAX) PARA NEGATIVAR OU ESCALAR
-  // =========================================================================
   const stAggMap: Record<string, any> = {};
-
   const ingestSearchTermRow = (row: any, source: "SEARCH" | "PMAX") => {
     const channelType = String(row.campaign?.advertisingChannelType || "");
     if (source === "PMAX" && channelType && channelType !== "PERFORMANCE_MAX") return;
@@ -1075,7 +1023,6 @@ export async function GET(request: NextRequest) {
   biSnapshot.searchTermRows.forEach((r) => ingestSearchTermRow(r, "SEARCH"));
   biSnapshot.pmaxSearchTermRows.forEach((r) => ingestSearchTermRow(r, "PMAX"));
 
-  // Cruza termos com leads reais (que iniciaram conversa) cuja keyword esteja associada ao termo digitado
   const stValues = Object.values(stAggMap);
   leads.forEach((l) => {
     if (isClickOnlyLead(l)) return;
@@ -1117,9 +1064,6 @@ export async function GET(request: NextRequest) {
     })
     .sort((a, b) => b.cost - a.cost || b.clicks - a.clicks);
 
-  // =========================================================================
-  // 5. ANÚNCIOS (ad_group_ad) CRUZADOS VIA click_view / CONJUNTO
-  // =========================================================================
   const adAggMap: Record<string, any> = {};
   biSnapshot.adRows.forEach((row: any) => {
     const cId = String(row.campaign?.id || "");
@@ -1200,9 +1144,6 @@ export async function GET(request: NextRequest) {
     })
     .sort((a, b) => b.cost - a.cost);
 
-  // =========================================================================
-  // 6. RESUMO DE INTELIGÊNCIA & DECISÃO (QUADRO EXECUTIVO)
-  // =========================================================================
   const wastedTerms = searchTerms.filter((t) => t.recommendation === "NEGATIVAR");
   const wastedTermsCost = Number(wastedTerms.reduce((acc, t) => acc + t.cost, 0).toFixed(2));
   const bestAdGroup =
@@ -1217,6 +1158,8 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json(
     {
+      tenantSlug: tenant.slug,
+      tenantName: tenant.name,
       apiConnected: biSnapshot.apiConnected,
       apiVersionUsed: biSnapshot.apiVersionUsed,
       apiError: biSnapshot.apiError,
