@@ -1259,6 +1259,22 @@ async function autoEnrichLeadsViaClickView(
     return { leads, enrichedCount: 0 };
   }
 
+  const toSpDate = (iso?: string): string => {
+    if (!iso) return "";
+    const dt = new Date(iso);
+    if (isNaN(dt.getTime())) return String(iso).slice(0, 10);
+    try {
+      return new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Sao_Paulo",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(dt);
+    } catch {
+      return dt.toISOString().slice(0, 10);
+    }
+  };
+
   const nowMs = Date.now();
   const candidates = leads.filter((l: any) => {
     if (!l?.gclid || l.gclid === "sem_gclid") return false;
@@ -1270,7 +1286,8 @@ async function autoEnrichLeadsViaClickView(
     const occurredMs = new Date(l.occurredAt || l.firstMessageAt || 0).getTime();
     if (!occurredMs || isNaN(occurredMs)) return false;
     const ageDays = (nowMs - occurredMs) / (1000 * 60 * 60 * 24);
-    return ageDays >= 0.04 && ageDays <= 89;
+    // Inclui também cliques que ainda não enviaram mensagem (Etapa 1 clique_anuncio)
+    return ageDays >= 0.02 && ageDays <= 89;
   });
 
   if (candidates.length === 0) return { leads, enrichedCount: 0 };
@@ -1291,10 +1308,10 @@ async function autoEnrichLeadsViaClickView(
 
   const dateMap = new Map<string, any[]>();
   for (const c of candidates) {
-    const d = String(c.occurredAt || c.firstMessageAt || "").slice(0, 10);
+    const d = toSpDate(c.occurredAt || c.firstMessageAt);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
     if (!dateMap.has(d)) {
-      if (dateMap.size >= 2) continue;
+      if (dateMap.size >= 4) continue;
       dateMap.set(d, []);
     }
     dateMap.get(d)!.push(c);
