@@ -1,21 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
 import crypto from "crypto";
+import {
+  type GoogleTenantConfig,
+  getStorageDir,
+  getTenantFilePath,
+  isTenantAttendantPhone,
+  normalizeText,
+  readJsonSafe,
+  readTenantLeads,
+  readTenantRules,
+  resolveRequestTenant,
+  writeJsonAtomic,
+  writeTenantLeads,
+} from "../../../../lib/google-tenants";
 
 export const dynamic = "force-dynamic";
 
 /**
- * PASSO 3 + DATA MANAGER API v1: OCI À PROVA DE FALHAS + ENHANCED CONVERSIONS (SHA-256)
+ * PASSO M1 — OCI MULTI-CLIENTE + DATA MANAGER API v1 + ENHANCED CONVERSIONS (SHA-256)
  * Caminho no GitHub: apps/web/src/app/api/google-ads/oci/route.ts
  *
- * - Leitura de conversion_action e diagnósticos via Google Ads API (v25/v26) + descoberta automática de MCC
- * - Envio oficial de conversões offline via Google Data Manager API v1 (datamanager.googleapis.com/v1/events:ingest)
- *   (exigido pelo Google para novas integrações no lugar de UploadClickConversions legado)
- * - Enhanced Conversions for Leads: telefone E.164 (+55...) normalizado e hasheado em SHA-256 HEX
- * - Anti-duplicidade nativa via transactionId determinístico por (leadId + stage)
- * - Trava absoluta de idempotência no backend (/data/alpha_google_oci_sent_index.json):
- *   eventos "sent" NUNCA são reenviados (mesmo com force: true)
+ * - 100% isolado por cliente em /data/tenants/<slug>/
+ * - Usa 1 único Refresh Token da MCC, enviando conversões para tenant.googleCustomerId
+ * - Data Manager API v1 (datamanager.googleapis.com/v1/events:ingest) + Enhanced SHA-256
+ * - Suporta Ajustes de Conversão (RESTATEMENT / RETRACTION) por orderId
+ * - Trava absoluta de idempotência: eventos "sent" NUNCA são reenviados
  */
 
 type FunnelStage = "conversa_iniciada" | "orcamento_enviado" | "compra_realizada";
@@ -79,157 +88,52 @@ interface OfficialDiagnosticsCache {
   }[];
 }
 
-const CUSTOMER_ID = (process.env.GOOGLE_ADS_CUSTOMER_ID || "3228136878").replace(/\D/g, "");
-const MATURATION_TIME_MS = 4 * 60 * 60 * 1000; // 4 horas mínimas para maturação de GCLID
-const DIAGNOSTICS_CACHE_TTL_MS = 15 * 60 * 1000; // 15 min (preserva cota Exploração 2.880 ops/dia)
-const ATTENDANT_PHONES = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
+const MATURATION_TIME_MS = 4 * 60 * 60 * 1000;
+const DIAGNOSTICS_CACHE_TTL_MS = 15 * 60 * 1000;
 
-function getStorageDir(): string {
-  if (process.env.GOOGLE_ADS_DATA_DIR) {
-    try {
-      if (!fs.existsSync(process.env.GOOGLE_ADS_DATA_DIR)) {
-        fs.mkdirSync(process.env.GOOGLE_ADS_DATA_DIR, { recursive: true });
-      }
-      return process.env.GOOGLE_ADS_DATA_DIR;
-    } catch {}
-  }
-  try {
-    if (fs.existsSync("/data")) return "/data";
-  } catch {}
-  return "/tmp";
+function readSentIndex(slug: string): Record<string, SentIndexEntry> {
+  return readJsonSafe<Record<string, SentIndexEntry>>(getTenantFilePath(slug, "oci_sent_index"), {});
 }
 
-function getLeadsFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_leads.json");
-}
-
-function getRulesFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_conversion_rules.json");
-}
-
-function getSentIndexFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_oci_sent_index.json");
-}
-
-function getActionMappingFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_oci_actions_map.json");
-}
-
-function getDiagnosticsCacheFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_oci_diagnostics.json");
-}
-
-function getEntitiesMetaFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_entities_meta.json");
-}
-
-function writeJsonAtomic(filePath: string, payload: unknown): void {
-  const json = JSON.stringify(payload, null, 2);
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmpPath, json, "utf8");
-  fs.renameSync(tmpPath, filePath);
-}
-
-function readJsonSafe<T>(primaryPath: string, fallbackTmpPath: string | null, defaultValue: T): T {
-  try {
-    if (fs.existsSync(primaryPath)) {
-      return JSON.parse(fs.readFileSync(primaryPath, "utf8")) as T;
-    }
-    if (fallbackTmpPath && fs.existsSync(fallbackTmpPath)) {
-      return JSON.parse(fs.readFileSync(fallbackTmpPath, "utf8")) as T;
-    }
-  } catch {}
-  return defaultValue;
-}
-
-function readLeads(): any[] {
-  return readJsonSafe<any[]>(getLeadsFilePath(), "/tmp/alpha_google_leads.json", []);
-}
-
-function writeLeads(leads: any[]): void {
-  const trimmed = leads.slice(0, 500);
-  try {
-    const file = getLeadsFilePath();
-    writeJsonAtomic(file, trimmed);
-    if (file !== "/tmp/alpha_google_leads.json") {
-      try {
-        writeJsonAtomic("/tmp/alpha_google_leads.json", trimmed);
-      } catch {}
-    }
-  } catch (err) {
-    console.error("Erro ao salvar leads OCI:", err);
-  }
-}
-
-function readSentIndex(): Record<string, SentIndexEntry> {
-  return readJsonSafe<Record<string, SentIndexEntry>>(
-    getSentIndexFilePath(),
-    "/tmp/alpha_google_oci_sent_index.json",
-    {}
-  );
-}
-
-function writeSentIndex(index: Record<string, SentIndexEntry>): void {
+function writeSentIndex(slug: string, index: Record<string, SentIndexEntry>): void {
   try {
     const entries = Object.entries(index);
     const trimmed =
       entries.length > 2500 ? Object.fromEntries(entries.slice(entries.length - 2500)) : index;
-    writeJsonAtomic(getSentIndexFilePath(), trimmed);
+    writeJsonAtomic(getTenantFilePath(slug, "oci_sent_index"), trimmed);
   } catch (err) {
     console.error("Erro ao gravar índice de idempotência OCI:", err);
   }
 }
 
-function readActionMapping(): ActionMapping {
-  return readJsonSafe<ActionMapping>(getActionMappingFilePath(), null, {});
+function readActionMapping(slug: string): ActionMapping {
+  return readJsonSafe<ActionMapping>(getTenantFilePath(slug, "oci_actions_map"), {});
 }
 
-function writeActionMapping(mapping: ActionMapping): void {
-  writeJsonAtomic(getActionMappingFilePath(), mapping);
+function writeActionMapping(slug: string, mapping: ActionMapping): void {
+  writeJsonAtomic(getTenantFilePath(slug, "oci_actions_map"), mapping);
 }
 
-function readRulesActionNames(): { quoteActionName: string; purchaseActionName: string } {
-  const rules = readJsonSafe<any>(
-    getRulesFilePath(),
-    "/tmp/alpha_google_conversion_rules.json",
-    {}
-  );
+function readRulesActionNames(slug: string): { quoteActionName: string; purchaseActionName: string } {
+  const rules = readTenantRules(slug);
   return {
     quoteActionName: String(rules?.quote?.actionName || "WhatsApp - Orçamento Enviado").trim(),
     purchaseActionName: String(rules?.purchase?.actionName || "WhatsApp - Compra Realizada").trim(),
   };
 }
 
-function normalizeText(text: string): string {
-  return String(text || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isAttendantPhone(phone?: string): boolean {
-  const p = String(phone || "").replace(/\D/g, "");
-  if (!p) return false;
-  return ATTENDANT_PHONES.some(
-    (att) => p === att || (p.length >= 8 && att.length >= 8 && p.slice(-8) === att.slice(-8))
-  );
-}
-
-function isWaitingWhatsApp(lead: any): boolean {
+function isWaitingWhatsApp(tenant: GoogleTenantConfig, lead: any): boolean {
   if (lead?.stage === "clique_anuncio") return true;
   const p = String(lead?.leadPhone || "").trim();
-  const placeholder = !p || /aguardando/i.test(p) || isAttendantPhone(p);
+  const placeholder = !p || /aguardando/i.test(p) || isTenantAttendantPhone(tenant, p);
   return !lead?.firstMessageAt && placeholder;
 }
 
-function normalizePhoneE164(rawPhone?: string): string | null {
+function normalizePhoneE164(tenant: GoogleTenantConfig, rawPhone?: string): string | null {
   if (!rawPhone || /aguardando/i.test(rawPhone)) return null;
-  if (isAttendantPhone(rawPhone)) return null;
+  if (isTenantAttendantPhone(tenant, rawPhone)) return null;
   let digits = String(rawPhone).replace(/\D/g, "");
   if (!digits || digits.length < 10 || digits.length > 15) return null;
-  // Remove 0 à esquerda se houver
   digits = digits.replace(/^0+/, "");
   if (digits.length === 10 || digits.length === 11) {
     digits = `55${digits}`;
@@ -270,7 +174,6 @@ function isStageAlreadySent(
   const key = buildStageKey(lead.id, stage);
   if (sentIndex[key]) return true;
   if (lead?.sentStages?.[stage]?.sentAt) return true;
-  // Compatibilidade com leads já enviados antes do PASSO 3
   if (lead?.status === "sent") {
     const recordedStage = lead?.lastUploadedStage || lead?.stage || lead?.conversionType || "conversa_iniciada";
     if (recordedStage === stage) return true;
@@ -281,7 +184,6 @@ function isStageAlreadySent(
 function formatGoogleAdsDateTime(isoOrMs: string | number): string {
   const d = new Date(isoOrMs);
   const valid = isNaN(d.getTime()) ? new Date() : d;
-  // Google Ads API exige estritamente YYYY-MM-DD HH:MM:SS+|-HH:MM (sem milissegundos)
   return valid.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "+00:00");
 }
 
@@ -444,8 +346,9 @@ async function discoverManagerLoginCustomerId(params: {
   return undefined;
 }
 
-async function resolveWorkingGoogleAdsContext(): Promise<{
+async function resolveWorkingGoogleAdsContext(tenant: GoogleTenantConfig): Promise<{
   ok: boolean;
+  customerId: string;
   accessToken?: string;
   devToken?: string;
   version?: string;
@@ -453,11 +356,22 @@ async function resolveWorkingGoogleAdsContext(): Promise<{
   conversionActions: ConversionActionOption[];
   error?: string;
 }> {
+  const customerId = String(tenant.googleCustomerId || "").replace(/\D/g, "");
+  if (!customerId) {
+    return {
+      ok: false,
+      customerId: "",
+      conversionActions: [],
+      error: `Customer ID do Google Ads não configurado para o cliente "${tenant.name}".`,
+    };
+  }
+
   const missingEnv = getMissingGoogleAdsEnvVars();
   const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim();
   if (!devToken || missingEnv.length > 0) {
     return {
       ok: false,
+      customerId,
       conversionActions: [],
       error: `Variáveis ausentes no Dokploy: ${missingEnv.join(", ")}`,
     };
@@ -465,10 +379,10 @@ async function resolveWorkingGoogleAdsContext(): Promise<{
 
   const oauth = await getGoogleAdsAccessToken();
   if (!oauth.token) {
-    return { ok: false, conversionActions: [], error: oauth.error || "Falha OAuth2" };
+    return { ok: false, customerId, conversionActions: [], error: oauth.error || "Falha OAuth2" };
   }
 
-  const entitiesMeta = readJsonSafe<any>(getEntitiesMetaFilePath(), null, {});
+  const entitiesMeta = readJsonSafe<any>(getTenantFilePath(tenant.slug, "entities_meta"), {});
   const explicitLoginId = process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID?.replace(/\D/g, "") || undefined;
   let loginCustomerId: string | undefined = explicitLoginId || entitiesMeta?.loginCustomerIdUsed;
 
@@ -489,7 +403,7 @@ async function resolveWorkingGoogleAdsContext(): Promise<{
   for (const version of versions) {
     let res = await executeGaqlStream({
       version,
-      customerId: CUSTOMER_ID,
+      customerId,
       accessToken: oauth.token,
       devToken,
       query: actionQuery,
@@ -512,7 +426,7 @@ async function resolveWorkingGoogleAdsContext(): Promise<{
       if (loginCustomerId) {
         const directRes = await executeGaqlStream({
           version,
-          customerId: CUSTOMER_ID,
+          customerId,
           accessToken: oauth.token,
           devToken,
           query: actionQuery,
@@ -525,7 +439,7 @@ async function resolveWorkingGoogleAdsContext(): Promise<{
       if (!res.ok) {
         const mcc = await discoverManagerLoginCustomerId({
           version,
-          targetCustomerId: CUSTOMER_ID,
+          targetCustomerId: customerId,
           accessToken: oauth.token,
           devToken,
         });
@@ -533,7 +447,7 @@ async function resolveWorkingGoogleAdsContext(): Promise<{
           loginCustomerId = mcc;
           res = await executeGaqlStream({
             version,
-            customerId: CUSTOMER_ID,
+            customerId,
             accessToken: oauth.token,
             devToken,
             query: actionQuery,
@@ -550,7 +464,7 @@ async function resolveWorkingGoogleAdsContext(): Promise<{
           name: String(r.conversionAction?.name || ""),
           resourceName: String(
             r.conversionAction?.resourceName ||
-              `customers/${CUSTOMER_ID}/conversionActions/${r.conversionAction?.id}`
+              `customers/${customerId}/conversionActions/${r.conversionAction?.id}`
           ),
           type: String(r.conversionAction?.type || ""),
           status: String(r.conversionAction?.status || ""),
@@ -560,6 +474,7 @@ async function resolveWorkingGoogleAdsContext(): Promise<{
 
       return {
         ok: true,
+        customerId,
         accessToken: oauth.token,
         devToken,
         version,
@@ -574,6 +489,7 @@ async function resolveWorkingGoogleAdsContext(): Promise<{
 
   return {
     ok: false,
+    customerId,
     conversionActions: [],
     error: lastError || "Não foi possível conectar na Google Ads API.",
   };
@@ -587,7 +503,6 @@ function resolveStageConversionAction(
 ): ConversionActionOption | null {
   if (!availableActions || availableActions.length === 0) return null;
 
-  // 1) Mapeamento explícito configurado pelo usuário na Aba 5
   const manualIdOrRn = manualMap?.[stage];
   if (manualIdOrRn) {
     const cleanId = String(manualIdOrRn).replace("customers/", "").split("/").pop();
@@ -600,7 +515,6 @@ function resolveStageConversionAction(
   const enabled = availableActions.filter((a) => a.status === "ENABLED");
   const pool = enabled.length > 0 ? enabled : availableActions;
 
-  // Ordenar preferindo ações compatíveis com importação offline (UPLOAD_CLICKS)
   const sortedPool = [...pool].sort((a, b) => {
     const score = (t: string) =>
       t === "UPLOAD_CLICKS" ? 3 : t.includes("UPLOAD") || t.includes("ENHANCED") ? 2 : 1;
@@ -634,14 +548,12 @@ function resolveStageConversionAction(
             "Lead",
           ];
 
-  // 2) Match exato normalizado (sem acento/maiúscula)
   for (const target of targetNames) {
     const normTarget = normalizeText(target);
     const exact = sortedPool.find((a) => normalizeText(a.name) === normTarget);
     if (exact) return exact;
   }
 
-  // 3) Match por palavra-chave contida + tipo offline preferencial
   const keywordTokens =
     stage === "compra_realizada"
       ? ["compra", "venda", "pedido", "purchase"]
@@ -657,12 +569,12 @@ function resolveStageConversionAction(
   return null;
 }
 
-async function fetchOrReadOfficialDiagnostics(forceRefresh = false): Promise<OfficialDiagnosticsCache> {
-  const cached = readJsonSafe<OfficialDiagnosticsCache | null>(
-    getDiagnosticsCacheFilePath(),
-    null,
-    null
-  );
+async function fetchOrReadOfficialDiagnostics(
+  tenant: GoogleTenantConfig,
+  forceRefresh = false
+): Promise<OfficialDiagnosticsCache> {
+  const diagPath = getTenantFilePath(tenant.slug, "oci_diagnostics");
+  const cached = readJsonSafe<OfficialDiagnosticsCache | null>(diagPath, null);
 
   if (!forceRefresh && cached?.fetchedAt) {
     const age = Date.now() - new Date(cached.fetchedAt).getTime();
@@ -671,8 +583,8 @@ async function fetchOrReadOfficialDiagnostics(forceRefresh = false): Promise<Off
     }
   }
 
-  const ctx = await resolveWorkingGoogleAdsContext();
-  if (!ctx.ok || !ctx.version || !ctx.accessToken || !ctx.devToken) {
+  const ctx = await resolveWorkingGoogleAdsContext(tenant);
+  if (!ctx.ok || !ctx.version || !ctx.accessToken || !ctx.devToken || !ctx.customerId) {
     const fallback: OfficialDiagnosticsCache = {
       fetchedAt: new Date().toISOString(),
       apiConnected: false,
@@ -682,7 +594,7 @@ async function fetchOrReadOfficialDiagnostics(forceRefresh = false): Promise<Off
       actionSummaries: cached?.actionSummaries || [],
     };
     try {
-      writeJsonAtomic(getDiagnosticsCacheFilePath(), fallback);
+      writeJsonAtomic(diagPath, fallback);
     } catch {}
     return fallback;
   }
@@ -718,7 +630,7 @@ async function fetchOrReadOfficialDiagnostics(forceRefresh = false): Promise<Off
   const [clientRes, actionRes] = await Promise.all([
     executeGaqlStream({
       version: ctx.version,
-      customerId: CUSTOMER_ID,
+      customerId: ctx.customerId,
       accessToken: ctx.accessToken,
       devToken: ctx.devToken,
       loginCustomerId: ctx.loginCustomerId,
@@ -726,7 +638,7 @@ async function fetchOrReadOfficialDiagnostics(forceRefresh = false): Promise<Off
     }),
     executeGaqlStream({
       version: ctx.version,
-      customerId: CUSTOMER_ID,
+      customerId: ctx.customerId,
       accessToken: ctx.accessToken,
       devToken: ctx.devToken,
       loginCustomerId: ctx.loginCustomerId,
@@ -789,7 +701,7 @@ async function fetchOrReadOfficialDiagnostics(forceRefresh = false): Promise<Off
   };
 
   try {
-    writeJsonAtomic(getDiagnosticsCacheFilePath(), result);
+    writeJsonAtomic(diagPath, result);
   } catch {}
 
   return result;
@@ -829,7 +741,6 @@ function parsePartialFailureErrors(resJson: any, totalItems: number): {
     }
   }
 
-  // Fallback se partialFailureError veio sem índice explícito
   if (Object.keys(perItemError).length === 0) {
     for (let i = 0; i < totalItems; i++) {
       const itemRes = Array.isArray(resJson?.results) ? resJson.results[i] : null;
@@ -850,13 +761,13 @@ function parsePartialFailureErrors(resJson: any, totalItems: number): {
 function buildFriendlyGoogleOciError(rawMessage: string): string {
   const msg = String(rawMessage || "Erro desconhecido na API do Google");
   if (/ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficient authentication scopes|Request had insufficient authentication scopes/i.test(msg)) {
-    return `${msg} — Falta o escopo https://www.googleapis.com/auth/datamanager no Refresh Token. Gere um novo GOOGLE_ADS_REFRESH_TOKEN no OAuth Playground marcando juntos os escopos "adwords" e "datamanager" e salve no Dokploy.`;
+    return `${msg} — Falta o escopo https://www.googleapis.com/auth/datamanager no Refresh Token.`;
   }
   if (/SERVICE_DISABLED|has not been used in project|is disabled/i.test(msg)) {
-    return `${msg} — Ative a API "Data Manager API" (datamanager.googleapis.com) no projeto RastrackDash Google Ads no Google Cloud Console.`;
+    return `${msg} — Ative a API "Data Manager API" (datamanager.googleapis.com) no Google Cloud Console.`;
   }
   if (/CUSTOMER_NOT_ALLOWLISTED_FOR_THIS_FEATURE/i.test(msg)) {
-    return `${msg} — A conta exige envio via Data Manager API (datamanager.googleapis.com/v1/events:ingest) com escopo datamanager.`;
+    return `${msg} — A conta exige envio via Data Manager API (datamanager.googleapis.com/v1/events:ingest).`;
   }
   if (/EXPIRED_EVENT/i.test(msg)) {
     return `${msg} — Evento expirado (>90 dias desde o clique no anúncio).`;
@@ -872,13 +783,21 @@ function buildFriendlyGoogleOciError(rawMessage: string): string {
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const forceRefresh = searchParams.get("refresh") === "true";
+  const clientParam = searchParams.get("client");
+  const tenant = resolveRequestTenant(clientParam);
 
-  const leads = readLeads();
-  const sentIndex = readSentIndex();
-  const actionMapping = readActionMapping();
-  const ruleNames = readRulesActionNames();
-  const diagnostics = await fetchOrReadOfficialDiagnostics(forceRefresh);
+  if (!tenant) {
+    return NextResponse.json({ error: `Cliente "${clientParam}" não encontrado.` }, { status: 404 });
+  }
+
+  const forceRefresh = searchParams.get("refresh") === "true";
+  const customerId = String(tenant.googleCustomerId || "").replace(/\D/g, "");
+
+  const leads = readTenantLeads(tenant.slug, tenant);
+  const sentIndex = readSentIndex(tenant.slug);
+  const actionMapping = readActionMapping(tenant.slug);
+  const ruleNames = readRulesActionNames(tenant.slug);
+  const diagnostics = await fetchOrReadOfficialDiagnostics(tenant, forceRefresh);
 
   const now = Date.now();
   const stats = {
@@ -896,9 +815,9 @@ export async function GET(request: NextRequest) {
       stats.totalWithClickId += 1;
       const stage = getLeadStage(l);
       const alreadySent = isStageAlreadySent(l, stage, sentIndex);
-      const waitingWpp = isWaitingWhatsApp(l);
+      const waitingWpp = isWaitingWhatsApp(tenant, l);
       const clickId = extractClickIdentifiers(l);
-      const e164Phone = normalizePhoneE164(l.leadPhone);
+      const e164Phone = normalizePhoneE164(tenant, l.leadPhone);
       const orderId = l.ociOrderId || buildDeterministicOrderId(l.id, stage);
       const resolvedAction = resolveStageConversionAction(
         stage,
@@ -992,7 +911,9 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json(
     {
-      customerId: CUSTOMER_ID,
+      tenantSlug: tenant.slug,
+      tenantName: tenant.name,
+      customerId,
       storageDir: getStorageDir(),
       missingEnvVars: getMissingGoogleAdsEnvVars(),
       hasApiCredentials: getMissingGoogleAdsEnvVars().length === 0,
@@ -1018,26 +939,30 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const { searchParams } = new URL(request.url);
     const body = await request.json().catch(() => ({}));
+    const clientParam = searchParams.get("client") || body?.clientSlug || body?.client || null;
+    const tenant = resolveRequestTenant(clientParam);
 
-    // 1) Salvar mapeamento explícito de Ações de Conversão do Google Ads
+    if (!tenant) {
+      return NextResponse.json({ error: `Cliente "${clientParam}" não encontrado.` }, { status: 404 });
+    }
+
     if (body?.action === "save_action_mapping" && body?.mapping) {
       const clean: ActionMapping = {
         conversa_iniciada: String(body.mapping.conversa_iniciada || "").trim() || undefined,
         orcamento_enviado: String(body.mapping.orcamento_enviado || "").trim() || undefined,
         compra_realizada: String(body.mapping.compra_realizada || "").trim() || undefined,
       };
-      writeActionMapping(clean);
+      writeActionMapping(tenant.slug, clean);
       return NextResponse.json({ success: true, actionMapping: clean });
     }
 
-    // 2) Atualizar apenas diagnóstico oficial Google sem disparar upload
     if (body?.action === "refresh_diagnostics") {
-      const diag = await fetchOrReadOfficialDiagnostics(true);
+      const diag = await fetchOrReadOfficialDiagnostics(tenant, true);
       return NextResponse.json({ success: diag.apiConnected, officialDiagnostics: diag });
     }
 
-    // 3) Ajuste de Conversão (RESTATEMENT / RETRACTION) vinculado ao mesmo orderId
     if (body?.action === "upload_adjustment") {
       const leadId = String(body?.leadId || "").trim();
       const adjustmentType: "RESTATEMENT" | "RETRACTION" =
@@ -1048,7 +973,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ success: false, error: "leadId é obrigatório" }, { status: 400 });
       }
 
-      const leads = readLeads();
+      const leads = readTenantLeads(tenant.slug, tenant);
       const idx = leads.findIndex((l: any) => l.id === leadId);
       if (idx === -1) {
         return NextResponse.json({ success: false, error: "Lead não encontrado" }, { status: 404 });
@@ -1068,8 +993,8 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      const ctxAdj = await resolveWorkingGoogleAdsContext();
-      if (!ctxAdj.ok || !ctxAdj.version || !ctxAdj.accessToken || !ctxAdj.devToken) {
+      const ctxAdj = await resolveWorkingGoogleAdsContext(tenant);
+      if (!ctxAdj.ok || !ctxAdj.version || !ctxAdj.accessToken || !ctxAdj.devToken || !ctxAdj.customerId) {
         return NextResponse.json(
           { success: false, error: ctxAdj.error || "Google Ads API indisponível." },
           { status: 400 }
@@ -1081,8 +1006,8 @@ export async function POST(request: NextRequest) {
         resolveStageConversionAction(
           "compra_realizada",
           ctxAdj.conversionActions,
-          readActionMapping(),
-          readRulesActionNames()
+          readActionMapping(tenant.slug),
+          readRulesActionNames(tenant.slug)
         )?.resourceName;
 
       if (!conversionAction) {
@@ -1113,7 +1038,7 @@ export async function POST(request: NextRequest) {
       if (ctxAdj.loginCustomerId) headers["login-customer-id"] = ctxAdj.loginCustomerId;
 
       const adjRes = await fetch(
-        `https://googleads.googleapis.com/${ctxAdj.version}/customers/${CUSTOMER_ID}:uploadConversionAdjustments`,
+        `https://googleads.googleapis.com/${ctxAdj.version}/customers/${ctxAdj.customerId}:uploadConversionAdjustments`,
         {
           method: "POST",
           headers,
@@ -1158,7 +1083,7 @@ export async function POST(request: NextRequest) {
       }
       leads[idx].pendingConversionAdjustment = null;
       leads[idx].updatedAt = new Date().toISOString();
-      writeLeads(leads);
+      writeTenantLeads(tenant.slug, leads);
 
       return NextResponse.json({
         success: true,
@@ -1172,10 +1097,9 @@ export async function POST(request: NextRequest) {
 
     const mode: "retry_failed" | "auto" = body?.mode === "retry_failed" ? "retry_failed" : "auto";
     const targetId: string | undefined = body?.id ? String(body.id) : undefined;
-    // OBS: Por regra absoluta anti-duplicidade, mesmo se force=true vier de legado, eventos "sent" NUNCA são reenviados!
 
-    const ctx = await resolveWorkingGoogleAdsContext();
-    if (!ctx.ok || !ctx.version || !ctx.accessToken || !ctx.devToken) {
+    const ctx = await resolveWorkingGoogleAdsContext(tenant);
+    if (!ctx.ok || !ctx.version || !ctx.accessToken || !ctx.devToken || !ctx.customerId) {
       return NextResponse.json(
         {
           success: false,
@@ -1189,10 +1113,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const leads = readLeads();
-    const sentIndex = readSentIndex();
-    const actionMapping = readActionMapping();
-    const ruleNames = readRulesActionNames();
+    const leads = readTenantLeads(tenant.slug, tenant);
+    const sentIndex = readSentIndex(tenant.slug);
+    const actionMapping = readActionMapping(tenant.slug);
+    const ruleNames = readRulesActionNames(tenant.slug);
     const now = Date.now();
 
     interface Candidate {
@@ -1225,27 +1149,22 @@ export async function POST(request: NextRequest) {
       const stage = getLeadStage(l);
       const stageKey = buildStageKey(l.id, stage);
 
-      // TRAVA ABSOLUTA DE IDEMPOTÊNCIA: nunca reenvia evento que já está "sent"
       if (isStageAlreadySent(l, stage, sentIndex)) {
         skippedSentCount += 1;
         continue;
       }
 
-      // Se modo retry_failed: só reprocessa falhas reais
       if (mode === "retry_failed" && l.status !== "failed") {
         continue;
       }
 
-      // Nunca envia clique abandonado que nunca mandou mensagem no WhatsApp
-      if (isWaitingWhatsApp(l) && l.status !== "failed") {
+      if (isWaitingWhatsApp(tenant, l) && l.status !== "failed") {
         continue;
       }
 
       const occurredTime = new Date(l.occurredAt || l.firstMessageAt || now).getTime();
       const isMatured = now - occurredTime >= MATURATION_TIME_MS;
 
-      // Para fila normal: exige janela de maturação de 4h
-      // Para falhas explícitas: respeita também se não tiver sido marcado antes, exceto retry manual de erro de configuração
       if (mode === "auto" && !isMatured && l.status !== "failed") {
         continue;
       }
@@ -1266,7 +1185,6 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
-      // Timestamp do evento nunca menor que o momento do clique (occurredAt)
       const stageRawTime =
         stage === "compra_realizada"
           ? l.purchasedAt || l.updatedAt || l.occurredAt
@@ -1283,10 +1201,9 @@ export async function POST(request: NextRequest) {
             ? 1
             : 0;
 
-      // Enhanced Conversions for Leads (SHA-256 E.164 HEX): somente com GCLID (regra oficial Google)
       let hashedPhoneHex: string | null = null;
       if (clickId.kind === "gclid") {
-        const e164 = normalizePhoneE164(l.leadPhone);
+        const e164 = normalizePhoneE164(tenant, l.leadPhone);
         if (e164) {
           hashedPhoneHex = hashPhoneSha256(e164);
         }
@@ -1313,7 +1230,6 @@ export async function POST(request: NextRequest) {
     const results: any[] = [...preCheckErrors];
 
     if (candidates.length > 0) {
-      // Monta destinos únicos por Conversion Action ID usando referência para rotear cada evento
       const destinationsMap = new Map<string, Record<string, any>>();
       for (const c of candidates) {
         const ref = `dest_${c.conversionAction.id}`;
@@ -1322,7 +1238,7 @@ export async function POST(request: NextRequest) {
             reference: ref,
             operatingAccount: {
               accountType: "GOOGLE_ADS",
-              accountId: CUSTOMER_ID,
+              accountId: ctx.customerId,
             },
             productDestinationId: String(c.conversionAction.id),
           };
@@ -1452,12 +1368,14 @@ export async function POST(request: NextRequest) {
     }
 
     if (leadsMutated) {
-      writeLeads(leads);
-      writeSentIndex(sentIndex);
+      writeTenantLeads(tenant.slug, leads);
+      writeSentIndex(tenant.slug, sentIndex);
     }
 
     return NextResponse.json({
       success: failedCount === 0,
+      tenantSlug: tenant.slug,
+      customerId: ctx.customerId,
       mode,
       apiVersionUsed: ctx.version,
       uploadedCount,
