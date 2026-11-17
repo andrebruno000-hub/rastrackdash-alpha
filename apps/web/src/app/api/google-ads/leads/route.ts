@@ -40,12 +40,24 @@ interface UazapiStoredConfig {
   updatedAt?: string;
 }
 
+interface UazapiInstanceStatusMeta {
+  name: string;
+  connected: boolean | null;
+  state: string;
+  phone?: string;
+  checkedMessages?: number;
+  recovered?: number;
+  updated?: number;
+  error?: string | null;
+}
+
 interface UazapiSyncMeta {
   lastSyncAt?: string;
   lastError?: string | null;
   recoveredCount: number;
   updatedCount: number;
   checkedMessagesCount: number;
+  instanceStatuses?: UazapiInstanceStatusMeta[];
 }
 
 const DEFAULT_RULES: ConversionRules = {
@@ -164,6 +176,51 @@ function isAttendantPhone(phone: string): boolean {
   return ATTENDANT_PHONES.some(
     (att) => p === att || (p.length >= 8 && att.length >= 8 && p.slice(-8) === att.slice(-8))
   );
+}
+
+function extractCleanPhoneFromCandidates(candidates: unknown[]): string {
+  const strings = candidates
+    .map((c) => String(c || "").trim())
+    .filter(Boolean);
+
+  for (const s of strings) {
+    if (s.includes("@g.us") || s.includes("status@broadcast") || s.includes("@lid")) continue;
+    const digits = s.replace(/\D/g, "");
+    if (digits.length >= 10 && digits.length <= 15) return digits;
+  }
+
+  for (const s of strings) {
+    if (s.includes("@g.us") || s.includes("status@broadcast") || s.includes("@lid")) continue;
+    const digits = s.replace(/\D/g, "");
+    if (digits.length >= 8) return digits;
+  }
+
+  return "";
+}
+
+function normalizeUazapiBaseUrl(rawUrl: string): string {
+  let clean = String(rawUrl || "").trim().replace(/\/+$/, "");
+  if (!clean) return "";
+  if (!/^https?:\/\//i.test(clean)) {
+    clean = `https://${clean}`;
+  }
+  return clean.replace(/\/+$/, "");
+}
+
+function parseUazapiTimestampMs(msg: any): number {
+  const raw = msg?.messageTimestamp ?? msg?.Timestamp ?? msg?.timestamp ?? msg?.t ?? msg?.createdAt ?? msg?.date ?? 0;
+  if (typeof raw === "number" && !isNaN(raw) && raw > 0) {
+    return raw > 1e12 ? raw : raw * 1000;
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    const asNum = Number(raw.trim());
+    if (!isNaN(asNum) && asNum > 0) {
+      return asNum > 1e12 ? asNum : asNum * 1000;
+    }
+    const parsed = Date.parse(raw.trim());
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return 0;
 }
 
 function readEntitiesMap(): Record<string, string> {
@@ -378,7 +435,7 @@ function readResolvedUazapiConfig(): {
 } {
   const stored = readStoredUazapiConfig();
   const envBase = (process.env.GOOGLE_ADS_UAZAPI_BASE_URL || process.env.UAZAPI_BASE_URL || "").trim();
-  const baseUrl = (envBase || stored.baseUrl || "").trim().replace(/\/+$/, "");
+  const baseUrl = normalizeUazapiBaseUrl(envBase || stored.baseUrl || "");
 
   const envJosi = (process.env.GOOGLE_ADS_UAZAPI_TOKEN_JOSI || process.env.UAZAPI_TOKEN_JOSI || "").trim();
   const envSergio = (process.env.GOOGLE_ADS_UAZAPI_TOKEN_SERGIO || process.env.UAZAPI_TOKEN_SERGIO || "").trim();
@@ -443,6 +500,8 @@ function getUazapiPublicStatus() {
     lastError: meta.lastError || null,
     recoveredCount: meta.recoveredCount || 0,
     updatedCount: meta.updatedCount || 0,
+    checkedMessagesCount: meta.checkedMessagesCount || 0,
+    instanceStatuses: Array.isArray(meta.instanceStatuses) ? meta.instanceStatuses : [],
   };
 }
 
@@ -510,7 +569,57 @@ function matchDynamicPhrase(messageText: string, phrases: string[]): string | nu
   return null;
 }
 
-async function fetchUazapiRecentMessages(baseUrl: string, token: string): Promise<{
+async function checkUazapiInstanceStatus(
+  baseUrl: string,
+  name: string,
+  token: string
+): Promise<UazapiInstanceStatusMeta> {
+  try {
+    const res = await fetch(`${baseUrl}/instance/status`, {
+      method: "GET",
+      headers: { token },
+      signal: AbortSignal.timeout(4000),
+    });
+
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const rawStatus = String(
+        data?.instance?.status || data?.status?.state || data?.status || data?.state || ""
+      ).toLowerCase();
+      const connectedFlag =
+        data?.status?.connected ??
+        data?.connected ??
+        data?.status?.loggedIn ??
+        data?.loggedIn ??
+        (rawStatus === "open" || rawStatus === "connected" ? true : rawStatus === "close" || rawStatus === "disconnected" ? false : null);
+      const phone = String(
+        data?.instance?.owner || data?.instance?.phone || data?.owner || data?.status?.jid || ""
+      ).replace(/\D/g, "");
+
+      return {
+        name,
+        connected: connectedFlag === null ? null : Boolean(connectedFlag),
+        state: connectedFlag === true ? "Conectada" : connectedFlag === false ? "Desconectada" : rawStatus || "Desconhecido",
+        phone: phone || undefined,
+        error: null,
+      };
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      return { name, connected: false, state: "Token inválido", error: `HTTP ${res.status}` };
+    }
+  } catch (err: any) {
+    return { name, connected: null, state: "Erro de rede", error: err?.message || "Falha de conexão" };
+  }
+
+  return { name, connected: null, state: "Sem status", error: null };
+}
+
+async function fetchUazapiRecentMessages(
+  baseUrl: string,
+  token: string,
+  deep = false
+): Promise<{
   ok: boolean;
   messages: any[];
   error?: string;
@@ -523,60 +632,101 @@ async function fetchUazapiRecentMessages(baseUrl: string, token: string): Promis
     return [];
   };
 
-  try {
-    // 1) Tenta buscar mensagens recentes globais via POST /message/find
-    const msgRes = await fetch(`${baseUrl}/message/find`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", token },
-      body: JSON.stringify({ limit: 60 }),
-      signal: AbortSignal.timeout(5000),
-    });
+  const aggregated: any[] = [];
+  const seenKeys = new Set<string>();
+  const addMessages = (list: any[]) => {
+    for (const m of list) {
+      const mid = String(m?.messageid || m?.id || m?.key?.id || "");
+      const dedupKey = mid || `${m?.chatid || m?.wa_chatid || m?._chatId || ""}_${m?.messageTimestamp || ""}_${String(m?.text || m?.conversation || "").slice(0, 24)}`;
+      if (seenKeys.has(dedupKey)) continue;
+      seenKeys.add(dedupKey);
+      aggregated.push(m);
+    }
+  };
 
-    if (msgRes.ok) {
-      const msgPayload = await msgRes.json().catch(() => null);
-      const list = parseList(msgPayload);
-      if (list.length > 0) {
-        return { ok: true, messages: list };
+  let anyEndpointSucceeded = false;
+  let lastError: string | undefined;
+
+  try {
+    // 1) Busca mensagens recentes globais via POST /message/find
+    try {
+      const msgRes = await fetch(`${baseUrl}/message/find`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", token },
+        body: JSON.stringify({ limit: deep ? 150 : 60 }),
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (msgRes.ok) {
+        anyEndpointSucceeded = true;
+        const msgPayload = await msgRes.json().catch(() => null);
+        addMessages(parseList(msgPayload));
+      } else {
+        lastError = `message/find HTTP ${msgRes.status}`;
+      }
+    } catch (err: any) {
+      lastError = err?.message || "Falha em /message/find";
+    }
+
+    // 2) Sempre consulta também /chat/find + histórico por conversa (não depende só dos últimos 60 globais)
+    try {
+      const chatRes = await fetch(`${baseUrl}/chat/find`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", token },
+        body: JSON.stringify({ limit: deep ? 50 : 20 }),
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (chatRes.ok) {
+        anyEndpointSucceeded = true;
+        const chatPayload = await chatRes.json().catch(() => null);
+        const allChats = parseList(chatPayload).filter((chat: any) => {
+          const cid = String(chat?.wa_chatid || chat?.chatid || chat?.id || "");
+          return cid && !cid.includes("@g.us") && !cid.includes("status@broadcast") && chat?.wa_isGroup !== true;
+        });
+
+        const chatsToInspect = allChats.slice(0, deep ? 50 : 15);
+        const batchSize = 5;
+
+        for (let i = 0; i < chatsToInspect.length; i += batchSize) {
+          const batch = chatsToInspect.slice(i, i + batchSize);
+          await Promise.all(
+            batch.map(async (chat: any) => {
+              const chatId = chat?.wa_chatid || chat?.chatid || chat?.id;
+              if (!chatId) return;
+              try {
+                const perChatRes = await fetch(`${baseUrl}/message/find`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", token },
+                  body: JSON.stringify({ wa_chatid: chatId, chatid: chatId, limit: deep ? 80 : 25 }),
+                  signal: AbortSignal.timeout(4000),
+                });
+                if (perChatRes.ok) {
+                  const perChatPayload = await perChatRes.json().catch(() => null);
+                  const msgs = parseList(perChatPayload).map((m) => ({
+                    ...m,
+                    _chatName: chat?.name || chat?.wa_name || m?.pushName || m?.senderName,
+                    _chatId: chatId,
+                    _chatWaChatId: chat?.wa_chatid || undefined,
+                    _chatPhone: chat?.phone || chat?.wa_fastid || undefined,
+                  }));
+                  addMessages(msgs);
+                }
+              } catch {}
+            })
+          );
+        }
+      } else if (!anyEndpointSucceeded) {
+        lastError = `Uazapi HTTP ${chatRes.status}`;
+      }
+    } catch (err: any) {
+      if (!anyEndpointSucceeded) {
+        lastError = err?.message || "Falha de conexão com Uazapi";
       }
     }
 
-    // 2) Fallback: lista chats recentes (/chat/find) e busca histórico dos últimos 15 chats
-    const chatRes = await fetch(`${baseUrl}/chat/find`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", token },
-      body: JSON.stringify({ limit: 20 }),
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (!chatRes.ok) {
-      return { ok: false, messages: [], error: `Uazapi HTTP ${chatRes.status}` };
-    }
-
-    const chatPayload = await chatRes.json().catch(() => null);
-    const chats = parseList(chatPayload).slice(0, 15);
-    const aggregated: any[] = [];
-
-    for (const chat of chats) {
-      const chatId = chat?.wa_chatid || chat?.chatid || chat?.id;
-      if (!chatId || String(chatId).includes("@g.us") || String(chatId).includes("status@broadcast")) continue;
-
-      try {
-        const perChatRes = await fetch(`${baseUrl}/message/find`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", token },
-          body: JSON.stringify({ wa_chatid: chatId, chatid: chatId, limit: 15 }),
-          signal: AbortSignal.timeout(3500),
-        });
-        if (perChatRes.ok) {
-          const perChatPayload = await perChatRes.json().catch(() => null);
-          const msgs = parseList(perChatPayload).map((m) => ({
-            ...m,
-            _chatName: chat?.name || chat?.wa_name || m?.pushName || m?.senderName,
-            _chatId: chatId,
-          }));
-          aggregated.push(...msgs);
-        }
-      } catch {}
+    if (!anyEndpointSucceeded) {
+      return { ok: false, messages: [], error: lastError || "Uazapi indisponível" };
     }
 
     return { ok: true, messages: aggregated };
@@ -610,47 +760,83 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
   let updatedCount = 0;
   let checkedMessagesCount = 0;
   let lastError: string | null = null;
+  const instanceStatuses: UazapiInstanceStatusMeta[] = [];
 
   for (const inst of cfg.instances) {
-    const res = await fetchUazapiRecentMessages(cfg.baseUrl, inst.token);
+    const statusInfo = await checkUazapiInstanceStatus(cfg.baseUrl, inst.name, inst.token);
+    const res = await fetchUazapiRecentMessages(cfg.baseUrl, inst.token, force);
+
+    let instRecovered = 0;
+    let instUpdated = 0;
+    let instChecked = 0;
+
     if (!res.ok) {
-      lastError = `${inst.name}: ${res.error}`;
+      const errText = `${inst.name}: ${res.error}`;
+      lastError = lastError ? `${lastError} | ${errText}` : errText;
+      instanceStatuses.push({
+        ...statusInfo,
+        checkedMessages: 0,
+        recovered: 0,
+        updated: 0,
+        error: res.error || statusInfo.error || null,
+      });
       continue;
     }
 
     // Ordena do mais antigo para o mais recente para preservar a ordem cronológica do funil
     const ordered = [...res.messages].sort((a, b) => {
-      const ta = Number(a?.messageTimestamp || 0);
-      const tb = Number(b?.messageTimestamp || 0);
+      const ta = parseUazapiTimestampMs(a);
+      const tb = parseUazapiTimestampMs(b);
       return ta - tb;
     });
 
     for (const msg of ordered) {
       checkedMessagesCount++;
-      const rawChat = String(msg?.chatid || msg?.wa_chatid || msg?._chatId || msg?.sender || msg?.sender_pn || "");
-      if (!rawChat || rawChat.includes("@g.us") || rawChat.includes("status@broadcast")) continue;
+      instChecked++;
 
-      const cleanPhone = rawChat.replace(/\D/g, "");
+      const rawChatGroupCheck = String(
+        msg?.chatid || msg?.wa_chatid || msg?._chatId || msg?.sender || msg?.sender_pn || ""
+      );
+      if (
+        !rawChatGroupCheck ||
+        rawChatGroupCheck.includes("@g.us") ||
+        rawChatGroupCheck.includes("status@broadcast") ||
+        msg?.isGroup === true
+      ) {
+        continue;
+      }
+
+      const cleanPhone = extractCleanPhoneFromCandidates([
+        msg?.sender_pn,
+        msg?.key?.senderPn,
+        msg?._chatPhone,
+        msg?.wa_chatid,
+        msg?._chatWaChatId,
+        msg?._chatId,
+        msg?.key?.remoteJid,
+        msg?.chatid,
+        msg?.sender,
+        msg?.phone,
+      ]);
       if (!cleanPhone || isAttendantPhone(cleanPhone)) continue;
 
-      const messageId = String(msg?.messageid || msg?.id || "").trim();
+      const messageId = String(msg?.messageid || msg?.id || msg?.key?.id || "").trim();
       if (messageId && processedIds.includes(messageId)) continue;
 
-      const text =
+      const text = String(
         msg?.text ||
-        msg?.conversation ||
-        (typeof msg?.content === "string" ? msg.content : msg?.content?.text) ||
-        "";
-      if (!text) continue;
+          msg?.conversation ||
+          (typeof msg?.content === "string" ? msg.content : msg?.content?.text) ||
+          msg?.extendedTextMessage?.text ||
+          ""
+      );
 
-      const fromMe = Boolean(msg?.fromMe);
-      const tsNum = Number(msg?.messageTimestamp || 0);
-      const msgIso = tsNum
-        ? new Date(tsNum > 1e12 ? tsNum : tsNum * 1000).toISOString()
-        : new Date().toISOString();
+      const fromMe = Boolean(msg?.fromMe ?? msg?.key?.fromMe ?? false);
+      const tsMs = parseUazapiTimestampMs(msg);
+      const msgIso = tsMs > 0 ? new Date(tsMs).toISOString() : new Date().toISOString();
 
       if (!fromMe) {
-        const tracking = extractTrackingTag(text);
+        const tracking = text ? extractTrackingTag(text) : null;
         if (tracking?.gclid) {
           const gclid = tracking.gclid;
           const idx = leads.findIndex(
@@ -671,8 +857,10 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
               if (tracking.keyword) leads[idx].keyword = tracking.keyword;
               if (tracking.campaign) leads[idx].campaign = tracking.campaign;
               if (tracking.adGroup) leads[idx].adGroup = tracking.adGroup;
+              leads[idx].recoveredFromUazapi = true;
               leadsChanged = true;
               updatedCount++;
+              instUpdated++;
             }
           } else {
             leads.unshift({
@@ -694,6 +882,7 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
             });
             leadsChanged = true;
             recoveredCount++;
+            instRecovered++;
 
             recordAuditLog({
               id: `audit_uazapi_rec_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -712,8 +901,77 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
             processedIds.unshift(messageId);
             processedChanged = true;
           }
+        } else if (tsMs > 0) {
+          // Camada 2 na Reconciliação: Atribuição Temporal (janela de 20 min após clique em clique_anuncio)
+          const alreadyLinked = leads.some((existing: any) => isSamePhone(existing.leadPhone, cleanPhone));
+          if (!alreadyLinked) {
+            let bestPendingIdx = -1;
+            let bestDelta = Infinity;
+
+            for (let i = 0; i < leads.length; i++) {
+              const l = leads[i];
+              const isPending =
+                !l.firstMessageAt ||
+                /aguardando/i.test(String(l.leadPhone || "")) ||
+                isAttendantPhone(l.leadPhone);
+              if (!isPending) continue;
+
+              const attendantNorm = normalizeText(l.attendantName || "");
+              const instNorm = normalizeText(inst.name);
+              const sameAttendant =
+                (attendantNorm.includes("josi") && instNorm.includes("josi")) ||
+                (attendantNorm.includes("sergio") && instNorm.includes("sergio")) ||
+                attendantNorm === instNorm;
+              if (!sameAttendant) continue;
+
+              const clickMs = new Date(l.occurredAt || 0).getTime();
+              if (isNaN(clickMs) || clickMs <= 0) continue;
+
+              const delta = tsMs - clickMs;
+              if (delta >= -60 * 1000 && delta <= 30 * 60 * 1000 && Math.abs(delta) < bestDelta) {
+                bestDelta = Math.abs(delta);
+                bestPendingIdx = i;
+              }
+            }
+
+            if (bestPendingIdx !== -1) {
+              const pushName = msg?._chatName || msg?.pushName || msg?.senderName || "";
+              leads[bestPendingIdx].leadPhone = cleanPhone;
+              if (pushName) leads[bestPendingIdx].leadName = pushName;
+              if (
+                leads[bestPendingIdx].stage !== "orcamento_enviado" &&
+                leads[bestPendingIdx].stage !== "compra_realizada"
+              ) {
+                leads[bestPendingIdx].stage = "conversa_iniciada";
+                leads[bestPendingIdx].conversionType = "conversa_iniciada";
+              }
+              leads[bestPendingIdx].firstMessageAt = msgIso;
+              leads[bestPendingIdx].updatedAt = new Date().toISOString();
+              leads[bestPendingIdx].recoveredFromUazapi = true;
+              leadsChanged = true;
+              updatedCount++;
+              instUpdated++;
+
+              recordAuditLog({
+                id: `audit_uazapi_temp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                leadPhone: cleanPhone,
+                leadName: pushName || "Cliente WhatsApp",
+                action: "conversa_iniciada",
+                detectedPhrase: `Recuperação Uazapi (Janela 20min): "${(text || "Mídia/Áudio").slice(0, 45)}"`,
+                attendant: inst.name,
+                gclid: leads[bestPendingIdx].gclid,
+                timestamp: msgIso,
+                statusOci: leads[bestPendingIdx].status || "queued",
+              });
+
+              if (messageId && !processedIds.includes(messageId)) {
+                processedIds.unshift(messageId);
+                processedChanged = true;
+              }
+            }
+          }
         }
-      } else {
+      } else if (text) {
         // Mensagem do atendente para lead já pertencente ao funil Google Ads
         const leadIdx = leads.findIndex((l: any) => isSamePhone(l.leadPhone, cleanPhone));
         if (leadIdx !== -1) {
@@ -722,6 +980,7 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
 
           if (matchedPurchase && leads[leadIdx].stage !== "compra_realizada") {
             const val = extractMonetaryValue(text);
+            if (!leads[leadIdx].firstMessageAt) leads[leadIdx].firstMessageAt = msgIso;
             leads[leadIdx].stage = "compra_realizada";
             leads[leadIdx].conversionType = "compra_realizada";
             if (val !== null) leads[leadIdx].value = val;
@@ -731,6 +990,7 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
             leads[leadIdx].updatedAt = new Date().toISOString();
             leadsChanged = true;
             updatedCount++;
+            instUpdated++;
 
             recordAuditLog({
               id: `audit_uazapi_buy_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -749,6 +1009,7 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
             leads[leadIdx].stage !== "orcamento_enviado" &&
             leads[leadIdx].stage !== "compra_realizada"
           ) {
+            if (!leads[leadIdx].firstMessageAt) leads[leadIdx].firstMessageAt = msgIso;
             leads[leadIdx].stage = "orcamento_enviado";
             leads[leadIdx].conversionType = "orcamento_enviado";
             leads[leadIdx].quotedAt = msgIso;
@@ -757,6 +1018,7 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
             leads[leadIdx].updatedAt = new Date().toISOString();
             leadsChanged = true;
             updatedCount++;
+            instUpdated++;
 
             recordAuditLog({
               id: `audit_uazapi_quote_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -778,6 +1040,14 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
         }
       }
     }
+
+    instanceStatuses.push({
+      ...statusInfo,
+      checkedMessages: instChecked,
+      recovered: instRecovered,
+      updated: instUpdated,
+      error: statusInfo.error || null,
+    });
   }
 
   if (leadsChanged) writeLeads(leads);
@@ -789,6 +1059,7 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
     recoveredCount: (prevMeta.recoveredCount || 0) + recoveredCount,
     updatedCount: (prevMeta.updatedCount || 0) + updatedCount,
     checkedMessagesCount,
+    instanceStatuses,
   };
   writeUazapiSyncMeta(meta);
   return { ...meta, configured: true };
@@ -1461,9 +1732,7 @@ export async function POST(request: NextRequest) {
 
     if (body.type === "save_uazapi_config") {
       const prev = readStoredUazapiConfig();
-      const baseUrl = String(body.baseUrl || prev.baseUrl || "")
-        .trim()
-        .replace(/\/+$/, "");
+      const baseUrl = normalizeUazapiBaseUrl(String(body.baseUrl || prev.baseUrl || ""));
 
       const nextJosi =
         body.clearJosiToken === true
