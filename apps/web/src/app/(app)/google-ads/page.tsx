@@ -38,6 +38,7 @@ import {
   ArrowUpDown,
   ChevronDown,
   ChevronUp,
+  LayoutDashboard,
 } from "lucide-react";
 
 interface Attendant {
@@ -89,8 +90,89 @@ interface ConversionRules {
   };
 }
 
+type DatePreset =
+  | "all"
+  | "today"
+  | "yesterday"
+  | "day_before_yesterday"
+  | "7d"
+  | "14d"
+  | "30d"
+  | "this_month";
+
+function toBrDateKey(input?: string | Date | null): string {
+  if (!input) return "";
+  const date = input instanceof Date ? input : new Date(input);
+  if (isNaN(date.getTime())) {
+    return typeof input === "string" && /^\d{4}-\d{2}-\d{2}/.test(input) ? input.slice(0, 10) : "";
+  }
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Sao_Paulo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(date);
+  } catch {
+    return date.toISOString().slice(0, 10);
+  }
+}
+
+function formatBrDateTime(input?: string | null): string {
+  if (!input) return "—";
+  const date = new Date(input);
+  if (isNaN(date.getTime())) return String(input);
+  try {
+    const parts = new Intl.DateTimeFormat("pt-BR", {
+      timeZone: "America/Sao_Paulo",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(date);
+    const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+    return `${map.day}/${map.month}/${map.year} ${map.hour}:${map.minute}`;
+  } catch {
+    return date.toLocaleString("pt-BR");
+  }
+}
+
+function formatBrDateShort(dateKey: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return dateKey;
+  const [, m, d] = dateKey.split("-");
+  return `${d}/${m}`;
+}
+
+function getBrDateRangeForPreset(preset: DatePreset): { start: string; end: string } {
+  if (preset === "all") return { start: "", end: "" };
+  const todayKey = toBrDateKey(new Date());
+  const [y, m, d] = todayKey.split("-").map(Number);
+  const baseUtc = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  const shiftDays = (days: number) => {
+    const dt = new Date(baseUtc.getTime() + days * 24 * 60 * 60 * 1000);
+    return dt.toISOString().slice(0, 10);
+  };
+
+  if (preset === "today") return { start: todayKey, end: todayKey };
+  if (preset === "yesterday") {
+    const yest = shiftDays(-1);
+    return { start: yest, end: yest };
+  }
+  if (preset === "day_before_yesterday") {
+    const dby = shiftDays(-2);
+    return { start: dby, end: dby };
+  }
+  if (preset === "7d") return { start: shiftDays(-6), end: todayKey };
+  if (preset === "14d") return { start: shiftDays(-13), end: todayKey };
+  if (preset === "30d") return { start: shiftDays(-29), end: todayKey };
+  if (preset === "this_month") return { start: `${todayKey.slice(0, 7)}-01`, end: todayKey };
+  return { start: "", end: "" };
+}
+
 export default function GoogleAdsPage() {
-  const [currentTab, setCurrentTab] = useState<"leads" | "funil" | "relatorios" | "roleta" | "conversoes" | "bi">("leads");
+  const [currentTab, setCurrentTab] = useState<"overview" | "leads" | "funil" | "relatorios" | "roleta" | "conversoes" | "bi">("overview");
 
   // Roleta de Atendentes
   const [attendants, setAttendants] = useState<Attendant[]>(() => {
@@ -221,13 +303,16 @@ export default function GoogleAdsPage() {
 
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Filtros Globais da Aba 1
+  // Filtros Globais da Aba 1 (com filtro de datas padrão brasileiro igual ao Meta Ads)
   const [filterKeyword, setFilterKeyword] = useState("");
   const [filterAttendant, setFilterAttendant] = useState("all");
   const [filterStage, setFilterStage] = useState("all");
+  const [leadsDatePreset, setLeadsDatePreset] = useState<DatePreset>("all");
+  const [leadsStartDate, setLeadsStartDate] = useState("");
+  const [leadsEndDate, setLeadsEndDate] = useState("");
 
-  // FILTROS CUSTOMIZÁVEIS DA ABA DE RELATÓRIOS
-  const [reportDatePreset, setReportDatePreset] = useState<"today" | "yesterday" | "7d" | "30d" | "this_month" | "all">("all");
+  // FILTROS CUSTOMIZÁVEIS DA ABA VISÃO GERAL & RELATÓRIOS
+  const [reportDatePreset, setReportDatePreset] = useState<DatePreset>("all");
   const [reportStartDate, setReportStartDate] = useState("");
   const [reportEndDate, setReportEndDate] = useState("");
   const [reportCampaign, setReportCampaign] = useState("all");
@@ -567,38 +652,20 @@ export default function GoogleAdsPage() {
     return () => clearInterval(ociInterval);
   }, []);
 
-  // Manipulador de Presets de Data
-  const handleDatePresetChange = (preset: "today" | "yesterday" | "7d" | "30d" | "this_month" | "all") => {
+  // Manipulador de Presets de Data (Visão Geral & Relatórios — horário de Brasília)
+  const handleDatePresetChange = (preset: DatePreset) => {
     setReportDatePreset(preset);
-    const today = new Date();
-    const formatDate = (d: Date) => d.toISOString().split("T")[0];
+    const range = getBrDateRangeForPreset(preset);
+    setReportStartDate(range.start);
+    setReportEndDate(range.end);
+  };
 
-    if (preset === "today") {
-      setReportStartDate(formatDate(today));
-      setReportEndDate(formatDate(today));
-    } else if (preset === "yesterday") {
-      const yest = new Date(today);
-      yest.setDate(yest.getDate() - 1);
-      setReportStartDate(formatDate(yest));
-      setReportEndDate(formatDate(yest));
-    } else if (preset === "7d") {
-      const past7 = new Date(today);
-      past7.setDate(past7.getDate() - 7);
-      setReportStartDate(formatDate(past7));
-      setReportEndDate(formatDate(today));
-    } else if (preset === "30d") {
-      const past30 = new Date(today);
-      past30.setDate(past30.getDate() - 30);
-      setReportStartDate(formatDate(past30));
-      setReportEndDate(formatDate(today));
-    } else if (preset === "this_month") {
-      const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-      setReportStartDate(formatDate(startOfMonth));
-      setReportEndDate(formatDate(today));
-    } else if (preset === "all") {
-      setReportStartDate("");
-      setReportEndDate("");
-    }
+  // Manipulador de Presets de Data da Aba 1 (Leads)
+  const handleLeadsDatePresetChange = (preset: DatePreset) => {
+    setLeadsDatePreset(preset);
+    const range = getBrDateRangeForPreset(preset);
+    setLeadsStartDate(range.start);
+    setLeadsEndDate(range.end);
   };
 
   useEffect(() => {
@@ -808,13 +875,13 @@ export default function GoogleAdsPage() {
     return "conversa_iniciada";
   };
 
-  // Leads filtrados para o Relatório Customizável
+  // Leads filtrados para Visão Geral & Relatório Customizável (calendário BR)
   const filteredReportLeads = useMemo(() => {
     return realLeadEvents.filter((event) => {
-      const eventDate = (event.occurredAt || event.firstMessageAt || "").slice(0, 10);
+      const eventDate = toBrDateKey(event.occurredAt || event.firstMessageAt);
       const matchesDate =
-        (!reportStartDate || eventDate >= reportStartDate) &&
-        (!reportEndDate || eventDate <= reportEndDate);
+        (!reportStartDate || (eventDate && eventDate >= reportStartDate)) &&
+        (!reportEndDate || (eventDate && eventDate <= reportEndDate));
 
       const matchesCampaign =
         reportCampaign === "all" || event.campaign === reportCampaign || event.campaignName === reportCampaign;
@@ -828,11 +895,12 @@ export default function GoogleAdsPage() {
     });
   }, [realLeadEvents, reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant, reportStage]);
 
-  // Métricas Consolidadas do Relatório no Período (separando cliques de conversas reais)
+  // Métricas Consolidadas do Relatório & Visão Geral no Período (separando cliques de conversas reais)
   const reportMetrics = useMemo(() => {
     const totalClicksCount = filteredReportLeads.length;
     const clicksOnlyCount = filteredReportLeads.filter((l) => getEffectiveStage(l) === "clique_anuncio").length;
     const totalLeadsCount = filteredReportLeads.filter((l) => getEffectiveStage(l) !== "clique_anuncio").length;
+    const clickToChatRate = totalClicksCount > 0 ? Math.round((totalLeadsCount / totalClicksCount) * 100) : 0;
     const quotesCount = filteredReportLeads.filter((l) => {
       const st = getEffectiveStage(l);
       return st === "orcamento_enviado" || st === "compra_realizada";
@@ -852,6 +920,7 @@ export default function GoogleAdsPage() {
       totalClicksCount,
       clicksOnlyCount,
       totalLeadsCount,
+      clickToChatRate,
       quotesCount,
       salesCount,
       totalRevenue,
@@ -864,11 +933,113 @@ export default function GoogleAdsPage() {
     };
   }, [filteredReportLeads, reportsData.totalCost]);
 
+  // Dados agregados da Visão Geral (gráfico diário, funil, campanhas e atendentes no período)
+  const overviewStats = useMemo(() => {
+    const quoteFromChatsRate =
+      reportMetrics.totalLeadsCount > 0 ? Math.round((reportMetrics.quotesCount / reportMetrics.totalLeadsCount) * 100) : 0;
+    const salesFromQuotesRate =
+      reportMetrics.quotesCount > 0 ? Math.round((reportMetrics.salesCount / reportMetrics.quotesCount) * 100) : 0;
+
+    // Evolução diária (até 7 dias mais recentes com movimento ou últimos 7 dias BR)
+    const dayMap = new Map<string, { dateKey: string; label: string; clicks: number; realChats: number; sales: number }>();
+    filteredReportLeads.forEach((l) => {
+      const dk = toBrDateKey(l.occurredAt || l.firstMessageAt);
+      if (!dk) return;
+      if (!dayMap.has(dk)) {
+        dayMap.set(dk, { dateKey: dk, label: formatBrDateShort(dk), clicks: 0, realChats: 0, sales: 0 });
+      }
+      const entry = dayMap.get(dk)!;
+      entry.clicks += 1;
+      const st = getEffectiveStage(l);
+      if (st !== "clique_anuncio") entry.realChats += 1;
+      if (st === "compra_realizada") entry.sales += 1;
+    });
+    const dailySeries = Array.from(dayMap.values())
+      .sort((a, b) => a.dateKey.localeCompare(b.dateKey))
+      .slice(-7);
+    const maxDailyClicks = Math.max(1, ...dailySeries.map((d) => d.clicks));
+
+    // Campanhas consolidadas no período
+    const campMap = new Map<
+      string,
+      {
+        campaign: string;
+        cost: number;
+        adButtonClicks: number;
+        whatsappLeads: number;
+        whatsappQuotes: number;
+        whatsappSalesCount: number;
+        whatsappRevenue: number;
+      }
+    >();
+    (reportsData.reports || []).forEach((r: any) => {
+      const name = String(r.campaign || "Campanha Pesquisa");
+      if (!campMap.has(name)) {
+        campMap.set(name, {
+          campaign: name,
+          cost: 0,
+          adButtonClicks: 0,
+          whatsappLeads: 0,
+          whatsappQuotes: 0,
+          whatsappSalesCount: 0,
+          whatsappRevenue: 0,
+        });
+      }
+      const c = campMap.get(name)!;
+      c.cost += Number(r.cost || 0);
+      c.adButtonClicks += Number(r.adButtonClicks || 0);
+      c.whatsappLeads += Number(r.whatsappLeads || 0);
+      c.whatsappQuotes += Number(r.whatsappQuotes || 0);
+      c.whatsappSalesCount += Number(r.whatsappSalesCount || 0);
+      c.whatsappRevenue += Number(r.whatsappRevenue || 0);
+    });
+    const campaignSummary = Array.from(campMap.values())
+      .map((c) => ({
+        ...c,
+        cpl: c.whatsappLeads > 0 && c.cost > 0 ? Number((c.cost / c.whatsappLeads).toFixed(2)) : 0,
+        roas: c.cost > 0 ? Number((c.whatsappRevenue / c.cost).toFixed(2)) : c.whatsappRevenue > 0 ? 99 : 0,
+      }))
+      .sort((a, b) => b.cost - a.cost || b.whatsappLeads - a.whatsappLeads);
+
+    // Resumo por Atendente no período
+    const buildAttendantPeriod = (matchFn: (name: string) => boolean, displayName: string) => {
+      const list = filteredReportLeads.filter((l) => matchFn(String(l.attendantName || "").toLowerCase()));
+      const clicks = list.length;
+      const chats = list.filter((l) => getEffectiveStage(l) !== "clique_anuncio").length;
+      const quotes = list.filter((l) => {
+        const st = getEffectiveStage(l);
+        return st === "orcamento_enviado" || st === "compra_realizada";
+      }).length;
+      const sales = list.filter((l) => getEffectiveStage(l) === "compra_realizada").length;
+      const chatRate = clicks > 0 ? Math.round((chats / clicks) * 100) : 0;
+      return { name: displayName, clicks, chats, quotes, sales, chatRate };
+    };
+    const attendantsPeriod = [
+      buildAttendantPeriod((n) => n.includes("josi"), "Josi"),
+      buildAttendantPeriod((n) => n.includes("sergio") || n.includes("sérgio"), "Sérgio"),
+    ];
+
+    const recentConversations = [
+      ...filteredReportLeads.filter((l) => getEffectiveStage(l) !== "clique_anuncio"),
+      ...filteredReportLeads.filter((l) => getEffectiveStage(l) === "clique_anuncio"),
+    ].slice(0, 6);
+
+    return {
+      quoteFromChatsRate,
+      salesFromQuotesRate,
+      dailySeries,
+      maxDailyClicks,
+      campaignSummary,
+      attendantsPeriod,
+      recentConversations,
+    };
+  }, [filteredReportLeads, reportsData.reports, reportMetrics]);
+
   // Exportar Relatório para CSV
   const handleExportCSV = () => {
     const headers = ["Data", "Nome", "Telefone", "Campanha", "Conjunto", "Palavra-Chave", "Atendente", "Etapa", "Valor R$"];
     const rows = filteredReportLeads.map((l) => [
-      l.occurredAt,
+      formatBrDateTime(l.occurredAt),
       `"${l.leadName || "Cliente"}"`,
       l.leadPhone,
       `"${l.campaignName || l.campaign}"`,
@@ -883,7 +1054,7 @@ export default function GoogleAdsPage() {
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `relatorio_google_ads_${new Date().toISOString().slice(0, 10)}.csv`);
+    link.setAttribute("download", `relatorio_google_ads_${toBrDateKey(new Date())}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -907,6 +1078,11 @@ export default function GoogleAdsPage() {
 
   const filteredEvents = useMemo(() => {
     return realLeadEvents.filter((event) => {
+      const eventDate = toBrDateKey(event.occurredAt || event.firstMessageAt);
+      const matchesDate =
+        (!leadsStartDate || (eventDate && eventDate >= leadsStartDate)) &&
+        (!leadsEndDate || (eventDate && eventDate <= leadsEndDate));
+
       const term = filterKeyword.toLowerCase().trim();
       const matchesSearch =
         !term ||
@@ -922,9 +1098,16 @@ export default function GoogleAdsPage() {
       const currentLeadStage = getEffectiveStage(event);
       const matchesStage = filterStage === "all" || currentLeadStage === filterStage;
 
-      return matchesSearch && matchesAttendant && matchesStage;
+      return matchesDate && matchesSearch && matchesAttendant && matchesStage;
     });
-  }, [realLeadEvents, filterKeyword, filterAttendant, filterStage]);
+  }, [realLeadEvents, leadsStartDate, leadsEndDate, filterKeyword, filterAttendant, filterStage]);
+
+  const filteredLeadsSummary = useMemo(() => {
+    const total = filteredEvents.length;
+    const clicksOnly = filteredEvents.filter((l) => getEffectiveStage(l) === "clique_anuncio").length;
+    const realChats = total - clicksOnly;
+    return { total, clicksOnly, realChats };
+  }, [filteredEvents]);
 
   const josiStats = useMemo(() => {
     const list = realLeadEvents.filter((l) => l.attendantName.toLowerCase().includes("josi"));
@@ -1305,8 +1488,18 @@ export default function GoogleAdsPage() {
           </Link>
         </div>
 
-        {/* NAVEGAÇÃO ENTRE AS 5 ABAS */}
+        {/* NAVEGAÇÃO ENTRE AS ABAS */}
         <div className="gads-tabs-bar">
+          <button
+            onClick={() => setCurrentTab("overview")}
+            className="gads-tab-btn"
+            style={{
+              background: currentTab === "overview" ? "#2563eb" : "transparent",
+              color: currentTab === "overview" ? "#fff" : "#94a3b8",
+            }}
+          >
+            <LayoutDashboard size={15} /> Visão Geral
+          </button>
           <button
             onClick={() => setCurrentTab("leads")}
             className="gads-tab-btn"
@@ -1467,56 +1660,478 @@ export default function GoogleAdsPage() {
         </div>
       </div>
 
-      {/* CARDS DE MÉTRICAS GLOBAIS (4 ETAPAS DO FUNIL) */}
-      <div className="gads-metrics-grid">
-        <div className="gads-metric-card">
-          <span className="gads-metric-title" style={{ color: "#facc15" }}>
-            1. Cliques no Anúncio <Users size={14} color="#facc15" />
-          </span>
-          <div className="gads-metric-val" style={{ color: "#ffffff" }}>
-            {totalLeads}
+      {/* CARDS DE MÉTRICAS GLOBAIS (ocultos na Visão Geral para evitar repetição) */}
+      {currentTab !== "overview" && (
+        <div className="gads-metrics-grid">
+          <div className="gads-metric-card">
+            <span className="gads-metric-title" style={{ color: "#facc15" }}>
+              1. Cliques no Anúncio <Users size={14} color="#facc15" />
+            </span>
+            <div className="gads-metric-val" style={{ color: "#ffffff" }}>
+              {totalLeads}
+            </div>
+            <span className="gads-metric-sub">
+              {apenasCliques} aguardando msg • {chatStartRate}% iniciou chat
+            </span>
           </div>
-          <span className="gads-metric-sub">
-            {apenasCliques} aguardando msg • {chatStartRate}% iniciou chat
-          </span>
-        </div>
 
-        <div className="gads-metric-card">
-          <span className="gads-metric-title" style={{ color: "#38bdf8" }}>
-            2. Conversas Iniciadas <MessageSquare size={14} color="#38bdf8" />
-          </span>
-          <div className="gads-metric-val" style={{ color: "#38bdf8" }}>
-            {conversasTotais}
+          <div className="gads-metric-card">
+            <span className="gads-metric-title" style={{ color: "#38bdf8" }}>
+              2. Conversas Iniciadas <MessageSquare size={14} color="#38bdf8" />
+            </span>
+            <div className="gads-metric-val" style={{ color: "#38bdf8" }}>
+              {conversasTotais}
+            </div>
+            <span className="gads-metric-sub">
+              {conversasEmAberto} em atendimento (sem orçamento)
+            </span>
           </div>
-          <span className="gads-metric-sub">
-            {conversasEmAberto} em atendimento (sem orçamento)
-          </span>
-        </div>
 
-        <div className="gads-metric-card">
-          <span className="gads-metric-title" style={{ color: "#a855f7" }}>
-            3. Orçamentos Enviados <Award size={14} color="#a855f7" />
-          </span>
-          <div className="gads-metric-val" style={{ color: "#a855f7" }}>
-            {orcamentosTotais}
+          <div className="gads-metric-card">
+            <span className="gads-metric-title" style={{ color: "#a855f7" }}>
+              3. Orçamentos Enviados <Award size={14} color="#a855f7" />
+            </span>
+            <div className="gads-metric-val" style={{ color: "#a855f7" }}>
+              {orcamentosTotais}
+            </div>
+            <span className="gads-metric-sub">
+              {orcamentosEnviados} em aberto • {comprasRealizadas} fechados
+            </span>
           </div>
-          <span className="gads-metric-sub">
-            {orcamentosEnviados} em aberto • {comprasRealizadas} fechados
-          </span>
-        </div>
 
-        <div className="gads-metric-card">
-          <span className="gads-metric-title" style={{ color: "#10b981" }}>
-            4. Vendas / Faturamento <DollarSign size={14} color="#10b981" />
-          </span>
-          <div className="gads-metric-val" style={{ color: "#10b981" }}>
-            {faturamentoTotal > 0
-              ? `R$ ${faturamentoTotal.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
-              : `${comprasRealizadas} Vendas`}
+          <div className="gads-metric-card">
+            <span className="gads-metric-title" style={{ color: "#10b981" }}>
+              4. Vendas / Faturamento <DollarSign size={14} color="#10b981" />
+            </span>
+            <div className="gads-metric-val" style={{ color: "#10b981" }}>
+              {faturamentoTotal > 0
+                ? `R$ ${faturamentoTotal.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
+                : `${comprasRealizadas} Vendas`}
+            </div>
+            <span className="gads-metric-sub">{comprasRealizadas} venda(s) confirmada(s)</span>
           </div>
-          <span className="gads-metric-sub">{comprasRealizadas} venda(s) confirmada(s)</span>
         </div>
-      </div>
+      )}
+
+      {/* =========================================================================
+          ABA 0: VISÃO GERAL DO NEGÓCIO (ESPELHADA NO META ADS)
+         ========================================================================= */}
+      {currentTab === "overview" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+          {/* Banner Superior com Seletor de Período */}
+          <div className="gads-panel" style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px" }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                  <h2 style={{ fontSize: "18px", fontWeight: 700, color: "#ffffff", margin: 0 }}>
+                    Visão Geral do Negócio • Google Ads
+                  </h2>
+                  <span style={{ fontSize: "11px", background: "rgba(16, 185, 129, 0.14)", color: "#34d399", border: "1px solid rgba(16, 185, 129, 0.3)", padding: "2px 8px", borderRadius: "6px", fontWeight: 700 }}>
+                    Ao Vivo
+                  </span>
+                </div>
+                <p style={{ color: "#64748b", fontSize: "13px", margin: "4px 0 0" }}>
+                  Resumo executivo completo: investimento, cliques no WhatsApp, conversas reais, funil de vendas e ROAS.
+                </p>
+              </div>
+
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                <input
+                  type="date"
+                  value={reportStartDate}
+                  onChange={(e) => {
+                    setReportDatePreset("all");
+                    setReportStartDate(e.target.value);
+                  }}
+                  className="gads-select-field"
+                  style={{ padding: "6px 10px", fontSize: "12px", width: "auto" }}
+                  title="Data inicial"
+                />
+                <span style={{ color: "#64748b", fontSize: "12px" }}>até</span>
+                <input
+                  type="date"
+                  value={reportEndDate}
+                  onChange={(e) => {
+                    setReportDatePreset("all");
+                    setReportEndDate(e.target.value);
+                  }}
+                  className="gads-select-field"
+                  style={{ padding: "6px 10px", fontSize: "12px", width: "auto" }}
+                  title="Data final"
+                />
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+              {(
+                [
+                  { id: "all", label: "Todo o Período" },
+                  { id: "today", label: "Hoje" },
+                  { id: "yesterday", label: "Ontem" },
+                  { id: "day_before_yesterday", label: "Anteontem" },
+                  { id: "7d", label: "Últimos 7 dias" },
+                  { id: "14d", label: "Últimos 14 dias" },
+                  { id: "30d", label: "Últimos 30 dias" },
+                  { id: "this_month", label: "Este Mês" },
+                ] as Array<{ id: DatePreset; label: string }>
+              ).map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => handleDatePresetChange(preset.id)}
+                  className={`date-preset-btn ${reportDatePreset === preset.id && (!reportStartDate || preset.id !== "all") ? "active" : ""}`}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 5 KPI Cards Executivos (padrão Meta Ads) */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "12px" }}>
+            <div className="gads-metric-card">
+              <span className="gads-metric-title" style={{ color: "#94a3b8" }}>
+                Investimento Google <DollarSign size={14} color="#94a3b8" />
+              </span>
+              <div className="gads-metric-val" style={{ color: "#ffffff" }}>
+                R$ {reportMetrics.totalCost.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+              </div>
+              <span className="gads-metric-sub">
+                {reportsData.apiConnected ? `Conta ativa (${reportsData.apiVersionUsed || "v25"})` : "Aguardando Google Ads API"}
+              </span>
+            </div>
+
+            <div className="gads-metric-card">
+              <span className="gads-metric-title" style={{ color: "#38bdf8" }}>
+                Conversas Reais <MessageSquare size={14} color="#38bdf8" />
+              </span>
+              <div className="gads-metric-val" style={{ color: "#38bdf8" }}>
+                {reportMetrics.totalLeadsCount}
+              </div>
+              <span className="gads-metric-sub">
+                De {reportMetrics.totalClicksCount} clique(s) no WPP • {reportMetrics.clickToChatRate}% iniciou
+              </span>
+            </div>
+
+            <div className="gads-metric-card">
+              <span className="gads-metric-title" style={{ color: "#facc15" }}>
+                Custo p/ Conversa Real <Target size={14} color="#facc15" />
+              </span>
+              <div className="gads-metric-val" style={{ color: "#ffffff" }}>
+                R$ {reportMetrics.cpl.toFixed(2)}
+              </div>
+              <span className="gads-metric-sub">
+                {reportMetrics.quotesCount} orçamento(s) • {reportMetrics.clicksOnlyCount} só clicou
+              </span>
+            </div>
+
+            <div className="gads-metric-card">
+              <span className="gads-metric-title" style={{ color: "#10b981" }}>
+                Vendas Rastreadas <Award size={14} color="#10b981" />
+              </span>
+              <div className="gads-metric-val" style={{ color: "#10b981" }}>
+                R$ {reportMetrics.totalRevenue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+              </div>
+              <span className="gads-metric-sub">
+                {reportMetrics.salesCount} venda(s) • Conversão {reportMetrics.conversionRate}%
+              </span>
+            </div>
+
+            <div className="gads-metric-card">
+              <span className="gads-metric-title" style={{ color: "#c084fc" }}>
+                ROAS & Lucro Líquido <TrendingUp size={14} color="#c084fc" />
+              </span>
+              <div className="gads-metric-val" style={{ color: reportMetrics.profit >= 0 ? "#34d399" : "#f87171" }}>
+                {reportMetrics.roas}x
+              </div>
+              <span className="gads-metric-sub">
+                Lucro: R$ {reportMetrics.profit.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+              </span>
+            </div>
+          </div>
+
+          {/* Funil Completo do Negócio + Desempenho Diário & Atendentes */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px" }}>
+            {/* Funil do Negócio */}
+            <div className="gads-panel">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
+                <div>
+                  <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#fff", margin: 0 }}>
+                    Funil Real do Negócio (Google Ads → WhatsApp)
+                  </h3>
+                  <p style={{ fontSize: "12px", color: "#64748b", margin: "3px 0 0" }}>
+                    Acompanhamento completo de quem clicou até a venda fechada
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCurrentTab("funil")}
+                  style={{ background: "transparent", border: "none", color: "#38bdf8", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Abrir Kanban →
+                </button>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                {[
+                  {
+                    label: "1. Clicou no WhatsApp",
+                    value: reportMetrics.totalClicksCount,
+                    pct: 100,
+                    sub: "Total de cliques rastreados para o WhatsApp",
+                    color: "#facc15",
+                  },
+                  {
+                    label: "2. Conversas Reais Iniciadas",
+                    value: reportMetrics.totalLeadsCount,
+                    pct: reportMetrics.totalClicksCount > 0 ? Math.round((reportMetrics.totalLeadsCount / reportMetrics.totalClicksCount) * 100) : 0,
+                    sub: `${reportMetrics.clickToChatRate}% dos cliques mandaram mensagem`,
+                    color: "#38bdf8",
+                  },
+                  {
+                    label: "3. Orçamentos Enviados",
+                    value: reportMetrics.quotesCount,
+                    pct: reportMetrics.totalClicksCount > 0 ? Math.round((reportMetrics.quotesCount / reportMetrics.totalClicksCount) * 100) : 0,
+                    sub: `${overviewStats.quoteFromChatsRate}% das conversas reais receberam proposta`,
+                    color: "#c084fc",
+                  },
+                  {
+                    label: "4. Compras Realizadas",
+                    value: reportMetrics.salesCount,
+                    pct: reportMetrics.totalClicksCount > 0 ? Math.round((reportMetrics.salesCount / reportMetrics.totalClicksCount) * 100) : 0,
+                    sub: `${overviewStats.salesFromQuotesRate}% dos orçamentos • R$ ${reportMetrics.totalRevenue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`,
+                    color: "#10b981",
+                  },
+                ].map((step) => (
+                  <div key={step.label} style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "11px 13px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                      <span style={{ fontSize: "13px", fontWeight: 700, color: "#fff" }}>{step.label}</span>
+                      <span style={{ fontSize: "14px", fontWeight: 800, color: step.color }}>{step.value}</span>
+                    </div>
+                    <div style={{ width: "100%", height: "7px", background: "#0f172a", borderRadius: "99px", overflow: "hidden", marginBottom: "5px" }}>
+                      <div style={{ width: `${Math.max(step.value > 0 ? 4 : 0, Math.min(100, step.pct))}%`, height: "100%", background: step.color, borderRadius: "99px", transition: "width 0.3s" }} />
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#94a3b8" }}>{step.sub}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Evolução Diária + Desempenho dos Atendentes */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+              {/* Gráfico Diário */}
+              <div className="gads-panel">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "8px" }}>
+                  <div>
+                    <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#fff", margin: 0 }}>
+                      Desempenho Diário • Cliques vs Conversas Reais
+                    </h3>
+                    <p style={{ fontSize: "12px", color: "#64748b", margin: "2px 0 0" }}>
+                      Comparativo diário no período selecionado (horário de Brasília)
+                    </p>
+                  </div>
+                  <div style={{ display: "flex", gap: "10px", fontSize: "11px", fontWeight: 600 }}>
+                    <span style={{ color: "#facc15" }}>● Clicou WPP</span>
+                    <span style={{ color: "#38bdf8" }}>● Conversa Real</span>
+                  </div>
+                </div>
+
+                {overviewStats.dailySeries.length === 0 ? (
+                  <div style={{ textAlign: "center", padding: "28px 10px", color: "#64748b", fontSize: "12px" }}>
+                    Sem movimentação registrada no período selecionado.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "8px", height: "150px", paddingTop: "16px", borderBottom: "1px solid #1e293b", paddingBottom: "8px" }}>
+                    {overviewStats.dailySeries.map((day) => {
+                      const clickPct = Math.round((day.clicks / overviewStats.maxDailyClicks) * 100);
+                      const chatPct = Math.round((day.realChats / overviewStats.maxDailyClicks) * 100);
+                      return (
+                        <div key={day.dateKey} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%", gap: "6px" }}>
+                          <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: 700 }}>
+                            {day.clicks}/{day.realChats}
+                          </div>
+                          <div style={{ display: "flex", alignItems: "flex-end", gap: "4px", height: "95px", width: "100%", justifyContent: "center" }}>
+                            <div
+                              title={`${day.label}: ${day.clicks} clique(s) no WhatsApp`}
+                              style={{ width: "14px", height: `${Math.max(day.clicks > 0 ? 8 : 0, clickPct)}%`, background: "rgba(250, 204, 21, 0.75)", borderRadius: "4px 4px 0 0" }}
+                            />
+                            <div
+                              title={`${day.label}: ${day.realChats} conversa(s) real(is)`}
+                              style={{ width: "14px", height: `${Math.max(day.realChats > 0 ? 8 : 0, chatPct)}%`, background: "#38bdf8", borderRadius: "4px 4px 0 0" }}
+                            />
+                          </div>
+                          <span style={{ fontSize: "11px", color: "#cbd5e1", fontWeight: 600 }}>{day.label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Atendentes no Período */}
+              <div className="gads-panel">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                  <h3 style={{ fontSize: "14px", fontWeight: 700, color: "#fff", margin: 0 }}>
+                    Atendimento no Período (Josi & Sérgio)
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setCurrentTab("roleta")}
+                    style={{ background: "transparent", border: "none", color: "#38bdf8", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}
+                  >
+                    Ver Roleta →
+                  </button>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "10px" }}>
+                  {overviewStats.attendantsPeriod.map((att) => (
+                    <div key={att.name} style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "10px 12px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                        <strong style={{ color: att.name === "Josi" ? "#f472b6" : "#60a5fa", fontSize: "13px" }}>{att.name}</strong>
+                        <span style={{ fontSize: "11px", color: "#94a3b8", fontWeight: 600 }}>{att.chatRate}% conv.</span>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "4px", fontSize: "11px", color: "#cbd5e1" }}>
+                        <span>Cliques: <strong>{att.clicks}</strong></span>
+                        <span>Conversas: <strong style={{ color: "#38bdf8" }}>{att.chats}</strong></span>
+                        <span>Orçamentos: <strong style={{ color: "#c084fc" }}>{att.quotes}</strong></span>
+                        <span>Vendas: <strong style={{ color: "#34d399" }}>{att.sales}</strong></span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Campanhas Google Ads no Período */}
+          <div className="gads-panel">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "8px" }}>
+              <div>
+                <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#fff", margin: 0 }}>
+                  Campanhas Google Ads no Período
+                </h3>
+                <p style={{ fontSize: "12px", color: "#64748b", margin: "2px 0 0" }}>
+                  Comparativo entre gasto no Google, cliques no botão do WhatsApp, conversas reais e retorno
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCurrentTab("relatorios")}
+                style={{ background: "transparent", border: "none", color: "#38bdf8", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}
+              >
+                Abrir Relatório Completo →
+              </button>
+            </div>
+
+            <div className="gads-table-scroll">
+              <table className="gads-table">
+                <thead>
+                  <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
+                    <th style={{ padding: "8px 10px" }}>Campanha</th>
+                    <th style={{ padding: "8px 10px" }}>Gasto</th>
+                    <th style={{ padding: "8px 10px" }}>Clicou WPP</th>
+                    <th style={{ padding: "8px 10px" }}>Conversas Reais</th>
+                    <th style={{ padding: "8px 10px" }}>CPL Real</th>
+                    <th style={{ padding: "8px 10px" }}>Vendas</th>
+                    <th style={{ padding: "8px 10px" }}>ROAS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {overviewStats.campaignSummary.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} style={{ textAlign: "center", padding: "20px", color: "#64748b" }}>
+                        Nenhuma campanha com dados neste período
+                      </td>
+                    </tr>
+                  ) : (
+                    overviewStats.campaignSummary.map((c) => (
+                      <tr key={c.campaign} style={{ borderBottom: "1px solid #0f172a" }}>
+                        <td style={{ padding: "9px 10px", fontWeight: 600, color: "#fff" }}>{c.campaign}</td>
+                        <td style={{ padding: "9px 10px", color: "#e2e8f0" }}>
+                          R$ {c.cost.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                        </td>
+                        <td style={{ padding: "9px 10px", color: "#facc15", fontWeight: 700 }}>{c.adButtonClicks}</td>
+                        <td style={{ padding: "9px 10px", color: "#38bdf8", fontWeight: 700 }}>{c.whatsappLeads}</td>
+                        <td style={{ padding: "9px 10px", color: "#cbd5e1" }}>
+                          {c.cpl > 0 ? `R$ ${c.cpl.toFixed(2)}` : "—"}
+                        </td>
+                        <td style={{ padding: "9px 10px", color: "#34d399", fontWeight: 700 }}>
+                          {c.whatsappSalesCount} • R$ {c.whatsappRevenue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                        </td>
+                        <td style={{ padding: "9px 10px", color: "#38bdf8", fontWeight: 800 }}>{c.roas}x</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Últimas Conversas Recebidas (Feed padrão Meta Ads) */}
+          <div className="gads-panel">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "8px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <MessageSquare size={16} color="#38bdf8" />
+                <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#fff", margin: 0 }}>
+                  Últimos Leads & Conversas no Período
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCurrentTab("leads")}
+                style={{ background: "transparent", border: "none", color: "#38bdf8", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}
+              >
+                Ver todos os leads ({filteredReportLeads.length}) →
+              </button>
+            </div>
+
+            {overviewStats.recentConversations.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "24px", color: "#64748b", fontSize: "13px" }}>
+                Nenhum lead encontrado neste período.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "12px" }}>
+                {overviewStats.recentConversations.map((lead) => {
+                  const st = getEffectiveStage(lead);
+                  return (
+                    <div key={lead.id} style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "12px", display: "flex", flexDirection: "column", gap: "6px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+                        <strong style={{ color: "#fff", fontSize: "13px" }}>
+                          {lead.leadName || (st === "clique_anuncio" ? "Clicou no WhatsApp" : "Cliente WhatsApp")}
+                        </strong>
+                        <span style={{ fontSize: "11px", color: "#64748b", whiteSpace: "nowrap" }}>
+                          {formatBrDateTime(lead.occurredAt)}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: "12px", color: st === "clique_anuncio" ? "#eab308" : "#94a3b8" }}>
+                        {st === "clique_anuncio" ? "Aguardando 1ª msg no WhatsApp" : lead.leadPhone}
+                      </div>
+                      <div style={{ fontSize: "11px", color: "#38bdf8", fontWeight: 600 }}>
+                        <KeyRound size={11} style={{ display: "inline", marginRight: "4px" }} />
+                        {lead.keyword || "Pesquisa Direta"}
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: "6px", borderTop: "1px solid #1e293b", fontSize: "11px" }}>
+                        <span style={{ color: lead.attendantName.includes("Josi") ? "#f472b6" : "#60a5fa", fontWeight: 700 }}>
+                          {lead.attendantName}
+                        </span>
+                        <span style={{ color: st === "compra_realizada" ? "#34d399" : st === "orcamento_enviado" ? "#c084fc" : st === "conversa_iniciada" ? "#38bdf8" : "#facc15", fontWeight: 700 }}>
+                          {st === "compra_realizada"
+                            ? "4. Compra"
+                            : st === "orcamento_enviado"
+                              ? "3. Orçamento"
+                              : st === "conversa_iniciada"
+                                ? "2. Conversa Real"
+                                : "1. Só Clicou"}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* =========================================================================
           ABA 1: LEADS & PALAVRAS-CHAVE
@@ -1610,6 +2225,88 @@ export default function GoogleAdsPage() {
                   title="Remove os registros com telefones da Josi e do Sérgio criados por acessos diretos"
                 >
                   <Trash2 size={13} /> Limpar Leads com Telefones dos Atendentes
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Filtro por Data na Aba de Leads (padrão Meta Ads) */}
+          <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "12px 14px", marginBottom: "16px", display: "flex", flexDirection: "column", gap: "10px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", fontSize: "12px", fontWeight: 700, color: "#cbd5e1", marginRight: "4px" }}>
+                  <Calendar size={14} color="#38bdf8" /> Período:
+                </span>
+                {(
+                  [
+                    { id: "all", label: "Todo o Período" },
+                    { id: "today", label: "Hoje" },
+                    { id: "yesterday", label: "Ontem" },
+                    { id: "day_before_yesterday", label: "Anteontem" },
+                    { id: "7d", label: "Últimos 7 dias" },
+                    { id: "14d", label: "Últimos 14 dias" },
+                    { id: "30d", label: "Últimos 30 dias" },
+                    { id: "this_month", label: "Este Mês" },
+                  ] as Array<{ id: DatePreset; label: string }>
+                ).map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => handleLeadsDatePresetChange(preset.id)}
+                    className={`date-preset-btn ${leadsDatePreset === preset.id && (!leadsStartDate || preset.id !== "all") ? "active" : ""}`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                <input
+                  type="date"
+                  value={leadsStartDate}
+                  onChange={(e) => {
+                    setLeadsDatePreset("all");
+                    setLeadsStartDate(e.target.value);
+                  }}
+                  className="gads-select-field"
+                  style={{ padding: "5px 8px", fontSize: "12px", width: "auto" }}
+                  title="Data inicial"
+                />
+                <span style={{ color: "#64748b", fontSize: "12px" }}>até</span>
+                <input
+                  type="date"
+                  value={leadsEndDate}
+                  onChange={(e) => {
+                    setLeadsDatePreset("all");
+                    setLeadsEndDate(e.target.value);
+                  }}
+                  className="gads-select-field"
+                  style={{ padding: "5px 8px", fontSize: "12px", width: "auto" }}
+                  title="Data final"
+                />
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px", fontSize: "12px", color: "#94a3b8" }}>
+              <div>
+                Exibindo <strong style={{ color: "#fff" }}>{filteredLeadsSummary.total}</strong> registro(s):{" "}
+                <strong style={{ color: "#facc15" }}>{filteredLeadsSummary.clicksOnly}</strong> só clicou no WhatsApp •{" "}
+                <strong style={{ color: "#38bdf8" }}>{filteredLeadsSummary.realChats}</strong> conversa(s) real(is)
+              </div>
+              {(leadsStartDate || leadsEndDate || filterKeyword || filterAttendant !== "all" || filterStage !== "all") && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLeadsDatePreset("all");
+                    setLeadsStartDate("");
+                    setLeadsEndDate("");
+                    setFilterKeyword("");
+                    setFilterAttendant("all");
+                    setFilterStage("all");
+                  }}
+                  style={{ background: "transparent", border: "none", color: "#38bdf8", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Limpar filtros
                 </button>
               )}
             </div>
@@ -1776,8 +2473,8 @@ export default function GoogleAdsPage() {
                           )}
                         </td>
 
-                        <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
-                          {event.occurredAt}
+                        <td style={{ padding: "10px 12px", color: "#94a3b8", whiteSpace: "nowrap" }} title={event.occurredAt}>
+                          {formatBrDateTime(event.occurredAt)}
                         </td>
                         <td style={{ padding: "10px 12px", textAlign: "right" }}>
                           <button
@@ -2124,12 +2821,12 @@ export default function GoogleAdsPage() {
 
           {/* PAINEL DE FILTROS AVANÇADOS */}
           <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "16px", marginBottom: "24px" }}>
-            {/* Presets Rápidos de Data */}
+            {/* Presets Rápidos de Data (padrão Meta Ads) */}
             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "16px" }}>
               <button
                 type="button"
                 onClick={() => handleDatePresetChange("all")}
-                className={`date-preset-btn ${reportDatePreset === "all" ? "active" : ""}`}
+                className={`date-preset-btn ${reportDatePreset === "all" && !reportStartDate ? "active" : ""}`}
               >
                 Todo o Período
               </button>
@@ -2149,10 +2846,24 @@ export default function GoogleAdsPage() {
               </button>
               <button
                 type="button"
+                onClick={() => handleDatePresetChange("day_before_yesterday")}
+                className={`date-preset-btn ${reportDatePreset === "day_before_yesterday" ? "active" : ""}`}
+              >
+                Anteontem
+              </button>
+              <button
+                type="button"
                 onClick={() => handleDatePresetChange("7d")}
                 className={`date-preset-btn ${reportDatePreset === "7d" ? "active" : ""}`}
               >
                 Últimos 7 dias
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDatePresetChange("14d")}
+                className={`date-preset-btn ${reportDatePreset === "14d" ? "active" : ""}`}
+              >
+                Últimos 14 dias
               </button>
               <button
                 type="button"
@@ -2290,13 +3001,23 @@ export default function GoogleAdsPage() {
               </small>
             </div>
 
+            <div style={{ background: "#090f20", border: "1px solid rgba(250, 204, 21, 0.35)", borderRadius: "10px", padding: "14px" }}>
+              <span style={{ fontSize: "11px", color: "#facc15", fontWeight: 700, textTransform: "uppercase" }}>Clicou no WhatsApp</span>
+              <div style={{ fontSize: "22px", fontWeight: 800, color: "#facc15", marginTop: "4px" }}>
+                {reportMetrics.totalClicksCount}
+              </div>
+              <small style={{ color: "#94a3b8", fontSize: "11px" }}>
+                {reportMetrics.clickToChatRate}% iniciou conversa • {reportMetrics.clicksOnlyCount} sem msg
+              </small>
+            </div>
+
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px" }}>
               <span style={{ fontSize: "11px", color: "#38bdf8", fontWeight: 700, textTransform: "uppercase" }}>Conversas Reais</span>
               <div style={{ fontSize: "22px", fontWeight: 800, color: "#38bdf8", marginTop: "4px" }}>
                 {reportMetrics.totalLeadsCount}
               </div>
               <small style={{ color: "#64748b", fontSize: "11px" }}>
-                CPL: R$ {reportMetrics.cpl.toFixed(2)} • {reportMetrics.clicksOnlyCount} só clicou
+                de {reportMetrics.totalClicksCount} cliques • CPL: R$ {reportMetrics.cpl.toFixed(2)}
               </small>
             </div>
 
@@ -2382,8 +3103,10 @@ export default function GoogleAdsPage() {
                           <small>{item.ctr ?? 0}% CTR</small>
                         </td>
                         <td style={{ padding: "10px 12px", color: "#fff", fontWeight: 700 }}>
-                          <div>{item.whatsappLeads}</div>
-                          {item.cpl > 0 && <small style={{ color: "#64748b", fontWeight: 500 }}>R$ {item.cpl.toFixed(2)}/lead</small>}
+                          <div>{item.whatsappLeads} conv.</div>
+                          <small style={{ color: "#94a3b8", fontWeight: 500 }}>
+                            {item.adButtonClicks || 0} clicou WPP{item.cpl > 0 ? ` • R$ ${item.cpl.toFixed(2)}/lead` : ""}
+                          </small>
                         </td>
                         <td style={{ padding: "10px 12px", color: "#c084fc" }}>{item.whatsappQuotes}</td>
                         <td style={{ padding: "10px 12px", color: "#34d399", fontWeight: 700 }}>
@@ -2479,8 +3202,8 @@ export default function GoogleAdsPage() {
                         <td style={{ padding: "10px 12px", color: l.value ? "#34d399" : "#64748b", fontWeight: l.value ? 700 : 400 }}>
                           {l.value ? `R$ ${l.value.toLocaleString("pt-BR")}` : "—"}
                         </td>
-                        <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
-                          {l.occurredAt}
+                        <td style={{ padding: "10px 12px", color: "#94a3b8", whiteSpace: "nowrap" }} title={l.occurredAt}>
+                          {formatBrDateTime(l.occurredAt)}
                         </td>
                       </tr>
                     ))
@@ -2900,8 +3623,8 @@ export default function GoogleAdsPage() {
                             </span>
                           )}
                         </td>
-                        <td style={{ padding: "10px 12px", color: "#64748b", whiteSpace: "nowrap" }}>
-                          {item.timestamp ? new Date(item.timestamp).toLocaleString("pt-BR") : "—"}
+                        <td style={{ padding: "10px 12px", color: "#94a3b8", whiteSpace: "nowrap" }} title={item.timestamp}>
+                          {formatBrDateTime(item.timestamp)}
                         </td>
                       </tr>
                     ))}
