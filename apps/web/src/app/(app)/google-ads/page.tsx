@@ -5993,13 +5993,13 @@ export default function GoogleAdsPage() {
 
                 <div>
                   <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
-                    Slug do Link (/r/slug) *
+                    Apelido do Link WhatsApp (/r/apelido) *
                   </label>
                   <input
                     type="text"
                     required
                     disabled={Boolean(editingTenantSlug)}
-                    placeholder="ex: clinica-sorriso"
+                    placeholder="ex: clinica-sorriso (preenche só)"
                     value={tenantFormSlug}
                     onChange={(e) => setTenantFormSlug(slugifyClientName(e.target.value))}
                     className="gads-input-field"
@@ -6326,15 +6326,45 @@ export default function GoogleAdsPage() {
 
             {/* GERENCIADOR DE ACESSOS DO PORTAL DO CLIENTE */}
             <div className="gads-panel" style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-              <div>
-                <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>
-                  Acessos do Portal do Cliente (/google-ads/acesso)
-                </h3>
-                <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
-                  Crie o login do seu cliente para acompanhar apenas{" "}
-                  <strong style={{ color: "#cbd5e1" }}>Visão Geral Comercial, Leads e Funil Kanban</strong>{" "}
-                  — sem palavras-chave, custos, ROAS, prejuízo ou edição de regras.
-                </p>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "8px" }}>
+                <div>
+                  <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>
+                    Acessos do Portal do Cliente (/google-ads/acesso)
+                  </h3>
+                  <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
+                    Crie o login do seu cliente para acompanhar apenas{" "}
+                    <strong style={{ color: "#cbd5e1" }}>Visão Geral Comercial, Leads e Funil Kanban</strong>{" "}
+                    — sem palavras-chave, custos, ROAS, prejuízo ou edição de regras.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const portalUrl =
+                      typeof window !== "undefined"
+                        ? `${window.location.origin}/google-ads/acesso`
+                        : "https://painel.anunciosalpha.com.br/google-ads/acesso";
+                    navigator.clipboard?.writeText(portalUrl).catch(() => {});
+                    setCopiedHelperMsg(`Link do Portal copiado: ${portalUrl}`);
+                    setTimeout(() => setCopiedHelperMsg(null), 3000);
+                  }}
+                  style={{
+                    background: "#1e293b",
+                    border: "1px solid #334155",
+                    color: "#38bdf8",
+                    borderRadius: "8px",
+                    padding: "7px 11px",
+                    fontSize: "11px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "5px",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  <Copy size={12} /> Copiar Link do Portal
+                </button>
               </div>
 
               <div>
@@ -6379,15 +6409,21 @@ export default function GoogleAdsPage() {
                 </div>
               </div>
 
-              <form onSubmit={handleSaveClientUserSubmit} style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px", display: "flex", flexDirection: "column", gap: "10px" }}>
+              <form
+                onSubmit={handleSaveClientUserSubmit}
+                autoComplete="off"
+                style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px", display: "flex", flexDirection: "column", gap: "10px" }}
+              >
                 <div style={{ fontSize: "12px", fontWeight: 700, color: "#cbd5e1" }}>
                   Criar / Atualizar Login do Cliente
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: "8px" }}>
                   <input
                     type="text"
+                    name="alpha_new_client_login"
+                    autoComplete="off"
                     required
-                    placeholder="Login ou e-mail"
+                    placeholder="Login ou e-mail do cliente"
                     value={clientUserUsername}
                     onChange={(e) => setClientUserUsername(e.target.value)}
                     className="gads-input-field"
@@ -6395,6 +6431,8 @@ export default function GoogleAdsPage() {
                   />
                   <input
                     type="text"
+                    name="alpha_new_client_display"
+                    autoComplete="off"
                     placeholder="Nome exibido"
                     value={clientUserDisplayName}
                     onChange={(e) => setClientUserDisplayName(e.target.value)}
@@ -6403,6 +6441,8 @@ export default function GoogleAdsPage() {
                   />
                   <input
                     type="password"
+                    name="alpha_new_client_pass"
+                    autoComplete="new-password"
                     required
                     placeholder="Senha (mín. 4 dígitos)"
                     value={clientUserPassword}
