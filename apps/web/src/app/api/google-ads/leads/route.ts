@@ -1,19 +1,40 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
-import path from "path";
+import {
+  type GoogleTenantConfig,
+  type TenantConversionRules,
+  appendTenantAudit,
+  extractUazapiChatLabels,
+  getStorageDir,
+  getTenantFilePath,
+  getTenantResolvedUazapi,
+  isSamePhone,
+  isTenantAttendantPhone,
+  listTenants,
+  matchRuleLabel,
+  normalizeText,
+  normalizeUazapiBaseUrl,
+  readJsonSafe,
+  readTenantAudits,
+  readTenantLeads,
+  readTenantRules,
+  resolveRequestTenant,
+  upsertTenant,
+  writeJsonAtomic,
+  writeTenantLeads,
+  writeTenantRules,
+} from "../../../../lib/google-tenants";
 
 export const dynamic = "force-dynamic";
 
 /**
- * API para listar, gerenciar, salvar regras, reconciliar WhatsApp (Uazapi)
- * e resolver nomes reais via Google Ads API.
+ * PASSO M1 — API MULTI-CLIENTE DE LEADS, REGRAS (FRASES + ETIQUETAS), UAZAPI & CLICK_VIEW
  * Caminho no GitHub: apps/web/src/app/api/google-ads/leads/route.ts
  *
- * PASSO 1 + PASSO 2:
- * - Auto-sync Google Ads API v25/v26 + MCC auto-discovery + /data atômico
- * - Remoção de inserção manual de leads
- * - Reconciliação Automática WhatsApp (Uazapi /message/find + /chat/find)
- * - Persistência segura de Regras Dinâmicas de Conversão
+ * - 100% isolado por cliente em /data/tenants/<slug>/ (padrão "cnac" quando ?client= omitido)
+ * - Usa 1 único Refresh Token da MCC, trocando dinamicamente tenant.googleCustomerId
+ * - Suporta modo "single" (1 WhatsApp) e "roulette" (multi-atendentes)
+ * - Reconciliação Uazapi suporta Frases-Gatilho + Etiquetas do WhatsApp Business (wa_label)
  */
 
 interface EntitiesSyncMeta {
@@ -26,18 +47,6 @@ interface EntitiesSyncMeta {
   lastSyncAt?: string;
   lastAttemptAt?: string;
   lastError?: string | null;
-}
-
-interface ConversionRules {
-  quote: { actionName: string; phrases: string[] };
-  purchase: { actionName: string; phrases: string[] };
-}
-
-interface UazapiStoredConfig {
-  baseUrl?: string;
-  josiToken?: string;
-  sergioToken?: string;
-  updatedAt?: string;
 }
 
 interface UazapiInstanceStatusMeta {
@@ -60,128 +69,8 @@ interface UazapiSyncMeta {
   instanceStatuses?: UazapiInstanceStatusMeta[];
 }
 
-const DEFAULT_RULES: ConversionRules = {
-  quote: {
-    actionName: "WhatsApp - Orçamento Enviado",
-    phrases: [
-      "orçamento enviado",
-      "orcamento enviado",
-      "segue o orçamento",
-      "segue seu orçamento",
-      "enviei o orçamento",
-      "proposta enviada",
-      "segue o orcamento",
-    ],
-  },
-  purchase: {
-    actionName: "WhatsApp - Compra Realizada",
-    phrases: [
-      "pedido fechado",
-      "compra realizada",
-      "venda confirmada",
-      "pedido confirmado",
-      "segue copia do pedido",
-      "venda fechada",
-    ],
-  },
-};
-
-const ATTENDANT_PHONES = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
-
-function getStorageDir(): string {
-  if (process.env.GOOGLE_ADS_DATA_DIR) {
-    try {
-      if (!fs.existsSync(process.env.GOOGLE_ADS_DATA_DIR)) {
-        fs.mkdirSync(process.env.GOOGLE_ADS_DATA_DIR, { recursive: true });
-      }
-      return process.env.GOOGLE_ADS_DATA_DIR;
-    } catch {}
-  }
-
-  try {
-    if (fs.existsSync("/data")) {
-      return "/data";
-    }
-  } catch {}
-
-  return "/tmp";
-}
-
-function getLeadsFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_leads.json");
-}
-
-function getAuditsFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_conversion_audits.json");
-}
-
-function getRulesFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_conversion_rules.json");
-}
-
-function getEntitiesFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_entities_map.json");
-}
-
-function getEntitiesMetaFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_entities_meta.json");
-}
-
-function getUazapiConfigFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_uazapi_config.json");
-}
-
-function getUazapiMetaFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_uazapi_meta.json");
-}
-
-function getProcessedMessagesFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_processed_messages.json");
-}
-
-function getClickViewMetaFilePath(): string {
-  return path.join(getStorageDir(), "alpha_google_clickview_meta.json");
-}
-
-function writeJsonAtomic(filePath: string, payload: unknown): void {
-  const json = JSON.stringify(payload, null, 2);
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmpPath, json, "utf8");
-  fs.renameSync(tmpPath, filePath);
-}
-
-function normalizeText(text: string): string {
-  return String(text || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isSamePhone(p1: string, p2: string): boolean {
-  const c1 = String(p1 || "").replace(/\D/g, "");
-  const c2 = String(p2 || "").replace(/\D/g, "");
-  if (!c1 || !c2) return false;
-  if (c1 === c2) return true;
-  if (c1.length >= 8 && c2.length >= 8) {
-    return c1.slice(-8) === c2.slice(-8);
-  }
-  return false;
-}
-
-function isAttendantPhone(phone: string): boolean {
-  const p = String(phone || "").replace(/\D/g, "");
-  if (!p) return false;
-  return ATTENDANT_PHONES.some(
-    (att) => p === att || (p.length >= 8 && att.length >= 8 && p.slice(-8) === att.slice(-8))
-  );
-}
-
 function extractCleanPhoneFromCandidates(candidates: unknown[]): string {
-  const strings = candidates
-    .map((c) => String(c || "").trim())
-    .filter(Boolean);
+  const strings = candidates.map((c) => String(c || "").trim()).filter(Boolean);
 
   for (const s of strings) {
     if (s.includes("@g.us") || s.includes("status@broadcast") || s.includes("@lid")) continue;
@@ -198,17 +87,9 @@ function extractCleanPhoneFromCandidates(candidates: unknown[]): string {
   return "";
 }
 
-function normalizeUazapiBaseUrl(rawUrl: string): string {
-  let clean = String(rawUrl || "").trim().replace(/\/+$/, "");
-  if (!clean) return "";
-  if (!/^https?:\/\//i.test(clean)) {
-    clean = `https://${clean}`;
-  }
-  return clean.replace(/\/+$/, "");
-}
-
 function parseUazapiTimestampMs(msg: any): number {
-  const raw = msg?.messageTimestamp ?? msg?.Timestamp ?? msg?.timestamp ?? msg?.t ?? msg?.createdAt ?? msg?.date ?? 0;
+  const raw =
+    msg?.messageTimestamp ?? msg?.Timestamp ?? msg?.timestamp ?? msg?.t ?? msg?.createdAt ?? msg?.date ?? 0;
   if (typeof raw === "number" && !isNaN(raw) && raw > 0) {
     return raw > 1e12 ? raw : raw * 1000;
   }
@@ -223,258 +104,66 @@ function parseUazapiTimestampMs(msg: any): number {
   return 0;
 }
 
-function readEntitiesMap(): Record<string, string> {
-  try {
-    const file = getEntitiesFilePath();
-    if (fs.existsSync(file)) {
-      return JSON.parse(fs.readFileSync(file, "utf8"));
-    } else if (fs.existsSync("/tmp/alpha_google_entities_map.json")) {
-      return JSON.parse(fs.readFileSync("/tmp/alpha_google_entities_map.json", "utf8"));
-    }
-  } catch {}
-  return {};
+function readEntitiesMap(slug: string): Record<string, string> {
+  return readJsonSafe<Record<string, string>>(getTenantFilePath(slug, "entities_map"), {});
 }
 
-function writeEntitiesMap(map: Record<string, string>): void {
+function writeEntitiesMap(slug: string, map: Record<string, string>): void {
   try {
-    const file = getEntitiesFilePath();
-    writeJsonAtomic(file, map);
-    try {
-      if (file !== "/tmp/alpha_google_entities_map.json") {
-        writeJsonAtomic("/tmp/alpha_google_entities_map.json", map);
-      }
-    } catch {}
+    writeJsonAtomic(getTenantFilePath(slug, "entities_map"), map);
   } catch (err) {
     console.error("Erro ao salvar mapa de entidades:", err);
   }
 }
 
-function readEntitiesMeta(): EntitiesSyncMeta {
+function readEntitiesMeta(tenant: GoogleTenantConfig): EntitiesSyncMeta {
   const defaultMeta: EntitiesSyncMeta = {
     apiConnected: false,
-    customerId: (process.env.GOOGLE_ADS_CUSTOMER_ID || "3228136878").replace(/\D/g, ""),
+    customerId: String(tenant.googleCustomerId || "").replace(/\D/g, ""),
     campaignsCount: 0,
     adGroupsCount: 0,
   };
-  try {
-    const file = getEntitiesMetaFilePath();
-    if (fs.existsSync(file)) {
-      return { ...defaultMeta, ...JSON.parse(fs.readFileSync(file, "utf8")) };
-    } else if (fs.existsSync("/tmp/alpha_google_entities_meta.json")) {
-      return { ...defaultMeta, ...JSON.parse(fs.readFileSync("/tmp/alpha_google_entities_meta.json", "utf8")) };
-    }
-  } catch {}
-  return defaultMeta;
-}
-
-function writeEntitiesMeta(meta: EntitiesSyncMeta): void {
-  try {
-    const file = getEntitiesMetaFilePath();
-    writeJsonAtomic(file, meta);
-    try {
-      if (file !== "/tmp/alpha_google_entities_meta.json") {
-        writeJsonAtomic("/tmp/alpha_google_entities_meta.json", meta);
-      }
-    } catch {}
-  } catch {}
-}
-
-function normalizeRulesPayload(input: any): ConversionRules {
-  const cleanList = (arr: unknown, fallback: string[]) => {
-    if (!Array.isArray(arr)) return fallback;
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const item of arr) {
-      const val = String(item || "").trim().toLowerCase();
-      if (val && !seen.has(val)) {
-        seen.add(val);
-        out.push(val);
-      }
-    }
-    return out;
-  };
-
+  const stored = readJsonSafe<Partial<EntitiesSyncMeta>>(
+    getTenantFilePath(tenant.slug, "entities_meta"),
+    {}
+  );
   return {
-    quote: {
-      actionName: String(input?.quote?.actionName || DEFAULT_RULES.quote.actionName).trim(),
-      phrases: cleanList(input?.quote?.phrases, DEFAULT_RULES.quote.phrases),
-    },
-    purchase: {
-      actionName: String(input?.purchase?.actionName || DEFAULT_RULES.purchase.actionName).trim(),
-      phrases: cleanList(input?.purchase?.phrases, DEFAULT_RULES.purchase.phrases),
-    },
+    ...defaultMeta,
+    ...stored,
+    customerId: String(tenant.googleCustomerId || stored.customerId || "").replace(/\D/g, ""),
   };
 }
 
-function readRules(): ConversionRules {
+function writeEntitiesMeta(slug: string, meta: EntitiesSyncMeta): void {
   try {
-    const file = getRulesFilePath();
-    if (fs.existsSync(file)) {
-      return normalizeRulesPayload(JSON.parse(fs.readFileSync(file, "utf8")));
-    } else if (fs.existsSync("/tmp/alpha_google_conversion_rules.json")) {
-      return normalizeRulesPayload(JSON.parse(fs.readFileSync("/tmp/alpha_google_conversion_rules.json", "utf8")));
-    }
-  } catch {}
-  return DEFAULT_RULES;
-}
-
-function writeRules(rules: ConversionRules): ConversionRules {
-  const normalized = normalizeRulesPayload(rules);
-  const file = getRulesFilePath();
-  writeJsonAtomic(file, normalized);
-  try {
-    if (file !== "/tmp/alpha_google_conversion_rules.json") {
-      writeJsonAtomic("/tmp/alpha_google_conversion_rules.json", normalized);
-    }
-  } catch {}
-  return normalized;
-}
-
-function readLeads(): any[] {
-  let leads: any[] = [];
-  try {
-    const file = getLeadsFilePath();
-    if (fs.existsSync(file)) {
-      leads = JSON.parse(fs.readFileSync(file, "utf8"));
-    } else if (fs.existsSync("/tmp/alpha_google_leads.json")) {
-      leads = JSON.parse(fs.readFileSync("/tmp/alpha_google_leads.json", "utf8"));
-    }
-  } catch (error) {
-    console.error("Erro ao ler leads:", error);
-  }
-
-  const beforeCount = leads.length;
-  leads = leads.filter((l: any) => !isAttendantPhone(l.leadPhone));
-
-  if (leads.length < beforeCount) {
-    try {
-      const file = getLeadsFilePath();
-      const trimmed = leads.slice(0, 500);
-      writeJsonAtomic(file, trimmed);
-      if (file !== "/tmp/alpha_google_leads.json") {
-        writeJsonAtomic("/tmp/alpha_google_leads.json", trimmed);
-      }
-    } catch {}
-  }
-
-  return leads;
-}
-
-function writeLeads(leads: any[]): void {
-  try {
-    const file = getLeadsFilePath();
-    const trimmed = leads.slice(0, 500);
-    writeJsonAtomic(file, trimmed);
-    try {
-      if (file !== "/tmp/alpha_google_leads.json") {
-        writeJsonAtomic("/tmp/alpha_google_leads.json", trimmed);
-      }
-    } catch {}
-  } catch (error) {
-    console.error("Erro ao salvar leads:", error);
-  }
-}
-
-function recordAuditLog(entry: any): void {
-  try {
-    const file = getAuditsFilePath();
-    let logs: any[] = [];
-    if (fs.existsSync(file)) {
-      logs = JSON.parse(fs.readFileSync(file, "utf8"));
-    } else if (fs.existsSync("/tmp/alpha_google_conversion_audits.json")) {
-      logs = JSON.parse(fs.readFileSync("/tmp/alpha_google_conversion_audits.json", "utf8"));
-    }
-    logs.unshift(entry);
-    const trimmed = logs.slice(0, 500);
-    writeJsonAtomic(file, trimmed);
-    try {
-      if (file !== "/tmp/alpha_google_conversion_audits.json") {
-        writeJsonAtomic("/tmp/alpha_google_conversion_audits.json", trimmed);
-      }
-    } catch {}
+    writeJsonAtomic(getTenantFilePath(slug, "entities_meta"), meta);
   } catch {}
 }
 
-function readProcessedMessageIds(): string[] {
-  try {
-    const file = getProcessedMessagesFilePath();
-    if (fs.existsSync(file)) {
-      const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-      return Array.isArray(parsed) ? parsed : [];
-    }
-  } catch {}
-  return [];
+function readProcessedMessageIds(slug: string): string[] {
+  const parsed = readJsonSafe<unknown>(getTenantFilePath(slug, "processed_messages"), []);
+  return Array.isArray(parsed) ? (parsed as string[]) : [];
 }
 
-function writeProcessedMessageIds(ids: string[]): void {
+function writeProcessedMessageIds(slug: string, ids: string[]): void {
   try {
-    writeJsonAtomic(getProcessedMessagesFilePath(), ids.slice(0, 1500));
+    writeJsonAtomic(getTenantFilePath(slug, "processed_messages"), ids.slice(0, 1500));
   } catch {}
 }
 
-// =========================================================================
-// RECONCILIAÇÃO AUTOMÁTICA WHATSAPP (UAZAPI PULL SYNC - ANTI-PERDA)
-// =========================================================================
-
-function readStoredUazapiConfig(): UazapiStoredConfig {
-  try {
-    const file = getUazapiConfigFilePath();
-    if (fs.existsSync(file)) {
-      return JSON.parse(fs.readFileSync(file, "utf8"));
-    }
-  } catch {}
-  return {};
+function readUazapiSyncMeta(slug: string): UazapiSyncMeta {
+  const stored = readJsonSafe<Partial<UazapiSyncMeta>>(getTenantFilePath(slug, "uazapi_meta"), {});
+  return {
+    recoveredCount: 0,
+    updatedCount: 0,
+    checkedMessagesCount: 0,
+    ...stored,
+  };
 }
 
-function readResolvedUazapiConfig(): {
-  baseUrl: string;
-  source: "env" | "panel" | "none";
-  instances: { name: string; token: string }[];
-  josiToken: string;
-  sergioToken: string;
-} {
-  const stored = readStoredUazapiConfig();
-  const envBase = (process.env.GOOGLE_ADS_UAZAPI_BASE_URL || process.env.UAZAPI_BASE_URL || "").trim();
-  const baseUrl = normalizeUazapiBaseUrl(envBase || stored.baseUrl || "");
-
-  const envJosi = (process.env.GOOGLE_ADS_UAZAPI_TOKEN_JOSI || process.env.UAZAPI_TOKEN_JOSI || "").trim();
-  const envSergio = (process.env.GOOGLE_ADS_UAZAPI_TOKEN_SERGIO || process.env.UAZAPI_TOKEN_SERGIO || "").trim();
-  const envGeneric = (process.env.GOOGLE_ADS_UAZAPI_TOKEN || process.env.UAZAPI_TOKEN || "").trim();
-
-  const josiToken = envJosi || (stored.josiToken || "").trim();
-  const sergioToken = envSergio || (stored.sergioToken || "").trim();
-
-  const instances: { name: string; token: string }[] = [];
-  if (josiToken) instances.push({ name: "Josi", token: josiToken });
-  if (sergioToken) instances.push({ name: "Sérgio", token: sergioToken });
-  if (instances.length === 0 && envGeneric) {
-    instances.push({ name: "WhatsApp Principal", token: envGeneric });
-  }
-
-  const hasEnv = Boolean(envBase && (envJosi || envSergio || envGeneric));
-  const source: "env" | "panel" | "none" = !baseUrl || instances.length === 0 ? "none" : hasEnv ? "env" : "panel";
-
-  return { baseUrl, source, instances, josiToken, sergioToken };
-}
-
-function readUazapiSyncMeta(): UazapiSyncMeta {
+function writeUazapiSyncMeta(slug: string, meta: UazapiSyncMeta): void {
   try {
-    const file = getUazapiMetaFilePath();
-    if (fs.existsSync(file)) {
-      return {
-        recoveredCount: 0,
-        updatedCount: 0,
-        checkedMessagesCount: 0,
-        ...JSON.parse(fs.readFileSync(file, "utf8")),
-      };
-    }
-  } catch {}
-  return { recoveredCount: 0, updatedCount: 0, checkedMessagesCount: 0 };
-}
-
-function writeUazapiSyncMeta(meta: UazapiSyncMeta): void {
-  try {
-    writeJsonAtomic(getUazapiMetaFilePath(), meta);
+    writeJsonAtomic(getTenantFilePath(slug, "uazapi_meta"), meta);
   } catch {}
 }
 
@@ -484,14 +173,17 @@ function maskToken(token: string): string {
   return `${token.slice(0, 4)}••••${token.slice(-4)}`;
 }
 
-function getUazapiPublicStatus() {
-  const cfg = readResolvedUazapiConfig();
-  const meta = readUazapiSyncMeta();
+function getUazapiPublicStatus(tenant: GoogleTenantConfig) {
+  const cfg = getTenantResolvedUazapi(tenant);
+  const meta = readUazapiSyncMeta(tenant.slug);
   return {
     configured: cfg.source !== "none",
     source: cfg.source,
     baseUrl: cfg.baseUrl,
+    routingMode: tenant.routingMode,
     instancesCount: cfg.instances.length,
+    hasSingleToken: Boolean(cfg.singleToken),
+    singleTokenMasked: maskToken(cfg.singleToken),
     hasJosiToken: Boolean(cfg.josiToken),
     hasSergioToken: Boolean(cfg.sergioToken),
     josiTokenMasked: maskToken(cfg.josiToken),
@@ -591,7 +283,11 @@ async function checkUazapiInstanceStatus(
         data?.connected ??
         data?.status?.loggedIn ??
         data?.loggedIn ??
-        (rawStatus === "open" || rawStatus === "connected" ? true : rawStatus === "close" || rawStatus === "disconnected" ? false : null);
+        (rawStatus === "open" || rawStatus === "connected"
+          ? true
+          : rawStatus === "close" || rawStatus === "disconnected"
+            ? false
+            : null);
       const phone = String(
         data?.instance?.owner || data?.instance?.phone || data?.owner || data?.status?.jid || ""
       ).replace(/\D/g, "");
@@ -599,7 +295,12 @@ async function checkUazapiInstanceStatus(
       return {
         name,
         connected: connectedFlag === null ? null : Boolean(connectedFlag),
-        state: connectedFlag === true ? "Conectada" : connectedFlag === false ? "Desconectada" : rawStatus || "Desconhecido",
+        state:
+          connectedFlag === true
+            ? "Conectada"
+            : connectedFlag === false
+              ? "Desconectada"
+              : rawStatus || "Desconhecido",
         phone: phone || undefined,
         error: null,
       };
@@ -622,6 +323,7 @@ async function fetchUazapiRecentMessages(
 ): Promise<{
   ok: boolean;
   messages: any[];
+  chats: any[];
   error?: string;
 }> {
   const parseList = (payload: any): any[] => {
@@ -633,11 +335,14 @@ async function fetchUazapiRecentMessages(
   };
 
   const aggregated: any[] = [];
+  const discoveredChats: any[] = [];
   const seenKeys = new Set<string>();
   const addMessages = (list: any[]) => {
     for (const m of list) {
       const mid = String(m?.messageid || m?.id || m?.key?.id || "");
-      const dedupKey = mid || `${m?.chatid || m?.wa_chatid || m?._chatId || ""}_${m?.messageTimestamp || ""}_${String(m?.text || m?.conversation || "").slice(0, 24)}`;
+      const dedupKey =
+        mid ||
+        `${m?.chatid || m?.wa_chatid || m?._chatId || ""}_${m?.messageTimestamp || ""}_${String(m?.text || m?.conversation || "").slice(0, 24)}`;
       if (seenKeys.has(dedupKey)) continue;
       seenKeys.add(dedupKey);
       aggregated.push(m);
@@ -648,7 +353,6 @@ async function fetchUazapiRecentMessages(
   let lastError: string | undefined;
 
   try {
-    // 1) Busca mensagens recentes globais via POST /message/find
     try {
       const msgRes = await fetch(`${baseUrl}/message/find`, {
         method: "POST",
@@ -668,7 +372,6 @@ async function fetchUazapiRecentMessages(
       lastError = err?.message || "Falha em /message/find";
     }
 
-    // 2) Sempre consulta também /chat/find + histórico por conversa (não depende só dos últimos 60 globais)
     try {
       const chatRes = await fetch(`${baseUrl}/chat/find`, {
         method: "POST",
@@ -685,6 +388,7 @@ async function fetchUazapiRecentMessages(
           return cid && !cid.includes("@g.us") && !cid.includes("status@broadcast") && chat?.wa_isGroup !== true;
         });
 
+        discoveredChats.push(...allChats);
         const chatsToInspect = allChats.slice(0, deep ? 50 : 15);
         const batchSize = 5;
 
@@ -694,6 +398,7 @@ async function fetchUazapiRecentMessages(
             batch.map(async (chat: any) => {
               const chatId = chat?.wa_chatid || chat?.chatid || chat?.id;
               if (!chatId) return;
+              const chatLabels = extractUazapiChatLabels(chat);
               try {
                 const perChatRes = await fetch(`${baseUrl}/message/find`, {
                   method: "POST",
@@ -709,6 +414,7 @@ async function fetchUazapiRecentMessages(
                     _chatId: chatId,
                     _chatWaChatId: chat?.wa_chatid || undefined,
                     _chatPhone: chat?.phone || chat?.wa_fastid || undefined,
+                    _chatLabels: chatLabels,
                   }));
                   addMessages(msgs);
                 }
@@ -726,24 +432,26 @@ async function fetchUazapiRecentMessages(
     }
 
     if (!anyEndpointSucceeded) {
-      return { ok: false, messages: [], error: lastError || "Uazapi indisponível" };
+      return { ok: false, messages: [], chats: [], error: lastError || "Uazapi indisponível" };
     }
 
-    return { ok: true, messages: aggregated };
+    return { ok: true, messages: aggregated, chats: discoveredChats };
   } catch (err: any) {
-    return { ok: false, messages: [], error: err?.message || "Falha de conexão com Uazapi" };
+    return { ok: false, messages: [], chats: [], error: err?.message || "Falha de conexão com Uazapi" };
   }
 }
 
-async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyncMeta & { configured: boolean }> {
-  const cfg = readResolvedUazapiConfig();
-  const prevMeta = readUazapiSyncMeta();
+async function autoReconcileUazapiIfConfigured(
+  tenant: GoogleTenantConfig,
+  force = false
+): Promise<UazapiSyncMeta & { configured: boolean }> {
+  const cfg = getTenantResolvedUazapi(tenant);
+  const prevMeta = readUazapiSyncMeta(tenant.slug);
 
   if (cfg.source === "none") {
     return { ...prevMeta, configured: false };
   }
 
-  // Cooldown automático de 3 minutos para evitar carga no polling de 4s
   if (!force && prevMeta.lastSyncAt) {
     const elapsed = Date.now() - new Date(prevMeta.lastSyncAt).getTime();
     if (elapsed < 3 * 60 * 1000) {
@@ -751,9 +459,9 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
     }
   }
 
-  const leads = readLeads();
-  const rules = readRules();
-  const processedIds = readProcessedMessageIds();
+  const leads = readTenantLeads(tenant.slug, tenant);
+  const rules: TenantConversionRules = readTenantRules(tenant.slug);
+  const processedIds = readProcessedMessageIds(tenant.slug);
   let leadsChanged = false;
   let processedChanged = false;
   let recoveredCount = 0;
@@ -783,12 +491,9 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
       continue;
     }
 
-    // Ordena do mais antigo para o mais recente para preservar a ordem cronológica do funil
-    const ordered = [...res.messages].sort((a, b) => {
-      const ta = parseUazapiTimestampMs(a);
-      const tb = parseUazapiTimestampMs(b);
-      return ta - tb;
-    });
+    const ordered = [...res.messages].sort(
+      (a, b) => parseUazapiTimestampMs(a) - parseUazapiTimestampMs(b)
+    );
 
     for (const msg of ordered) {
       checkedMessagesCount++;
@@ -818,7 +523,7 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
         msg?.sender,
         msg?.phone,
       ]);
-      if (!cleanPhone || isAttendantPhone(cleanPhone)) continue;
+      if (!cleanPhone || isTenantAttendantPhone(tenant, cleanPhone)) continue;
 
       const messageId = String(msg?.messageid || msg?.id || msg?.key?.id || "").trim();
       if (messageId && processedIds.includes(messageId)) continue;
@@ -845,7 +550,11 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
           const pushName = msg?._chatName || msg?.pushName || msg?.senderName || "";
 
           if (idx !== -1) {
-            if (!leads[idx].firstMessageAt || /aguardando/i.test(String(leads[idx].leadPhone || "")) || leads[idx].stage === "clique_anuncio") {
+            if (
+              !leads[idx].firstMessageAt ||
+              /aguardando/i.test(String(leads[idx].leadPhone || "")) ||
+              leads[idx].stage === "clique_anuncio"
+            ) {
               leads[idx].leadPhone = cleanPhone;
               if (pushName) leads[idx].leadName = pushName;
               if (leads[idx].stage !== "orcamento_enviado" && leads[idx].stage !== "compra_realizada") {
@@ -884,7 +593,7 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
             recoveredCount++;
             instRecovered++;
 
-            recordAuditLog({
+            appendTenantAudit(tenant.slug, {
               id: `audit_uazapi_rec_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
               leadPhone: cleanPhone,
               leadName: pushName || "Cliente WhatsApp",
@@ -902,7 +611,6 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
             processedChanged = true;
           }
         } else if (tsMs > 0) {
-          // Camada 2 na Reconciliação: Atribuição Temporal (janela de 20 min após clique em clique_anuncio)
           const alreadyLinked = leads.some((existing: any) => isSamePhone(existing.leadPhone, cleanPhone));
           if (!alreadyLinked) {
             let bestPendingIdx = -1;
@@ -913,12 +621,13 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
               const isPending =
                 !l.firstMessageAt ||
                 /aguardando/i.test(String(l.leadPhone || "")) ||
-                isAttendantPhone(l.leadPhone);
+                isTenantAttendantPhone(tenant, l.leadPhone);
               if (!isPending) continue;
 
               const attendantNorm = normalizeText(l.attendantName || "");
               const instNorm = normalizeText(inst.name);
               const sameAttendant =
+                tenant.routingMode === "single" ||
                 (attendantNorm.includes("josi") && instNorm.includes("josi")) ||
                 (attendantNorm.includes("sergio") && instNorm.includes("sergio")) ||
                 attendantNorm === instNorm;
@@ -952,12 +661,12 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
               updatedCount++;
               instUpdated++;
 
-              recordAuditLog({
+              appendTenantAudit(tenant.slug, {
                 id: `audit_uazapi_temp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                 leadPhone: cleanPhone,
                 leadName: pushName || "Cliente WhatsApp",
                 action: "conversa_iniciada",
-                detectedPhrase: `Recuperação Uazapi (Janela 20min): "${(text || "Mídia/Áudio").slice(0, 45)}"`,
+                detectedPhrase: `Recuperação Uazapi (Janela 30min): "${(text || "Mídia/Áudio").slice(0, 45)}"`,
                 attendant: inst.name,
                 gclid: leads[bestPendingIdx].gclid,
                 timestamp: msgIso,
@@ -972,7 +681,6 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
           }
         }
       } else if (text) {
-        // Mensagem do atendente para lead já pertencente ao funil Google Ads
         const leadIdx = leads.findIndex((l: any) => isSamePhone(l.leadPhone, cleanPhone));
         if (leadIdx !== -1) {
           const matchedPurchase = matchDynamicPhrase(text, rules.purchase.phrases);
@@ -992,7 +700,7 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
             updatedCount++;
             instUpdated++;
 
-            recordAuditLog({
+            appendTenantAudit(tenant.slug, {
               id: `audit_uazapi_buy_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
               leadPhone: leads[leadIdx].leadPhone,
               leadName: leads[leadIdx].leadName || "Cliente WhatsApp",
@@ -1020,7 +728,7 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
             updatedCount++;
             instUpdated++;
 
-            recordAuditLog({
+            appendTenantAudit(tenant.slug, {
               id: `audit_uazapi_quote_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
               leadPhone: leads[leadIdx].leadPhone,
               leadName: leads[leadIdx].leadName || "Cliente WhatsApp",
@@ -1041,6 +749,81 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
       }
     }
 
+    // PASSO M1: Reconciliação também por Etiquetas do WhatsApp Business (wa_label) nos chats encontrados
+    if ((rules.purchase.labels.length > 0 || rules.quote.labels.length > 0) && res.chats.length > 0) {
+      for (const chat of res.chats) {
+        const chatLabels = extractUazapiChatLabels(chat);
+        if (chatLabels.length === 0) continue;
+
+        const cleanPhone = extractCleanPhoneFromCandidates([
+          chat?.phone,
+          chat?.wa_fastid,
+          chat?.wa_chatid,
+          chat?.chatid,
+          chat?.id,
+        ]);
+        if (!cleanPhone || isTenantAttendantPhone(tenant, cleanPhone)) continue;
+
+        const leadIdx = leads.findIndex((l: any) => isSamePhone(l.leadPhone, cleanPhone));
+        if (leadIdx === -1) continue;
+
+        const matchedPurchaseLabel = matchRuleLabel(chatLabels, rules.purchase.labels);
+        const matchedQuoteLabel = matchRuleLabel(chatLabels, rules.quote.labels);
+        const nowIso = new Date().toISOString();
+
+        if (matchedPurchaseLabel && leads[leadIdx].stage !== "compra_realizada") {
+          if (!leads[leadIdx].firstMessageAt) leads[leadIdx].firstMessageAt = nowIso;
+          leads[leadIdx].stage = "compra_realizada";
+          leads[leadIdx].conversionType = "compra_realizada";
+          leads[leadIdx].purchasedAt = leads[leadIdx].purchasedAt || nowIso;
+          leads[leadIdx].matchedRuleLabel = matchedPurchaseLabel;
+          leads[leadIdx].updatedAt = nowIso;
+          leadsChanged = true;
+          updatedCount++;
+          instUpdated++;
+
+          appendTenantAudit(tenant.slug, {
+            id: `audit_label_buy_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            leadPhone: leads[leadIdx].leadPhone,
+            leadName: leads[leadIdx].leadName || "Cliente WhatsApp",
+            action: "compra_realizada",
+            value: leads[leadIdx].value || 0,
+            detectedPhrase: `Etiqueta WhatsApp Business: "${matchedPurchaseLabel}"`,
+            attendant: inst.name,
+            gclid: leads[leadIdx].gclid,
+            timestamp: nowIso,
+            statusOci: leads[leadIdx].status || "queued",
+          });
+        } else if (
+          matchedQuoteLabel &&
+          leads[leadIdx].stage !== "orcamento_enviado" &&
+          leads[leadIdx].stage !== "compra_realizada"
+        ) {
+          if (!leads[leadIdx].firstMessageAt) leads[leadIdx].firstMessageAt = nowIso;
+          leads[leadIdx].stage = "orcamento_enviado";
+          leads[leadIdx].conversionType = "orcamento_enviado";
+          leads[leadIdx].quotedAt = leads[leadIdx].quotedAt || nowIso;
+          leads[leadIdx].matchedRuleLabel = matchedQuoteLabel;
+          leads[leadIdx].updatedAt = nowIso;
+          leadsChanged = true;
+          updatedCount++;
+          instUpdated++;
+
+          appendTenantAudit(tenant.slug, {
+            id: `audit_label_quote_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            leadPhone: leads[leadIdx].leadPhone,
+            leadName: leads[leadIdx].leadName || "Cliente WhatsApp",
+            action: "orcamento_enviado",
+            detectedPhrase: `Etiqueta WhatsApp Business: "${matchedQuoteLabel}"`,
+            attendant: inst.name,
+            gclid: leads[leadIdx].gclid,
+            timestamp: nowIso,
+            statusOci: leads[leadIdx].status || "queued",
+          });
+        }
+      }
+    }
+
     instanceStatuses.push({
       ...statusInfo,
       checkedMessages: instChecked,
@@ -1050,8 +833,8 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
     });
   }
 
-  if (leadsChanged) writeLeads(leads);
-  if (processedChanged) writeProcessedMessageIds(processedIds);
+  if (leadsChanged) writeTenantLeads(tenant.slug, leads);
+  if (processedChanged) writeProcessedMessageIds(tenant.slug, processedIds);
 
   const meta: UazapiSyncMeta = {
     lastSyncAt: new Date().toISOString(),
@@ -1061,12 +844,12 @@ async function autoReconcileUazapiIfConfigured(force = false): Promise<UazapiSyn
     checkedMessagesCount,
     instanceStatuses,
   };
-  writeUazapiSyncMeta(meta);
+  writeUazapiSyncMeta(tenant.slug, meta);
   return { ...meta, configured: true };
 }
 
 // =========================================================================
-// GOOGLE ADS API v25/v26 AUTO-DISCOVERY (PASSO 1)
+// GOOGLE ADS API v25/v26 AUTO-DISCOVERY (MULTI-CONTA POR MCC)
 // =========================================================================
 
 function getActiveApiVersions(): string[] {
@@ -1216,16 +999,31 @@ function getMissingGoogleAdsEnvVars(): string[] {
   return required.filter((k) => !process.env[k]?.trim());
 }
 
-async function autoSyncEntitiesFromGoogleAds(forceRefresh = false): Promise<{
+async function autoSyncEntitiesFromGoogleAds(
+  tenant: GoogleTenantConfig,
+  forceRefresh = false
+): Promise<{
   map: Record<string, string>;
   meta: EntitiesSyncMeta;
 }> {
-  const map = readEntitiesMap();
-  const prevMeta = readEntitiesMeta();
-  const customerId = (process.env.GOOGLE_ADS_CUSTOMER_ID || "3228136878").replace(/\D/g, "");
+  const map = readEntitiesMap(tenant.slug);
+  const prevMeta = readEntitiesMeta(tenant);
+  const customerId = String(tenant.googleCustomerId || "").replace(/\D/g, "");
   const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim();
   const missingEnv = getMissingGoogleAdsEnvVars();
   const nowMs = Date.now();
+
+  if (!customerId) {
+    const meta: EntitiesSyncMeta = {
+      ...prevMeta,
+      apiConnected: false,
+      customerId: "",
+      lastAttemptAt: new Date().toISOString(),
+      lastError: `Customer ID do Google Ads não configurado para o cliente "${tenant.name}".`,
+    };
+    writeEntitiesMeta(tenant.slug, meta);
+    return { map, meta };
+  }
 
   if (!devToken || missingEnv.length > 0) {
     const missingList = missingEnv.length > 0 ? missingEnv : ["GOOGLE_ADS_DEVELOPER_TOKEN"];
@@ -1236,7 +1034,7 @@ async function autoSyncEntitiesFromGoogleAds(forceRefresh = false): Promise<{
       lastAttemptAt: new Date().toISOString(),
       lastError: `Variáveis ausentes no runtime do container web (Dokploy): ${missingList.join(", ")}.`,
     };
-    writeEntitiesMeta(meta);
+    writeEntitiesMeta(tenant.slug, meta);
     return { map, meta };
   }
 
@@ -1266,7 +1064,7 @@ async function autoSyncEntitiesFromGoogleAds(forceRefresh = false): Promise<{
       lastAttemptAt: new Date().toISOString(),
       lastError: oauth.error || "Token OAuth inválido.",
     };
-    writeEntitiesMeta(meta);
+    writeEntitiesMeta(tenant.slug, meta);
     return { map, meta };
   }
 
@@ -1293,12 +1091,19 @@ async function autoSyncEntitiesFromGoogleAds(forceRefresh = false): Promise<{
       loginCustomerId,
     });
 
-    if (!res.ok && (res.status === 404 || (res.errorText && /UNSUPPORTED_VERSION|deprecated|sunset/i.test(res.errorText)))) {
+    if (
+      !res.ok &&
+      (res.status === 404 || (res.errorText && /UNSUPPORTED_VERSION|deprecated|sunset/i.test(res.errorText)))
+    ) {
       lastError = `Versão ${version} indisponível (${res.status})`;
       continue;
     }
 
-    if (!res.ok && !explicitLoginId && (res.status === 403 || (res.errorText && /USER_PERMISSION_DENIED|PERMISSION_DENIED/i.test(res.errorText)))) {
+    if (
+      !res.ok &&
+      !explicitLoginId &&
+      (res.status === 403 || (res.errorText && /USER_PERMISSION_DENIED|PERMISSION_DENIED/i.test(res.errorText)))
+    ) {
       if (loginCustomerId) {
         const directRes = await executeGaqlStream({
           version,
@@ -1353,7 +1158,7 @@ async function autoSyncEntitiesFromGoogleAds(forceRefresh = false): Promise<{
       lastAttemptAt: new Date().toISOString(),
       lastError: lastError || "Não foi possível conectar na Google Ads API.",
     };
-    writeEntitiesMeta(meta);
+    writeEntitiesMeta(tenant.slug, meta);
     return { map, meta };
   }
 
@@ -1412,7 +1217,7 @@ async function autoSyncEntitiesFromGoogleAds(forceRefresh = false): Promise<{
     }
   }
 
-  writeEntitiesMap(map);
+  writeEntitiesMap(tenant.slug, map);
   const meta: EntitiesSyncMeta = {
     apiConnected: true,
     customerId,
@@ -1424,26 +1229,27 @@ async function autoSyncEntitiesFromGoogleAds(forceRefresh = false): Promise<{
     lastAttemptAt: new Date().toISOString(),
     lastError: null,
   };
-  writeEntitiesMeta(meta);
+  writeEntitiesMeta(tenant.slug, meta);
 
   return { map, meta };
 }
 
 async function autoEnrichLeadsViaClickView(
+  tenant: GoogleTenantConfig,
   leads: any[],
   meta: EntitiesSyncMeta,
   entities: Record<string, string>
 ): Promise<{ leads: any[]; enrichedCount: number }> {
   const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim();
   const missingEnv = getMissingGoogleAdsEnvVars();
-  if (!devToken || missingEnv.length > 0 || !meta.apiConnected) {
+  const customerId = String(tenant.googleCustomerId || "").replace(/\D/g, "");
+  if (!devToken || missingEnv.length > 0 || !meta.apiConnected || !customerId) {
     return { leads, enrichedCount: 0 };
   }
 
-  // Throttle de 5 minutos entre lotes de enriquecimento para proteger a cota Exploração
   let lastClickViewRunMs = 0;
   try {
-    const cvMetaPath = getClickViewMetaFilePath();
+    const cvMetaPath = getTenantFilePath(tenant.slug, "clickview_meta");
     if (fs.existsSync(cvMetaPath)) {
       const parsed = JSON.parse(fs.readFileSync(cvMetaPath, "utf8"));
       lastClickViewRunMs = Number(parsed?.lastRunMs || 0);
@@ -1464,7 +1270,6 @@ async function autoEnrichLeadsViaClickView(
     const occurredMs = new Date(l.occurredAt || l.firstMessageAt || 0).getTime();
     if (!occurredMs || isNaN(occurredMs)) return false;
     const ageDays = (nowMs - occurredMs) / (1000 * 60 * 60 * 24);
-    // click_view mantém até 90 dias de histórico e exige ao menos ~1h pós-clique
     return ageDays >= 0.04 && ageDays <= 89;
   });
 
@@ -1474,15 +1279,16 @@ async function autoEnrichLeadsViaClickView(
   if (!oauth.token) return { leads, enrichedCount: 0 };
 
   try {
-    writeJsonAtomic(getClickViewMetaFilePath(), { lastRunMs: nowMs, lastRunAt: new Date().toISOString() });
+    writeJsonAtomic(getTenantFilePath(tenant.slug, "clickview_meta"), {
+      lastRunMs: nowMs,
+      lastRunAt: new Date().toISOString(),
+    });
   } catch {}
 
   const version = meta.apiVersionUsed || getActiveApiVersions()[0];
-  const customerId = (process.env.GOOGLE_ADS_CUSTOMER_ID || "3228136878").replace(/\D/g, "");
   const loginCustomerId =
     process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID?.replace(/\D/g, "") || meta.loginCustomerIdUsed;
 
-  // Agrupa por data (no máximo 2 datas distintas por ciclo)
   const dateMap = new Map<string, any[]>();
   for (const c of candidates) {
     const d = String(c.occurredAt || c.firstMessageAt || "").slice(0, 10);
@@ -1574,48 +1380,43 @@ async function autoEnrichLeadsViaClickView(
     }
   }
 
-  if (entitiesChanged) writeEntitiesMap(entities);
-  if (leadsChanged) writeLeads(leads);
+  if (entitiesChanged) writeEntitiesMap(tenant.slug, entities);
+  if (leadsChanged) writeTenantLeads(tenant.slug, leads);
   return { leads, enrichedCount };
 }
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const type = searchParams.get("type");
+  const clientParam = searchParams.get("client");
+  const tenant = resolveRequestTenant(clientParam);
+
+  if (!tenant) {
+    return NextResponse.json({ error: `Cliente "${clientParam}" não encontrado.` }, { status: 404 });
+  }
 
   if (type === "audits") {
-    let audits: any[] = [];
-    try {
-      const file = getAuditsFilePath();
-      if (fs.existsSync(file)) {
-        audits = JSON.parse(fs.readFileSync(file, "utf8"));
-      } else if (fs.existsSync("/tmp/alpha_google_conversion_audits.json")) {
-        audits = JSON.parse(fs.readFileSync("/tmp/alpha_google_conversion_audits.json", "utf8"));
-      }
-    } catch (e) {
-      console.error("Erro ao ler auditoria:", e);
-    }
-    return NextResponse.json(audits, {
+    return NextResponse.json(readTenantAudits(tenant.slug), {
       headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
     });
   }
 
   if (type === "rules") {
-    return NextResponse.json(readRules(), {
+    return NextResponse.json(readTenantRules(tenant.slug), {
       headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
     });
   }
 
   if (type === "entities") {
-    return NextResponse.json(readEntitiesMap(), {
+    return NextResponse.json(readEntitiesMap(tenant.slug), {
       headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
     });
   }
 
   if (type === "entities_status") {
-    const entities = readEntitiesMap();
-    const meta = readEntitiesMeta();
-    const leads = readLeads();
+    const entities = readEntitiesMap(tenant.slug);
+    const meta = readEntitiesMeta(tenant);
+    const leads = readTenantLeads(tenant.slug, tenant);
     const storageDir = getStorageDir();
     const missingEnvVars = getMissingGoogleAdsEnvVars();
     const ociStats = {
@@ -1639,20 +1440,27 @@ export async function GET(request: NextRequest) {
         lastLeadAt: leads[0]?.occurredAt || leads[0]?.firstMessageAt || leads[0]?.updatedAt || null,
         ociStats,
         mappedKeysCount: Object.keys(entities).length,
-        uazapiStatus: getUazapiPublicStatus(),
+        uazapiStatus: getUazapiPublicStatus(tenant),
         entities,
+        tenant: {
+          slug: tenant.slug,
+          name: tenant.name,
+          routingMode: tenant.routingMode,
+          googleCustomerId: tenant.googleCustomerId,
+          attendantsCount: tenant.attendants.length,
+        },
+        tenantsCount: listTenants().length,
       },
       { headers: { "Cache-Control": "no-store, no-cache, must-revalidate" } }
     );
   }
 
-  // Dispara reconciliação automática da Uazapi em modo throttled (a cada 3 min se configurada)
   try {
-    await autoReconcileUazapiIfConfigured(false);
+    await autoReconcileUazapiIfConfigured(tenant, false);
   } catch {}
 
-  let leads = readLeads();
-  let entities = readEntitiesMap();
+  let leads = readTenantLeads(tenant.slug, tenant);
+  let entities = readEntitiesMap(tenant.slug);
 
   const hasUnmappedNumeric = leads.some(
     (l: any) =>
@@ -1660,20 +1468,20 @@ export async function GET(request: NextRequest) {
       (l.adGroup && /^\d+$/.test(String(l.adGroup).trim()) && !entities[String(l.adGroup).trim()])
   );
 
-  let meta = readEntitiesMeta();
+  let meta = readEntitiesMeta(tenant);
   const isCacheExpired =
     !meta.lastSyncAt || Date.now() - new Date(meta.lastSyncAt).getTime() > 15 * 60 * 1000;
 
   if (hasUnmappedNumeric || isCacheExpired) {
     try {
-      const synced = await autoSyncEntitiesFromGoogleAds(false);
+      const synced = await autoSyncEntitiesFromGoogleAds(tenant, false);
       entities = synced.map;
       meta = synced.meta;
     } catch {}
   }
 
   try {
-    const cvResult = await autoEnrichLeadsViaClickView(leads, meta, entities);
+    const cvResult = await autoEnrichLeadsViaClickView(tenant, leads, meta, entities);
     leads = cvResult.leads;
   } catch {}
 
@@ -1681,7 +1489,8 @@ export async function GET(request: NextRequest) {
     const rawCamp = String(l.campaign || "").trim();
     const rawAdGrp = String(l.adGroup || "").trim();
     const rawPhone = String(l.leadPhone || "").trim();
-    const waitingWpp = !l.firstMessageAt && (!rawPhone || /aguardando/i.test(rawPhone) || isAttendantPhone(rawPhone));
+    const waitingWpp =
+      !l.firstMessageAt && (!rawPhone || /aguardando/i.test(rawPhone) || isTenantAttendantPhone(tenant, rawPhone));
     const normalizedStage =
       l.stage === "orcamento_enviado" || l.stage === "compra_realizada"
         ? l.stage
@@ -1704,10 +1513,17 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const { searchParams } = new URL(request.url);
     const body = await request.json();
+    const clientParam = searchParams.get("client") || body.clientSlug || body.client || null;
+    const tenant = resolveRequestTenant(clientParam);
+
+    if (!tenant) {
+      return NextResponse.json({ error: `Cliente "${clientParam}" não encontrado.` }, { status: 404 });
+    }
 
     if (body.action === "sync_catalog" || body.action === "sync_entities_api") {
-      const { map, meta } = await autoSyncEntitiesFromGoogleAds(true);
+      const { map, meta } = await autoSyncEntitiesFromGoogleAds(tenant, true);
       return NextResponse.json({
         success: meta.apiConnected,
         apiConnected: meta.apiConnected,
@@ -1722,57 +1538,84 @@ export async function POST(request: NextRequest) {
     }
 
     if (body.action === "reconcile_uazapi") {
-      const syncResult = await autoReconcileUazapiIfConfigured(true);
+      const syncResult = await autoReconcileUazapiIfConfigured(tenant, true);
       return NextResponse.json({
         success: !syncResult.lastError,
         ...syncResult,
-        uazapiStatus: getUazapiPublicStatus(),
+        uazapiStatus: getUazapiPublicStatus(tenant),
       });
     }
 
     if (body.type === "save_uazapi_config") {
-      const prev = readStoredUazapiConfig();
-      const baseUrl = normalizeUazapiBaseUrl(String(body.baseUrl || prev.baseUrl || ""));
+      const prevCfg = readJsonSafe<any>(getTenantFilePath(tenant.slug, "uazapi_config"), {});
+      const baseUrl = normalizeUazapiBaseUrl(String(body.baseUrl || tenant.uazapi?.baseUrl || prevCfg.baseUrl || ""));
+
+      const nextSingle =
+        body.clearSingleToken === true
+          ? ""
+          : String(body.singleToken || "").trim() && !String(body.singleToken).includes("••••")
+            ? String(body.singleToken).trim()
+            : tenant.uazapi?.singleToken || prevCfg.singleToken || "";
 
       const nextJosi =
         body.clearJosiToken === true
           ? ""
           : String(body.josiToken || "").trim() && !String(body.josiToken).includes("••••")
             ? String(body.josiToken).trim()
-            : prev.josiToken || "";
+            : tenant.uazapi?.josiToken || prevCfg.josiToken || "";
 
       const nextSergio =
         body.clearSergioToken === true
           ? ""
           : String(body.sergioToken || "").trim() && !String(body.sergioToken).includes("••••")
             ? String(body.sergioToken).trim()
-            : prev.sergioToken || "";
+            : tenant.uazapi?.sergioToken || prevCfg.sergioToken || "";
 
-      const payload: UazapiStoredConfig = {
+      const payload = {
         baseUrl,
-        josiToken: nextJosi,
-        sergioToken: nextSergio,
+        singleToken: nextSingle || undefined,
+        josiToken: nextJosi || undefined,
+        sergioToken: nextSergio || undefined,
         updatedAt: new Date().toISOString(),
       };
-      writeJsonAtomic(getUazapiConfigFilePath(), payload);
+      writeJsonAtomic(getTenantFilePath(tenant.slug, "uazapi_config"), payload);
 
-      const syncResult = await autoReconcileUazapiIfConfigured(true);
+      const updatedAttendants = tenant.attendants.map((att, idx) => {
+        if (tenant.routingMode === "single" && idx === 0) {
+          return { ...att, uazapiToken: nextSingle || undefined };
+        }
+        if (tenant.routingMode === "roulette" && idx === 0) {
+          return { ...att, uazapiToken: nextJosi || undefined };
+        }
+        if (tenant.routingMode === "roulette" && idx === 1) {
+          return { ...att, uazapiToken: nextSergio || undefined };
+        }
+        return att;
+      });
+
+      const updatedTenant = upsertTenant({
+        ...tenant,
+        attendants: updatedAttendants,
+        uazapi: payload,
+      });
+
+      const syncResult = await autoReconcileUazapiIfConfigured(updatedTenant, true);
       return NextResponse.json({
         success: true,
-        uazapiStatus: getUazapiPublicStatus(),
+        uazapiStatus: getUazapiPublicStatus(updatedTenant),
         syncResult,
       });
     }
 
     if (body.action === "save_entities" || body.type === "save_entities") {
-      const current = readEntitiesMap();
+      const current = readEntitiesMap(tenant.slug);
       const updated = { ...current, ...(body.entities || {}) };
-      writeEntitiesMap(updated);
+      writeEntitiesMap(tenant.slug, updated);
       return NextResponse.json({ success: true, entities: updated, message: "Nomes reais vinculados com sucesso!" });
     }
 
     if (body.type === "save_rules" && body.rules) {
-      const saved = writeRules(body.rules);
+      const saved = writeTenantRules(tenant.slug, body.rules);
       return NextResponse.json({ success: true, rules: saved, message: "Regras salvas com sucesso!" });
     }
 
@@ -1784,14 +1627,21 @@ export async function POST(request: NextRequest) {
 
 export async function PATCH(request: NextRequest) {
   try {
+    const { searchParams } = new URL(request.url);
     const body = await request.json();
-    const { id, stage, value, attendantName } = body;
+    const clientParam = searchParams.get("client") || body.clientSlug || body.client || null;
+    const tenant = resolveRequestTenant(clientParam);
 
+    if (!tenant) {
+      return NextResponse.json({ error: `Cliente "${clientParam}" não encontrado.` }, { status: 404 });
+    }
+
+    const { id, stage, value, attendantName } = body;
     if (!id) {
       return NextResponse.json({ error: "ID do lead é obrigatório" }, { status: 400 });
     }
 
-    const leads = readLeads();
+    const leads = readTenantLeads(tenant.slug, tenant);
     const index = leads.findIndex((l: any) => l.id === id);
 
     if (index === -1) {
@@ -1813,8 +1663,6 @@ export async function PATCH(request: NextRequest) {
     if (attendantName) leads[index].attendantName = attendantName;
     leads[index].updatedAt = new Date().toISOString();
 
-    // PASSO 4: Se uma venda já foi enviada ao Google Ads e o valor ou etapa mudou,
-    // sinaliza ajuste pendente (RESTATEMENT / RETRACTION) vinculado ao mesmo orderId
     if (sentPurchase?.orderId) {
       const nextStage = leads[index].stage;
       const nextVal = Number(leads[index].value || 0);
@@ -1839,7 +1687,7 @@ export async function PATCH(request: NextRequest) {
       }
     }
 
-    writeLeads(leads);
+    writeTenantLeads(tenant.slug, leads);
     return NextResponse.json({ success: true, lead: leads[index] });
   } catch (error: any) {
     return NextResponse.json({ error: error?.message || "Erro interno" }, { status: 500 });
@@ -1849,15 +1697,22 @@ export async function PATCH(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
+    const clientParam = searchParams.get("client");
+    const tenant = resolveRequestTenant(clientParam);
+
+    if (!tenant) {
+      return NextResponse.json({ error: `Cliente "${clientParam}" não encontrado.` }, { status: 404 });
+    }
+
     const id = searchParams.get("id");
     const action = searchParams.get("action");
 
-    let leads = readLeads();
+    let leads = readTenantLeads(tenant.slug, tenant);
 
     if (action === "clean_attendants") {
       const originalCount = leads.length;
-      leads = leads.filter((l: any) => !isAttendantPhone(l.leadPhone));
-      writeLeads(leads);
+      leads = leads.filter((l: any) => !isTenantAttendantPhone(tenant, l.leadPhone));
+      writeTenantLeads(tenant.slug, leads);
       return NextResponse.json({
         success: true,
         removed: originalCount - leads.length,
@@ -1870,7 +1725,7 @@ export async function DELETE(request: NextRequest) {
     }
 
     leads = leads.filter((l: any) => l.id !== id);
-    writeLeads(leads);
+    writeTenantLeads(tenant.slug, leads);
 
     return NextResponse.json({ success: true, message: "Lead removido com sucesso!" });
   } catch (error: any) {
