@@ -196,6 +196,17 @@ export default function GoogleAdsPage() {
       lastError?: string | null;
       recoveredCount?: number;
       updatedCount?: number;
+      checkedMessagesCount?: number;
+      instanceStatuses?: Array<{
+        name: string;
+        connected: boolean | null;
+        state: string;
+        phone?: string;
+        checkedMessages?: number;
+        recovered?: number;
+        updated?: number;
+        error?: string | null;
+      }>;
     };
   }>({
     apiConnected: false,
@@ -713,11 +724,23 @@ export default function GoogleAdsPage() {
         body: JSON.stringify({ action: "reconcile_uazapi" }),
       });
       const data = await res.json().catch(() => ({}));
-      setUazapiFeedback(
-        data.lastError
-          ? `Aviso Uazapi: ${data.lastError}`
-          : `Histórico verificado (${data.checkedMessagesCount || 0} mensagens checadas).`
-      );
+      const rec = data.recoveredCount || 0;
+      const upd = data.updatedCount || 0;
+      const disconnectedList = Array.isArray(data.instanceStatuses)
+        ? data.instanceStatuses.filter((s: any) => s.connected === false).map((s: any) => s.name)
+        : [];
+
+      if (data.lastError) {
+        setUazapiFeedback(`Aviso Uazapi: ${data.lastError}`);
+      } else if (rec > 0 || upd > 0) {
+        setUazapiFeedback(`Sincronização concluída! ${rec} lead(s) recuperado(s) e ${upd} conversa(s) atualizada(s).`);
+      } else if (disconnectedList.length > 0) {
+        setUazapiFeedback(
+          `Nenhuma conversa pendente encontrada (${disconnectedList.join(", ")} está desconectada na Uazapi — reconecte o WhatsApp para puxar o histórico).`
+        );
+      } else {
+        setUazapiFeedback("Histórico conferido! Nenhuma conversa pendente nova encontrada.");
+      }
       await fetchData();
     } catch {
       setUazapiFeedback("Erro ao executar reconciliação Uazapi.");
@@ -2897,8 +2920,8 @@ export default function GoogleAdsPage() {
                 </h4>
                 <p style={{ color: "#94a3b8", fontSize: "12px", margin: "3px 0 0" }}>
                   {entitiesStatus.uazapiStatus?.configured
-                    ? `Ativo (${entitiesStatus.uazapiStatus.instancesCount || 1} instância(s) conectada(s)) — resgata leads automaticamente se algum webhook falhar.`
-                    : "Opcional: informe os dados da Uazapi caso queira resgate automático extra além do webhook."}
+                    ? `Ativo (${entitiesStatus.uazapiStatus.instancesCount || 1} instância(s) configurada(s)) — resgata leads e conversas caso algum webhook da Josi ou Sérgio falhe.`
+                    : "Informe os dados da Uazapi para testar conexão e recuperar mensagens perdidas caso algum webhook falhe."}
                 </p>
               </div>
 
@@ -2923,7 +2946,7 @@ export default function GoogleAdsPage() {
                         gap: "6px",
                       }}
                     >
-                      <RefreshCw size={13} /> {isSavingUazapi ? "Verificando..." : "Sincronizar Agora"}
+                      <RefreshCw size={13} /> {isSavingUazapi ? "Recuperando..." : "Sincronizar Agora (Recuperar)"}
                     </button>
                     <button
                       type="button"
@@ -2945,6 +2968,52 @@ export default function GoogleAdsPage() {
                 )}
               </div>
             </div>
+
+            {/* Status limpo por atendente (sem métricas técnicas na Aba 5) */}
+            {entitiesStatus.uazapiStatus?.configured &&
+              Array.isArray(entitiesStatus.uazapiStatus.instanceStatuses) &&
+              entitiesStatus.uazapiStatus.instanceStatuses.length > 0 && (
+                <div style={{ marginTop: "12px", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                  {entitiesStatus.uazapiStatus.instanceStatuses.map((inst) => (
+                    <div
+                      key={inst.name}
+                      style={{
+                        background: "#0f172a",
+                        border: `1px solid ${
+                          inst.connected === true && !inst.error
+                            ? "rgba(16, 185, 129, 0.35)"
+                            : inst.connected === false || inst.error
+                              ? "rgba(239, 68, 68, 0.4)"
+                              : "#334155"
+                        }`,
+                        borderRadius: "8px",
+                        padding: "5px 10px",
+                        fontSize: "11px",
+                        color: "#e2e8f0",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: "7px",
+                          height: "7px",
+                          borderRadius: "50%",
+                          background:
+                            inst.connected === true && !inst.error
+                              ? "#10b981"
+                              : inst.connected === false || inst.error
+                                ? "#ef4444"
+                                : "#eab308",
+                        }}
+                      />
+                      <strong>{inst.name}:</strong>
+                      <span>{inst.error ? inst.error : inst.state}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
 
             {(!entitiesStatus.uazapiStatus?.configured || editingUazapiTokens) && (
               <form
@@ -3088,6 +3157,56 @@ export default function GoogleAdsPage() {
 
                 {showAdvancedTech && (
                   <div style={{ padding: "16px", borderTop: "1px solid #1e293b", background: "#0b1329" }}>
+                    <div
+                      style={{
+                        background: "#0f172a",
+                        border: "1px solid #1e293b",
+                        borderRadius: "8px",
+                        padding: "8px 10px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        flexWrap: "wrap",
+                        gap: "8px",
+                        fontSize: "11px",
+                        marginBottom: "14px",
+                      }}
+                    >
+                      <div style={{ color: "#94a3b8" }}>
+                        <strong style={{ color: "#cbd5e1" }}>URL do Webhook (Uazapi):</strong>{" "}
+                        <code style={{ color: "#38bdf8", wordBreak: "break-all" }}>
+                          {typeof window !== "undefined"
+                            ? `${window.location.origin}/api/webhooks/google-whatsapp`
+                            : "https://painel.anunciosalpha.com.br/api/webhooks/google-whatsapp"}
+                        </code>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const url =
+                            typeof window !== "undefined"
+                              ? `${window.location.origin}/api/webhooks/google-whatsapp`
+                              : "https://painel.anunciosalpha.com.br/api/webhooks/google-whatsapp";
+                          navigator.clipboard?.writeText(url).catch(() => {});
+                          setUazapiFeedback("URL do Webhook copiada!");
+                        }}
+                        style={{
+                          background: "#1e293b",
+                          border: "1px solid #334155",
+                          color: "#38bdf8",
+                          borderRadius: "6px",
+                          padding: "4px 9px",
+                          fontSize: "11px",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "4px",
+                        }}
+                      >
+                        <Copy size={11} /> Copiar Webhook
+                      </button>
+                    </div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px", marginBottom: "14px" }}>
                       <div style={{ fontSize: "12px", color: "#94a3b8" }}>
                         Envio automático blindado (SHA-256 + <code>orderId</code> anti-duplicidade) • Armazenamento:{" "}
