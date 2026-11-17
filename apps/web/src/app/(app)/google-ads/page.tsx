@@ -235,6 +235,19 @@ function isBrazilianPhoneDdiValid(rawPhone: string): boolean {
   return digits.startsWith("55") && (digits.length === 12 || digits.length === 13);
 }
 
+function formatMatchTypePt(raw?: string | null): string {
+  const key = String(raw || "").trim().toUpperCase();
+  if (!key) return "";
+  if (key === "BROAD") return "Ampla";
+  if (key === "PHRASE") return "Frase";
+  if (key === "EXACT") return "Exata";
+  if (key === "NEAR_EXACT") return "Exata (Variação Próxima)";
+  if (key === "NEAR_PHRASE") return "Frase (Variação Próxima)";
+  if (key === "PERFORMANCE_MAX" || key === "PMAX" || key === "AI_MAX") return "PMax / IA";
+  if (key === "UNKNOWN" || key === "UNSPECIFIED") return "Não especificado";
+  return raw || "";
+}
+
 export default function GoogleAdsPage() {
   const [currentTab, setCurrentTab] = useState<
     "overview" | "leads" | "funil" | "relatorios" | "roleta" | "conversoes" | "bi" | "clientes"
@@ -470,6 +483,60 @@ export default function GoogleAdsPage() {
   const [isSavingClientUser, setIsSavingClientUser] = useState(false);
   const [clientUserFeedback, setClientUserFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
   const [copiedHelperMsg, setCopiedHelperMsg] = useState<string | null>(null);
+
+  // Passo M5: Monitor Global de Quedas Uazapi + Guia Setup Dinâmico (zero poluição)
+  const [monitorConfig, setMonitorConfig] = useState<{
+    enabled: boolean;
+    managerPhone: string;
+    validDdi55: boolean;
+    senderTenantSlug: string;
+    cooldownMinutes: number;
+    lastCheckedAt?: string | null;
+    lastAlertAt?: string | null;
+    lastAlertError?: string | null;
+  } | null>(null);
+  const [monitorSummary, setMonitorSummary] = useState<{
+    totalInstances: number;
+    onlineCount: number;
+    offlineCount: number;
+    alertsDispatchedNow: number;
+    instances: Array<{
+      key: string;
+      tenantSlug: string;
+      tenantName: string;
+      instanceName: string;
+      connected: boolean;
+      status: string;
+      phone?: string;
+      latencyMs?: number;
+      error?: string | null;
+      downSince?: string | null;
+      lastAlertSentAt?: string | null;
+      lastCheckedAt: string;
+    }>;
+  } | null>(null);
+  const [monitorAlerts, setMonitorAlerts] = useState<
+    Array<{
+      id: string;
+      tenantSlug: string;
+      tenantName: string;
+      instanceName: string;
+      type: "down" | "recovered" | "test";
+      sent: boolean;
+      message: string;
+      timestamp: string;
+      error?: string | null;
+    }>
+  >([]);
+  const [monitorPhoneDraft, setMonitorPhoneDraft] = useState("55");
+  const [monitorSenderSlugDraft, setMonitorSenderSlugDraft] = useState("");
+  const [monitorCooldownDraft, setMonitorCooldownDraft] = useState(120);
+  const [monitorEnabledDraft, setMonitorEnabledDraft] = useState(true);
+  const monitorDraftLoadedRef = useRef<boolean>(false);
+  const [isLoadingMonitor, setIsLoadingMonitor] = useState(false);
+  const [isSavingMonitor, setIsSavingMonitor] = useState(false);
+  const [monitorFeedback, setMonitorFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [setupGuideTenant, setSetupGuideTenant] = useState<ManagedTenant | null>(null);
 
   const handleDownloadBackup = () => {
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(leadEvents, null, 2));
@@ -866,8 +933,105 @@ export default function GoogleAdsPage() {
     }
   };
 
+  const fetchMonitorStatus = async (check = false, force = false) => {
+    if (force) setIsLoadingMonitor(true);
+    try {
+      const qs = force ? "?force=true" : check ? "?check=true" : "";
+      const res = await fetch(`/api/google-ads/uazapi-monitor${qs}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.config) {
+          setMonitorConfig(data.config);
+          if (!monitorDraftLoadedRef.current) {
+            monitorDraftLoadedRef.current = true;
+            setMonitorPhoneDraft(data.config.managerPhone || "55");
+            setMonitorSenderSlugDraft(data.config.senderTenantSlug || "");
+            setMonitorCooldownDraft(Number(data.config.cooldownMinutes || 120));
+            setMonitorEnabledDraft(data.config.enabled !== false || !data.config.managerPhone);
+          }
+        }
+        if (data?.summary) setMonitorSummary(data.summary);
+        if (Array.isArray(data?.recentAlerts)) setMonitorAlerts(data.recentAlerts);
+      }
+    } catch {
+    } finally {
+      if (force) setIsLoadingMonitor(false);
+    }
+  };
+
+  const handleSaveAndTestMonitor = async (actionType: "save_config" | "send_test_alert") => {
+    setIsSavingMonitor(true);
+    setMonitorFeedback(null);
+    const cleanPhone = monitorPhoneDraft.replace(/\D/g, "");
+    if ((actionType === "send_test_alert" || monitorEnabledDraft) && !isBrazilianPhoneDdiValid(cleanPhone)) {
+      setMonitorFeedback({
+        ok: false,
+        msg: "Informe o WhatsApp do Gestor com DDI 55 + DDD + número (ex: 5521999998888).",
+      });
+      setIsSavingMonitor(false);
+      return;
+    }
+    try {
+      const res = await fetch("/api/google-ads/uazapi-monitor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: actionType,
+          managerPhone: cleanPhone,
+          senderTenantSlug: monitorSenderSlugDraft,
+          cooldownMinutes: monitorCooldownDraft,
+          enabled: actionType === "send_test_alert" ? true : monitorEnabledDraft,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        if (actionType === "send_test_alert") {
+          setMonitorEnabledDraft(true);
+        }
+        setMonitorFeedback({ ok: true, msg: data.message || "Configuração salva com sucesso!" });
+        if (Array.isArray(data.recentAlerts)) setMonitorAlerts(data.recentAlerts);
+        await fetchMonitorStatus(false, false);
+      } else {
+        setMonitorFeedback({ ok: false, msg: data.error || "Falha ao salvar/testar monitor." });
+      }
+    } catch {
+      setMonitorFeedback({ ok: false, msg: "Erro de comunicação com /api/google-ads/uazapi-monitor." });
+    } finally {
+      setIsSavingMonitor(false);
+    }
+  };
+
+  const handleCheckAllUazapiNow = async () => {
+    setIsLoadingMonitor(true);
+    setMonitorFeedback(null);
+    try {
+      const res = await fetch("/api/google-ads/uazapi-monitor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "check_now" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        if (data.summary) setMonitorSummary(data.summary);
+        if (Array.isArray(data.recentAlerts)) setMonitorAlerts(data.recentAlerts);
+        setMonitorFeedback({ ok: true, msg: data.message || "Verificação concluída." });
+      } else {
+        setMonitorFeedback({ ok: false, msg: data.error || "Erro ao verificar instâncias." });
+      }
+    } catch {
+      setMonitorFeedback({ ok: false, msg: "Erro de rede ao verificar Uazapi." });
+    } finally {
+      setIsLoadingMonitor(false);
+    }
+  };
+
   useEffect(() => {
     fetchTenants();
+    fetchMonitorStatus(true, false);
+    const monitorInterval = setInterval(() => {
+      fetchMonitorStatus(true, false);
+    }, 5 * 60 * 1000);
+    return () => clearInterval(monitorInterval);
   }, []);
 
   useEffect(() => {
@@ -2191,29 +2355,59 @@ export default function GoogleAdsPage() {
               <span style={{ color: entitiesStatus.uazapiStatus?.configured ? "#34d399" : "#94a3b8", fontWeight: 600 }}>
                 WhatsApp: {entitiesStatus.uazapiStatus?.configured ? "Webhook + Backup Uazapi Ativos" : "Webhook Ativo"}
               </span>
+
+              {monitorSummary && monitorSummary.totalInstances > 0 && monitorSummary.offlineCount === 0 && (
+                <>
+                  <span style={{ color: "#334155" }}>•</span>
+                  <span style={{ color: "#34d399", fontWeight: 600 }}>
+                    Monitor Global: {monitorSummary.onlineCount}/{monitorSummary.totalInstances} Uazapi Online
+                  </span>
+                </>
+              )}
             </div>
 
-            {(entitiesStatus.ociStats?.failed ?? 0) > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  setCurrentTab("conversoes");
-                  setShowAdvancedTech(true);
-                }}
-                style={{
-                  background: "rgba(239, 68, 68, 0.15)",
-                  border: "1px solid rgba(239, 68, 68, 0.4)",
-                  color: "#fca5a5",
-                  borderRadius: "6px",
-                  padding: "3px 10px",
-                  fontSize: "11px",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-              >
-                {entitiesStatus.ociStats?.failed} falha(s) no envio OCI — Ver na Aba 5
-              </button>
-            )}
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
+              {(monitorSummary?.offlineCount ?? 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setCurrentTab("clientes")}
+                  style={{
+                    background: "rgba(239, 68, 68, 0.16)",
+                    border: "1px solid rgba(239, 68, 68, 0.45)",
+                    color: "#fca5a5",
+                    borderRadius: "6px",
+                    padding: "3px 10px",
+                    fontSize: "11px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {monitorSummary?.offlineCount} Uazapi Offline — Ver Monitor (Aba 7)
+                </button>
+              )}
+
+              {(entitiesStatus.ociStats?.failed ?? 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCurrentTab("conversoes");
+                    setShowAdvancedTech(true);
+                  }}
+                  style={{
+                    background: "rgba(239, 68, 68, 0.15)",
+                    border: "1px solid rgba(239, 68, 68, 0.4)",
+                    color: "#fca5a5",
+                    borderRadius: "6px",
+                    padding: "3px 10px",
+                    fontSize: "11px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {entitiesStatus.ociStats?.failed} falha(s) no envio OCI — Ver na Aba 5
+                </button>
+              )}
+            </div>
           </div>
 
           {backendFetchError && (
@@ -2947,7 +3141,7 @@ export default function GoogleAdsPage() {
                           {(event.clickViewEnriched || event.matchType) && (
                             <div style={{ fontSize: "10px", color: "#34d399", marginTop: "2px", fontWeight: 600 }}>
                               {event.clickViewEnriched ? "click_view ✓" : ""}
-                              {event.matchType ? ` • ${event.matchType}` : ""}
+                              {event.matchType ? ` • ${formatMatchTypePt(event.matchType)}` : ""}
                             </div>
                           )}
                         </td>
@@ -2992,6 +3186,27 @@ export default function GoogleAdsPage() {
                               4. Compra: {event.value ? `R$ ${event.value.toLocaleString("pt-BR")}` : "Fechada"}
                             </span>
                           ) : null}
+                          {event.matchedRuleLabel && (
+                            <div style={{ marginTop: "4px" }}>
+                              <span
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: "4px",
+                                  background: "rgba(168, 85, 247, 0.14)",
+                                  border: "1px solid rgba(168, 85, 247, 0.32)",
+                                  color: "#d8b4fe",
+                                  padding: "2px 7px",
+                                  borderRadius: "6px",
+                                  fontSize: "10px",
+                                  fontWeight: 700,
+                                }}
+                                title="Mudança de etapa acionada por etiqueta do WhatsApp Business (Uazapi)"
+                              >
+                                <Tag size={10} /> {event.matchedRuleLabel}
+                              </span>
+                            </div>
+                          )}
                         </td>
 
                         <td style={{ padding: "10px 12px" }}>
@@ -3118,9 +3333,16 @@ export default function GoogleAdsPage() {
                       <div style={{ color: "#eab308", fontSize: "11px", marginTop: "4px" }}>
                         Aguardando enviar 1ª mensagem no WhatsApp...
                       </div>
-                      <div style={{ background: "#090f20", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#38bdf8" }}>
-                        <KeyRound size={11} style={{ display: "inline", marginRight: "4px" }} />
-                        {lead.keyword || "Pesquisa Google"}
+                      <div style={{ background: "#090f20", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#38bdf8", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px", flexWrap: "wrap" }}>
+                        <span>
+                          <KeyRound size={11} style={{ display: "inline", marginRight: "4px" }} />
+                          {lead.keyword || "Pesquisa Google"}
+                        </span>
+                        {lead.matchType && (
+                          <span style={{ fontSize: "10px", color: "#34d399", fontWeight: 700 }}>
+                            {formatMatchTypePt(lead.matchType)}
+                          </span>
+                        )}
                       </div>
                       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
                         <button
@@ -3171,10 +3393,37 @@ export default function GoogleAdsPage() {
                         <Phone size={11} style={{ display: "inline", marginRight: "4px" }} />
                         {lead.leadPhone || "Sem telefone"}
                       </div>
-                      <div style={{ background: "#090f20", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#38bdf8" }}>
-                        <KeyRound size={11} style={{ display: "inline", marginRight: "4px" }} />
-                        {lead.keyword || "Pesquisa Google"}
+                      <div style={{ background: "#090f20", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#38bdf8", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px", flexWrap: "wrap" }}>
+                        <span>
+                          <KeyRound size={11} style={{ display: "inline", marginRight: "4px" }} />
+                          {lead.keyword || "Pesquisa Google"}
+                        </span>
+                        {lead.matchType && (
+                          <span style={{ fontSize: "10px", color: "#34d399", fontWeight: 700 }}>
+                            {formatMatchTypePt(lead.matchType)}
+                          </span>
+                        )}
                       </div>
+                      {lead.matchedRuleLabel && (
+                        <div style={{ marginTop: "6px" }}>
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "4px",
+                              background: "rgba(168, 85, 247, 0.14)",
+                              border: "1px solid rgba(168, 85, 247, 0.35)",
+                              color: "#d8b4fe",
+                              padding: "3px 8px",
+                              borderRadius: "6px",
+                              fontSize: "10px",
+                              fontWeight: 700,
+                            }}
+                          >
+                            <Tag size={10} /> Etiqueta WhatsApp: {lead.matchedRuleLabel}
+                          </span>
+                        </div>
+                      )}
                       <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10px" }}>
                         <button
                           type="button"
@@ -3234,6 +3483,31 @@ export default function GoogleAdsPage() {
                       <div style={{ background: "#090f20", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#c084fc" }}>
                         Proposta / Orçamento Enviado
                       </div>
+                      {lead.matchedRuleLabel ? (
+                        <div style={{ marginTop: "6px" }}>
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "4px",
+                              background: "rgba(168, 85, 247, 0.16)",
+                              border: "1px solid rgba(168, 85, 247, 0.4)",
+                              color: "#e9d5ff",
+                              padding: "3px 8px",
+                              borderRadius: "6px",
+                              fontSize: "10px",
+                              fontWeight: 700,
+                            }}
+                          >
+                            <Tag size={10} /> Etiqueta WhatsApp: {lead.matchedRuleLabel}
+                          </span>
+                        </div>
+                      ) : lead.matchedRulePhrase ? (
+                        <div style={{ marginTop: "6px", fontSize: "10px", color: "#94a3b8" }}>
+                          <MessageSquare size={10} style={{ display: "inline", marginRight: "4px" }} />
+                          Frase automática: “{lead.matchedRulePhrase}”
+                        </div>
+                      ) : null}
 
                       {closingSaleLeadId === lead.id ? (
                         <div style={{ marginTop: "10px", display: "flex", flexDirection: "column", gap: "6px", background: "#090f20", padding: "8px", borderRadius: "6px", border: "1px solid rgba(16,185,129,0.4)" }}>
@@ -3342,6 +3616,31 @@ export default function GoogleAdsPage() {
                       <div style={{ background: "rgba(16, 185, 129, 0.1)", padding: "6px 8px", borderRadius: "6px", marginTop: "8px", fontSize: "11px", color: "#34d399" }}>
                         Venda confirmada no funil Google Ads
                       </div>
+                      {lead.matchedRuleLabel ? (
+                        <div style={{ marginTop: "6px" }}>
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "4px",
+                              background: "rgba(16, 185, 129, 0.14)",
+                              border: "1px solid rgba(16, 185, 129, 0.38)",
+                              color: "#6ee7b7",
+                              padding: "3px 8px",
+                              borderRadius: "6px",
+                              fontSize: "10px",
+                              fontWeight: 700,
+                            }}
+                          >
+                            <Tag size={10} /> Etiqueta WhatsApp: {lead.matchedRuleLabel}
+                          </span>
+                        </div>
+                      ) : lead.matchedRulePhrase ? (
+                        <div style={{ marginTop: "6px", fontSize: "10px", color: "#94a3b8" }}>
+                          <MessageSquare size={10} style={{ display: "inline", marginRight: "4px" }} />
+                          Frase automática: “{lead.matchedRulePhrase}”
+                        </div>
+                      ) : null}
                       <div style={{ display: "flex", justifyContent: "flex-start", marginTop: "8px" }}>
                         <button
                           type="button"
@@ -5304,7 +5603,7 @@ export default function GoogleAdsPage() {
                             <td style={{ padding: "10px 12px" }}>
                               <div style={{ color: "#ffffff", fontWeight: 700 }}>{t.searchTerm}</div>
                               <div style={{ fontSize: "10px", color: "#94a3b8", marginTop: "2px" }}>
-                                {t.source} • {t.matchType} • Status: {t.status}
+                                {t.source} • {formatMatchTypePt(t.matchType)} • Status: {t.status}
                               </div>
                             </td>
                             <td style={{ padding: "10px 12px", color: "#cbd5e1", fontSize: "12px" }}>
@@ -5378,7 +5677,7 @@ export default function GoogleAdsPage() {
                         <tr key={idx} style={{ borderBottom: "1px solid #0f172a" }}>
                           <td style={{ padding: "10px 12px" }}>
                             <div style={{ color: "#38bdf8", fontWeight: 700 }}>{k.keyword}</div>
-                            <small style={{ color: "#94a3b8" }}>{k.matchType} • {k.status}</small>
+                            <small style={{ color: "#94a3b8" }}>{formatMatchTypePt(k.matchType)} • {k.status}</small>
                           </td>
                           <td style={{ padding: "10px 12px", fontSize: "12px", color: "#cbd5e1" }}>
                             <div>{k.adGroup}</div>
@@ -5758,11 +6057,34 @@ export default function GoogleAdsPage() {
                   Cada cliente possui dados, funil, regras de conversão e Uazapi 100% isolados em <code>/data/tenants/&lt;slug&gt;/</code>.
                 </p>
               </div>
-              {copiedHelperMsg && (
-                <span style={{ background: "rgba(16,185,129,0.16)", border: "1px solid rgba(16,185,129,0.4)", color: "#6ee7b7", padding: "6px 12px", borderRadius: "8px", fontSize: "12px", fontWeight: 700 }}>
-                  {copiedHelperMsg}
-                </span>
-              )}
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                {copiedHelperMsg && (
+                  <span style={{ background: "rgba(16,185,129,0.16)", border: "1px solid rgba(16,185,129,0.4)", color: "#6ee7b7", padding: "6px 12px", borderRadius: "8px", fontSize: "12px", fontWeight: 700 }}>
+                    {copiedHelperMsg}
+                  </span>
+                )}
+                {activeTenant && (
+                  <button
+                    type="button"
+                    onClick={() => setSetupGuideTenant(activeTenant)}
+                    style={{
+                      background: "rgba(56, 189, 248, 0.14)",
+                      border: "1px solid rgba(56, 189, 248, 0.35)",
+                      color: "#7dd3fc",
+                      borderRadius: "8px",
+                      padding: "7px 12px",
+                      fontSize: "12px",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "6px",
+                    }}
+                  >
+                    <ShieldCheck size={14} /> Guia Setup LP & Uazapi ({activeTenant.name})
+                  </button>
+                )}
+              </div>
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(310px, 1fr))", gap: "14px" }}>
@@ -5925,6 +6247,23 @@ export default function GoogleAdsPage() {
                         }}
                       >
                         Copiar Script LP
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setSetupGuideTenant(t)}
+                        style={{
+                          background: "rgba(56, 189, 248, 0.14)",
+                          border: "1px solid rgba(56, 189, 248, 0.35)",
+                          color: "#7dd3fc",
+                          borderRadius: "7px",
+                          padding: "6px 10px",
+                          fontSize: "11px",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Guia Setup
                       </button>
 
                       {t.slug !== "cnac" && (
@@ -6529,8 +6868,502 @@ export default function GoogleAdsPage() {
               </div>
             </div>
           </div>
+
+          {/* MONITOR GLOBAL DE QUEDAS UAZAPI (PASSO M5 — EXCLUSIVO DO GESTOR) */}
+          <div className="gads-panel" style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px" }}>
+              <div>
+                <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+                  <AlertTriangle size={16} color={(monitorSummary?.offlineCount ?? 0) > 0 ? "#f87171" : "#34d399"} />
+                  Monitoramento Global de Quedas Uazapi (Alertas no WhatsApp do Gestor)
+                </h3>
+                <p style={{ fontSize: "12px", color: "#94a3b8", margin: "4px 0 0" }}>
+                  Verifica periodicamente todas as instâncias dos clientes e usa qualquer instância saudável online para avisar seu WhatsApp se alguma desconectar.
+                </p>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                {monitorSummary && (
+                  <span
+                    style={{
+                      background: monitorSummary.offlineCount > 0 ? "rgba(239,68,68,0.14)" : "rgba(16,185,129,0.14)",
+                      border: `1px solid ${monitorSummary.offlineCount > 0 ? "rgba(239,68,68,0.38)" : "rgba(16,185,129,0.38)"}`,
+                      color: monitorSummary.offlineCount > 0 ? "#fca5a5" : "#6ee7b7",
+                      borderRadius: "8px",
+                      padding: "6px 10px",
+                      fontSize: "11px",
+                      fontWeight: 700,
+                    }}
+                  >
+                    {monitorSummary.onlineCount} online · {monitorSummary.offlineCount} offline
+                    {monitorConfig?.lastCheckedAt ? ` · Checado ${formatBrDateTime(monitorConfig.lastCheckedAt)}` : ""}
+                  </span>
+                )}
+
+                <button
+                  type="button"
+                  disabled={isLoadingMonitor}
+                  onClick={handleCheckAllUazapiNow}
+                  style={{
+                    background: "#1e293b",
+                    border: "1px solid #334155",
+                    color: "#e2e8f0",
+                    borderRadius: "8px",
+                    padding: "7px 12px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                >
+                  <RefreshCw size={13} /> {isLoadingMonitor ? "Verificando..." : "Verificar Todas Agora"}
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "10px", alignItems: "end" }}>
+              <div>
+                <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
+                  WhatsApp do Gestor (DDI 55 + DDD) *
+                </label>
+                <input
+                  type="text"
+                  name="alpha_manager_alert_phone"
+                  autoComplete="off"
+                  placeholder="Ex: 5521999998888"
+                  value={monitorPhoneDraft}
+                  onChange={(e) => setMonitorPhoneDraft(e.target.value.replace(/\D/g, ""))}
+                  className="gads-input-field"
+                  style={{
+                    padding: "8px 11px",
+                    fontSize: "12px",
+                    borderColor:
+                      monitorPhoneDraft && monitorPhoneDraft !== "55"
+                        ? isBrazilianPhoneDdiValid(monitorPhoneDraft)
+                          ? "rgba(16,185,129,0.5)"
+                          : "rgba(239,68,68,0.5)"
+                        : undefined,
+                  }}
+                />
+              </div>
+
+              <div>
+                <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
+                  Instância Remetente Preferencial
+                </label>
+                <select
+                  value={monitorSenderSlugDraft}
+                  onChange={(e) => setMonitorSenderSlugDraft(e.target.value)}
+                  className="gads-select-field"
+                  style={{ padding: "8px 11px", fontSize: "12px" }}
+                >
+                  <option value="">Automático (1ª instância online)</option>
+                  {tenantsList.map((t) => (
+                    <option key={t.slug} value={t.slug}>
+                      {t.name} (/r/{t.slug})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
+                  Intervalo Anti-Spam (Cooldown)
+                </label>
+                <select
+                  value={monitorCooldownDraft}
+                  onChange={(e) => setMonitorCooldownDraft(Number(e.target.value))}
+                  className="gads-select-field"
+                  style={{ padding: "8px 11px", fontSize: "12px" }}
+                >
+                  <option value={30}>A cada 30 min</option>
+                  <option value={60}>A cada 1 hora</option>
+                  <option value={120}>A cada 2 horas (Padrão)</option>
+                  <option value={240}>A cada 4 horas</option>
+                </select>
+              </div>
+
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  disabled={isSavingMonitor}
+                  onClick={() => handleSaveAndTestMonitor("save_config")}
+                  style={{
+                    background: "#1e293b",
+                    border: "1px solid #334155",
+                    color: "#e2e8f0",
+                    borderRadius: "8px",
+                    padding: "8px 12px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  Salvar
+                </button>
+                <button
+                  type="button"
+                  disabled={isSavingMonitor}
+                  onClick={() => handleSaveAndTestMonitor("send_test_alert")}
+                  style={{
+                    background: "#059669",
+                    border: "none",
+                    color: "#fff",
+                    borderRadius: "8px",
+                    padding: "8px 14px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                >
+                  <Send size={13} /> {isSavingMonitor ? "Enviando..." : "Salvar & Testar Alerta"}
+                </button>
+              </div>
+            </div>
+
+            <label style={{ display: "inline-flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#cbd5e1", cursor: "pointer", width: "fit-content" }}>
+              <input
+                type="checkbox"
+                checked={monitorEnabledDraft}
+                onChange={(e) => setMonitorEnabledDraft(e.target.checked)}
+              />
+              Ativar envio automático de alertas no WhatsApp quando alguma Uazapi cair (e aviso quando reconectar)
+            </label>
+
+            {monitorFeedback && (
+              <div
+                style={{
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  color: monitorFeedback.ok ? "#6ee7b7" : "#fca5a5",
+                  background: monitorFeedback.ok ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.1)",
+                  border: `1px solid ${monitorFeedback.ok ? "rgba(16,185,129,0.3)" : "rgba(239,68,68,0.3)"}`,
+                  borderRadius: "8px",
+                  padding: "8px 12px",
+                }}
+              >
+                {monitorFeedback.msg}
+              </div>
+            )}
+
+            {monitorSummary && monitorSummary.instances.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: "10px" }}>
+                {monitorSummary.instances.map((inst) => (
+                  <div
+                    key={inst.key}
+                    style={{
+                      background: "#090f20",
+                      border: `1px solid ${inst.connected ? "rgba(16,185,129,0.28)" : "rgba(239,68,68,0.4)"}`,
+                      borderRadius: "10px",
+                      padding: "10px 12px",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: "8px",
+                    }}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: "12px", fontWeight: 700, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {inst.tenantName}
+                      </div>
+                      <div style={{ fontSize: "11px", color: "#94a3b8" }}>
+                        {inst.instanceName} {inst.phone ? `• ${inst.phone}` : ""}
+                      </div>
+                      {!inst.connected && inst.error && (
+                        <div style={{ fontSize: "11px", color: "#fca5a5", marginTop: "2px" }}>{inst.error}</div>
+                      )}
+                    </div>
+                    <span
+                      style={{
+                        fontSize: "11px",
+                        fontWeight: 700,
+                        color: inst.connected ? "#34d399" : "#f87171",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {inst.connected ? `Online (${inst.latencyMs || 0}ms)` : "Offline"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {monitorAlerts.length > 0 && (
+              <div style={{ borderTop: "1px solid #1e293b", paddingTop: "10px" }}>
+                <div style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "6px" }}>
+                  Últimos Alertas Registrados:
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  {monitorAlerts.slice(0, 5).map((al) => (
+                    <div
+                      key={al.id}
+                      style={{
+                        background: "#090f20",
+                        border: "1px solid #1e293b",
+                        borderRadius: "8px",
+                        padding: "7px 10px",
+                        fontSize: "11px",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        flexWrap: "wrap",
+                        gap: "8px",
+                      }}
+                    >
+                      <span style={{ color: al.type === "down" ? "#fca5a5" : "#6ee7b7", fontWeight: 600 }}>
+                        [{al.type === "down" ? "QUEDA" : al.type === "recovered" ? "RECONECTADA" : "TESTE"}]{" "}
+                        {al.tenantName} ({al.instanceName}) — {al.message}
+                        {!al.sent && al.error ? ` · Erro: ${al.error}` : ""}
+                      </span>
+                      <span style={{ color: "#64748b" }}>{formatBrDateTime(al.timestamp)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
+
+      {/* MODAL DINÂMICO DE SETUP POR CLIENTE (ZERO POLUIÇÃO NO PAINEL) */}
+      {setupGuideTenant && (() => {
+        const originUrl =
+          typeof window !== "undefined" ? window.location.origin : "https://painel.anunciosalpha.com.br";
+        const scriptTag = `<script src="${originUrl}/alpha-track.js"></script>`;
+        const redirectLink = `${originUrl}/r/${setupGuideTenant.slug}`;
+        const adsTrackingTemplate = "{lpurl}?utm_campaign={campaignid}&utm_content={adgroupid}&utm_term={keyword}";
+        const webhookUrl = `${originUrl}/api/webhooks/google-whatsapp?client=${setupGuideTenant.slug}`;
+        const portalUrl = `${originUrl}/google-ads/acesso`;
+
+        const copySnippet = (value: string, label: string) => {
+          navigator.clipboard?.writeText(value).catch(() => {});
+          setCopiedHelperMsg(`${label} copiado!`);
+          setTimeout(() => setCopiedHelperMsg(null), 2500);
+        };
+
+        return (
+          <div
+            onClick={() => setSetupGuideTenant(null)}
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(2, 6, 23, 0.78)",
+              backdropFilter: "blur(4px)",
+              zIndex: 60,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "16px",
+            }}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                background: "#0b1329",
+                border: "1px solid #334155",
+                borderRadius: "14px",
+                width: "100%",
+                maxWidth: "740px",
+                maxHeight: "90vh",
+                overflowY: "auto",
+                padding: "20px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "14px",
+                boxShadow: "0 24px 60px rgba(0, 0, 0, 0.55)",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px", borderBottom: "1px solid #1e293b", paddingBottom: "12px" }}>
+                <div>
+                  <div style={{ fontSize: "11px", fontWeight: 700, color: "#38bdf8", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    Checklist Rápido de Implantação (100% Personalizado)
+                  </div>
+                  <h3 style={{ fontSize: "18px", fontWeight: 800, color: "#fff", margin: "2px 0 0" }}>
+                    Guia Setup: {setupGuideTenant.name} (/r/{setupGuideTenant.slug})
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSetupGuideTenant(null)}
+                  style={{
+                    background: "#1e293b",
+                    border: "1px solid #334155",
+                    color: "#cbd5e1",
+                    borderRadius: "8px",
+                    padding: "6px",
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                  }}
+                  aria-label="Fechar guia"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              {copiedHelperMsg && (
+                <div style={{ background: "rgba(16,185,129,0.16)", border: "1px solid rgba(16,185,129,0.4)", color: "#6ee7b7", padding: "8px 12px", borderRadius: "8px", fontSize: "12px", fontWeight: 700 }}>
+                  {copiedHelperMsg}
+                </div>
+              )}
+
+              {/* PASSO 1: SCRIPT DA LANDING PAGE */}
+              <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "12px 14px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: "13px", fontWeight: 700, color: "#fff" }}>
+                    1. Script na Landing Page do Cliente (WordPress / Elementor / HTML)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copySnippet(scriptTag, "Script da LP")}
+                    style={{ background: "#2563eb", border: "none", color: "#fff", borderRadius: "6px", padding: "5px 10px", fontSize: "11px", fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "5px" }}
+                  >
+                    <Copy size={12} /> Copiar Script
+                  </button>
+                </div>
+                <div style={{ fontSize: "12px", color: "#94a3b8" }}>
+                  Cole antes do fechamento do <code>&lt;/head&gt;</code> ou <code>&lt;/body&gt;</code> na página de vendas. Ele captura <code>gclid</code>, <code>utm_term</code>, <code>utm_campaign</code> e <code>utm_content</code> na hora (0ms) e injeta no botão de WhatsApp.
+                </div>
+                <pre style={{ margin: 0, background: "#060b18", border: "1px solid #1e293b", borderRadius: "8px", padding: "9px 11px", fontSize: "12px", color: "#7dd3fc", overflowX: "auto" }}>
+                  {scriptTag}
+                </pre>
+              </div>
+
+              {/* PASSO 2: LINK DO BOTÃO WHATSAPP NA LP */}
+              <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "12px 14px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: "13px", fontWeight: 700, color: "#fff" }}>
+                    2. Link do Botão WhatsApp na Landing Page
+                  </span>
+                  <div style={{ display: "flex", gap: "6px" }}>
+                    <button
+                      type="button"
+                      onClick={() => copySnippet(redirectLink, "Link /r/ do WhatsApp")}
+                      style={{ background: "#0284c7", border: "none", color: "#fff", borderRadius: "6px", padding: "5px 10px", fontSize: "11px", fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "5px" }}
+                    >
+                      <Copy size={12} /> Copiar Link
+                    </button>
+                    <a
+                      href={redirectLink}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ background: "#1e293b", border: "1px solid #334155", color: "#cbd5e1", borderRadius: "6px", padding: "5px 10px", fontSize: "11px", fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                    >
+                      <ExternalLink size={12} /> Testar
+                    </a>
+                  </div>
+                </div>
+                <div style={{ fontSize: "12px", color: "#94a3b8" }}>
+                  Substitua qualquer link antigo <code>wa.me/...</code> do botão WhatsApp por esta URL ({setupGuideTenant.routingMode === "roulette" ? `Roleta com ${setupGuideTenant.attendants.length} atendentes` : "Atendimento único"}):
+                </div>
+                <pre style={{ margin: 0, background: "#060b18", border: "1px solid #1e293b", borderRadius: "8px", padding: "9px 11px", fontSize: "12px", color: "#38bdf8", overflowX: "auto" }}>
+                  {redirectLink}
+                </pre>
+              </div>
+
+              {/* PASSO 3: MODELO DE ACOMPANHAMENTO GOOGLE ADS */}
+              <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "12px 14px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: "13px", fontWeight: 700, color: "#fff" }}>
+                    3. Google Ads: Codificação Automática + Modelo de Acompanhamento
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copySnippet(adsTrackingTemplate, "Modelo de acompanhamento")}
+                    style={{ background: "#1e293b", border: "1px solid #334155", color: "#e2e8f0", borderRadius: "6px", padding: "5px 10px", fontSize: "11px", fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "5px" }}
+                  >
+                    <Copy size={12} /> Copiar Modelo
+                  </button>
+                </div>
+                <div style={{ fontSize: "12px", color: "#94a3b8" }}>
+                  Na conta Google Ads {setupGuideTenant.googleCustomerId ? `(${setupGuideTenant.googleCustomerId})` : ""}, deixe a <strong>Codificação automática (GCLID)</strong> ativada e cole em <em>Modelo de acompanhamento</em>:
+                </div>
+                <pre style={{ margin: 0, background: "#060b18", border: "1px solid #1e293b", borderRadius: "8px", padding: "9px 11px", fontSize: "12px", color: "#cbd5e1", overflowX: "auto" }}>
+                  {adsTrackingTemplate}
+                </pre>
+              </div>
+
+              {/* PASSO 4: WEBHOOK NA UAZAPI DO CLIENTE */}
+              <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "12px 14px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: "13px", fontWeight: 700, color: "#fff" }}>
+                    4. Webhook no Painel Uazapi de {setupGuideTenant.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copySnippet(webhookUrl, "Webhook Uazapi")}
+                    style={{ background: "#059669", border: "none", color: "#fff", borderRadius: "6px", padding: "5px 10px", fontSize: "11px", fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "5px" }}
+                  >
+                    <Copy size={12} /> Copiar Webhook
+                  </button>
+                </div>
+                <div style={{ fontSize: "12px", color: "#94a3b8" }}>
+                  No painel Uazapi da instância deste cliente, cole esta URL e marque exatamente estes <strong>4 eventos</strong>:
+                </div>
+                <pre style={{ margin: 0, background: "#060b18", border: "1px solid #1e293b", borderRadius: "8px", padding: "9px 11px", fontSize: "12px", color: "#6ee7b7", overflowX: "auto" }}>
+                  {webhookUrl}
+                </pre>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                  {["messages", "chats", "chat_labels", "labels"].map((ev) => (
+                    <span
+                      key={ev}
+                      style={{
+                        background: "rgba(16, 185, 129, 0.14)",
+                        border: "1px solid rgba(16, 185, 129, 0.35)",
+                        color: "#6ee7b7",
+                        borderRadius: "6px",
+                        padding: "3px 8px",
+                        fontSize: "11px",
+                        fontWeight: 700,
+                        fontFamily: "ui-monospace, monospace",
+                      }}
+                    >
+                      ✓ {ev}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* PASSO 5: REGRAS NA ABA 5 + PORTAL DO CLIENTE */}
+              <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "12px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }}>
+                <div>
+                  <div style={{ fontSize: "13px", fontWeight: 700, color: "#fff" }}>
+                    5. Finalizar Regras de Etiquetas/Frases & Enviar Portal
+                  </div>
+                  <div style={{ fontSize: "12px", color: "#94a3b8" }}>
+                    Configure frases/etiquetas na Aba 5 para este cliente e envie o link de login <code>/google-ads/acesso</code>.
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const slug = setupGuideTenant.slug;
+                      setSetupGuideTenant(null);
+                      handleSelectTenant(slug);
+                      setCurrentTab("conversoes");
+                    }}
+                    style={{ background: "#1e293b", border: "1px solid #334155", color: "#e2e8f0", borderRadius: "7px", padding: "7px 12px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}
+                  >
+                    Abrir Regras (Aba 5)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => copySnippet(portalUrl, "Link do Portal (/google-ads/acesso)")}
+                    style={{ background: "#7c3aed", border: "none", color: "#fff", borderRadius: "7px", padding: "7px 12px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}
+                  >
+                    Copiar Link Portal
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
