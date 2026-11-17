@@ -8,9 +8,7 @@ import {
   Clock,
   RefreshCw,
   Users,
-  UserPlus,
   Phone,
-  Power,
   Trash2,
   Search,
   KeyRound,
@@ -29,7 +27,6 @@ import {
   BarChart3,
   Calendar,
   Download,
-  Percent,
   AlertTriangle,
   Lock,
   Target,
@@ -39,6 +36,8 @@ import {
   ChevronDown,
   ChevronUp,
   LayoutDashboard,
+  Building2,
+  Tag,
 } from "lucide-react";
 
 interface Attendant {
@@ -69,6 +68,8 @@ interface GoogleLeadEvent {
   purchasedAt?: string;
   value?: number;
   triggerPhrase?: string;
+  matchedRulePhrase?: string;
+  matchedRuleLabel?: string;
   ociOrderId?: string;
   ociError?: string | null;
   ociResult?: string | null;
@@ -83,11 +84,59 @@ interface ConversionRules {
   quote: {
     actionName: string;
     phrases: string[];
+    labels?: string[];
   };
   purchase: {
     actionName: string;
     phrases: string[];
+    labels?: string[];
   };
+}
+
+interface ManagedTenantAttendant {
+  id: string;
+  name: string;
+  phone: string;
+  active: boolean;
+  hasToken?: boolean;
+  tokenMasked?: string;
+  validDdi55?: boolean;
+}
+
+interface ManagedTenantUser {
+  id: string;
+  username: string;
+  displayName: string;
+  active: boolean;
+  createdAt: string;
+  lastLoginAt?: string | null;
+}
+
+interface ManagedTenant {
+  slug: string;
+  name: string;
+  active: boolean;
+  googleCustomerId: string;
+  routingMode: "single" | "roulette";
+  initialMessage: string;
+  attendants: ManagedTenantAttendant[];
+  uazapi: {
+    baseUrl: string;
+    configured: boolean;
+    hasSingleToken?: boolean;
+    hasJosiToken?: boolean;
+    hasSergioToken?: boolean;
+    singleTokenMasked?: string;
+    josiTokenMasked?: string;
+    sergioTokenMasked?: string;
+    updatedAt?: string;
+  };
+  clientAccess: {
+    enabled: boolean;
+    users: ManagedTenantUser[];
+  };
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 type DatePreset =
@@ -171,10 +220,42 @@ function getBrDateRangeForPreset(preset: DatePreset): { start: string; end: stri
   return { start: "", end: "" };
 }
 
-export default function GoogleAdsPage() {
-  const [currentTab, setCurrentTab] = useState<"overview" | "leads" | "funil" | "relatorios" | "roleta" | "conversoes" | "bi">("overview");
+function slugifyClientName(raw: string): string {
+  return String(raw || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
 
-  // Roleta de Atendentes
+function isBrazilianPhoneDdiValid(rawPhone: string): boolean {
+  const digits = String(rawPhone || "").replace(/\D/g, "");
+  return digits.startsWith("55") && (digits.length === 12 || digits.length === 13);
+}
+
+export default function GoogleAdsPage() {
+  const [currentTab, setCurrentTab] = useState<
+    "overview" | "leads" | "funil" | "relatorios" | "roleta" | "conversoes" | "bi" | "clientes"
+  >("overview");
+
+  // Multi-Cliente Google Ads (Passo M3 — 100% isolado da Meta)
+  const [tenantsList, setTenantsList] = useState<ManagedTenant[]>([]);
+  const [activeTenantSlug, setActiveTenantSlug] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      const fromUrl = new URLSearchParams(window.location.search).get("client");
+      if (fromUrl) return slugifyClientName(fromUrl) || "cnac";
+      return localStorage.getItem("alpha_google_active_tenant") || "cnac";
+    }
+    return "cnac";
+  });
+  const activeTenant = useMemo(
+    () => tenantsList.find((t) => t.slug === activeTenantSlug) || tenantsList[0] || null,
+    [tenantsList, activeTenantSlug]
+  );
+
+  // Roleta / Atendentes (dinâmicos por cliente ativo)
   const [attendants, setAttendants] = useState<Attendant[]>(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("alpha_google_attendants");
@@ -189,9 +270,6 @@ export default function GoogleAdsPage() {
       { id: "2", name: "Sérgio", phone: "5521994060206", active: true, leadsCount: 0 },
     ];
   });
-
-  const [newName, setNewName] = useState("");
-  const [newPhone, setNewPhone] = useState("");
 
   // Base Real de Leads, Auditoria e Relatórios + BI Avançado (Passo 4)
   const [leadEvents, setLeadEvents] = useState<GoogleLeadEvent[]>([]);
@@ -270,8 +348,10 @@ export default function GoogleAdsPage() {
       source?: string;
       baseUrl?: string;
       instancesCount?: number;
+      hasSingleToken?: boolean;
       hasJosiToken?: boolean;
       hasSergioToken?: boolean;
+      singleTokenMasked?: string;
       josiTokenMasked?: string;
       sergioTokenMasked?: string;
       lastSyncAt?: string | null;
@@ -320,43 +400,85 @@ export default function GoogleAdsPage() {
   const [reportAttendant, setReportAttendant] = useState("all");
   const [reportStage, setReportStage] = useState("all");
 
-  // Regras Dinâmicas de Conversão
+  // Regras Dinâmicas de Conversão (Frases + Etiquetas WhatsApp Business — Exclusivas do Gestor)
   const [rules, setRules] = useState<ConversionRules>({
     quote: {
       actionName: "WhatsApp - Orçamento Enviado",
       phrases: ["orçamento enviado", "orcamento enviado", "segue o orçamento", "proposta enviada", "segue seu orçamento"],
+      labels: [],
     },
     purchase: {
       actionName: "WhatsApp - Compra Realizada",
       phrases: ["pedido fechado", "compra realizada", "venda confirmada", "pedido confirmado", "segue copia do pedido"],
+      labels: [],
     },
   });
 
   const [newQuotePhrase, setNewQuotePhrase] = useState("");
   const [newPurchasePhrase, setNewPurchasePhrase] = useState("");
+  const [newQuoteLabel, setNewQuoteLabel] = useState("");
+  const [newPurchaseLabel, setNewPurchaseLabel] = useState("");
   const [isSavingRules, setIsSavingRules] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [rulesErrorMsg, setRulesErrorMsg] = useState<string | null>(null);
   const lastRulesEditRef = useRef<number>(0);
   const isSavingRulesRef = useRef<boolean>(false);
 
-  // Configuração da Reconciliação Automática WhatsApp (Uazapi Pull Sync)
+  // Configuração da Reconciliação Automática WhatsApp (Uazapi Pull Sync + Teste Ao Vivo + Etiquetas)
   const [uazapiBaseUrl, setUazapiBaseUrl] = useState("");
+  const [uazapiSingleToken, setUazapiSingleToken] = useState("");
   const [uazapiJosiToken, setUazapiJosiToken] = useState("");
   const [uazapiSergioToken, setUazapiSergioToken] = useState("");
   const [isSavingUazapi, setIsSavingUazapi] = useState(false);
   const [uazapiFeedback, setUazapiFeedback] = useState<string | null>(null);
   const uazapiConfigLoadedRef = useRef<boolean>(false);
   const [editingUazapiTokens, setEditingUazapiTokens] = useState(false);
+  const [availableWaLabels, setAvailableWaLabels] = useState<Array<{ id?: string; name: string }>>([]);
+  const [isTestingUazapi, setIsTestingUazapi] = useState(false);
+  const [uazapiTestResult, setUazapiTestResult] = useState<any>(null);
   const [showAdvancedTech, setShowAdvancedTech] = useState(false);
   const [closingSaleLeadId, setClosingSaleLeadId] = useState<string | null>(null);
   const [closingSaleValue, setClosingSaleValue] = useState<string>("1200");
+
+  // Estados da Aba "Clientes & Acessos" (Exclusiva do Gestor)
+  const [editingTenantSlug, setEditingTenantSlug] = useState<string | null>(null);
+  const [tenantFormName, setTenantFormName] = useState("");
+  const [tenantFormSlug, setTenantFormSlug] = useState("");
+  const [tenantFormCustomerId, setTenantFormCustomerId] = useState("");
+  const [tenantFormRoutingMode, setTenantFormRoutingMode] = useState<"single" | "roulette">("single");
+  const [tenantFormInitialMsg, setTenantFormInitialMsg] = useState("Olá! Gostaria de solicitar um orçamento.");
+  const [tenantFormAttendantName, setTenantFormAttendantName] = useState("Atendimento Principal");
+  const [tenantFormAttendantPhone, setTenantFormAttendantPhone] = useState("55");
+  const [tenantFormUazapiBase, setTenantFormUazapiBase] = useState("");
+  const [tenantFormUazapiToken, setTenantFormUazapiToken] = useState("");
+  const [tenantFormRouletteAttendants, setTenantFormRouletteAttendants] = useState<
+    Array<{ name: string; phone: string; uazapiToken: string }>
+  >([
+    { name: "Atendente 1", phone: "55", uazapiToken: "" },
+    { name: "Atendente 2", phone: "55", uazapiToken: "" },
+  ]);
+  const [isSavingTenant, setIsSavingTenant] = useState(false);
+  const [tenantFormFeedback, setTenantFormFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [tenantFormTestResult, setTenantFormTestResult] = useState<any>(null);
+  const [isTestingTenantFormUazapi, setIsTestingTenantFormUazapi] = useState(false);
+
+  // Acessos do Portal do Cliente (Passo M4) gerenciados pelo Gestor
+  const [accessTargetSlug, setAccessTargetSlug] = useState<string>("cnac");
+  const [clientUserUsername, setClientUserUsername] = useState("");
+  const [clientUserDisplayName, setClientUserDisplayName] = useState("");
+  const [clientUserPassword, setClientUserPassword] = useState("");
+  const [isSavingClientUser, setIsSavingClientUser] = useState(false);
+  const [clientUserFeedback, setClientUserFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [copiedHelperMsg, setCopiedHelperMsg] = useState<string | null>(null);
 
   const handleDownloadBackup = () => {
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(leadEvents, null, 2));
     const downloadAnchor = document.createElement("a");
     downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `backup_google_leads_${new Date().toISOString().slice(0, 10)}.json`);
+    downloadAnchor.setAttribute(
+      "download",
+      `backup_google_leads_${activeTenantSlug}_${new Date().toISOString().slice(0, 10)}.json`
+    );
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
@@ -365,7 +487,10 @@ export default function GoogleAdsPage() {
   const handleDeleteLead = async (id: string) => {
     if (!confirm("Deseja realmente remover este lead?")) return;
     try {
-      const res = await fetch(`/api/google-ads/leads?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const res = await fetch(
+        `/api/google-ads/leads?client=${encodeURIComponent(activeTenantSlug)}&id=${encodeURIComponent(id)}`,
+        { method: "DELETE" }
+      );
       if (res.ok) {
         await fetchData();
       }
@@ -375,9 +500,12 @@ export default function GoogleAdsPage() {
   };
 
   const handleCleanAttendantLeads = async () => {
-    if (!confirm("Remover os registros que possuem os números dos próprios atendentes (Josi e Sérgio)?")) return;
+    if (!confirm("Remover registros gravados acidentalmente com telefones dos próprios atendentes?")) return;
     try {
-      const res = await fetch("/api/google-ads/leads?action=clean_attendants", { method: "DELETE" });
+      const res = await fetch(
+        `/api/google-ads/leads?client=${encodeURIComponent(activeTenantSlug)}&action=clean_attendants`,
+        { method: "DELETE" }
+      );
       if (res.ok) {
         await fetchData();
       }
@@ -386,12 +514,25 @@ export default function GoogleAdsPage() {
     }
   };
 
-  // Verificação de números de atendentes (Josi e Sérgio)
-  const ATTENDANT_PHONES = ["5521980659269", "5521994060206", "21980659269", "21994060206"];
+  // Verificação dinâmica de números dos atendentes do cliente selecionado
+  const activeAttendantPhones = useMemo(() => {
+    const list: string[] = [];
+    const sourceAttendants =
+      activeTenant?.attendants && activeTenant.attendants.length > 0 ? activeTenant.attendants : attendants;
+    sourceAttendants.forEach((a) => {
+      const p = String(a.phone || "").replace(/\D/g, "");
+      if (p) {
+        list.push(p);
+        if (p.startsWith("55") && p.length >= 12) list.push(p.slice(2));
+      }
+    });
+    return list;
+  }, [activeTenant, attendants]);
+
   const isAttendantLead = (phone: string): boolean => {
     const p = String(phone || "").replace(/\D/g, "");
     if (!p) return false;
-    return ATTENDANT_PHONES.some(
+    return activeAttendantPhones.some(
       (att) => p === att || (p.length >= 8 && att.length >= 8 && p.slice(-8) === att.slice(-8))
     );
   };
@@ -429,10 +570,13 @@ export default function GoogleAdsPage() {
   const ociActionMapLoadedRef = useRef<boolean>(false);
   const lastAutoOciTriggerRef = useRef<number>(0);
 
-  const fetchOciDiagnostics = async (forceRefresh = false) => {
+  const fetchOciDiagnostics = async (forceRefresh = false, slugOverride?: string) => {
+    const targetSlug = slugOverride || activeTenantSlug;
     if (forceRefresh) setIsRefreshingOciDiag(true);
     try {
-      const res = await fetch(`/api/google-ads/oci${forceRefresh ? "?refresh=true" : ""}`);
+      const res = await fetch(
+        `/api/google-ads/oci?client=${encodeURIComponent(targetSlug)}${forceRefresh ? "&refresh=true" : ""}`
+      );
       if (res.ok) {
         const data = await res.json();
         setOciDiagnostics(data);
@@ -448,17 +592,17 @@ export default function GoogleAdsPage() {
         const readyCount = Number(data?.stats?.readyToUpload || 0);
         if (readyCount > 0 && Date.now() - lastAutoOciTriggerRef.current > 2 * 60 * 1000) {
           lastAutoOciTriggerRef.current = Date.now();
-          fetch("/api/google-ads/oci", {
+          fetch(`/api/google-ads/oci?client=${encodeURIComponent(targetSlug)}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ mode: "auto" }),
+            body: JSON.stringify({ mode: "auto", clientSlug: targetSlug }),
           })
             .then((r) => r.json())
             .then((autoRes) => {
               if (autoRes && (autoRes.uploadedCount > 0 || autoRes.failedCount > 0)) {
                 setOciSyncResult(autoRes);
-                fetchData();
-                fetch("/api/google-ads/oci")
+                fetchData(false, targetSlug);
+                fetch(`/api/google-ads/oci?client=${encodeURIComponent(targetSlug)}`)
                   .then((d) => d.json())
                   .then((refreshed) => setOciDiagnostics(refreshed))
                   .catch(() => {});
@@ -477,14 +621,14 @@ export default function GoogleAdsPage() {
   const handleTriggerOciRetry = async (id?: string) => {
     setIsSyncingOci(true);
     try {
-      const res = await fetch("/api/google-ads/oci", {
+      const res = await fetch(`/api/google-ads/oci?client=${encodeURIComponent(activeTenantSlug)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "retry_failed", id }),
+        body: JSON.stringify({ mode: "retry_failed", id, clientSlug: activeTenantSlug }),
       });
       const data = await res.json();
       setOciSyncResult(data);
-      await Promise.all([fetchData(), fetchOciDiagnostics(false)]);
+      await Promise.all([fetchData(false), fetchOciDiagnostics(false)]);
     } catch (err) {
       console.error("Erro ao reenviar falhas OCI:", err);
     } finally {
@@ -496,10 +640,14 @@ export default function GoogleAdsPage() {
     setIsSavingOciMapping(true);
     setOciMappingFeedback(null);
     try {
-      const res = await fetch("/api/google-ads/oci", {
+      const res = await fetch(`/api/google-ads/oci?client=${encodeURIComponent(activeTenantSlug)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "save_action_mapping", mapping: ociActionMapDraft }),
+        body: JSON.stringify({
+          action: "save_action_mapping",
+          mapping: ociActionMapDraft,
+          clientSlug: activeTenantSlug,
+        }),
       });
       if (res.ok) {
         setOciMappingFeedback("Vínculo de ações de conversão salvo com sucesso!");
@@ -515,12 +663,79 @@ export default function GoogleAdsPage() {
     }
   };
 
-  // Carregar dados (sincronização 100% automática no backend com cache 20m para BI Google)
-  const fetchData = async (refreshBi = false) => {
+  const fetchTenants = async () => {
+    try {
+      const res = await fetch("/api/google-ads/tenants");
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data?.tenants)) {
+          setTenantsList(data.tenants);
+          const current = data.tenants.find((t: ManagedTenant) => t.slug === activeTenantSlug);
+          if (current?.attendants?.length) {
+            setAttendants(
+              current.attendants.map((a: ManagedTenantAttendant) => ({
+                id: a.id,
+                name: a.name,
+                phone: a.phone,
+                active: a.active !== false,
+                leadsCount: 0,
+              }))
+            );
+          }
+        }
+      }
+    } catch {}
+  };
+
+  const handleSelectTenant = (slug: string) => {
+    const clean = slugifyClientName(slug) || "cnac";
+    setActiveTenantSlug(clean);
+    setAccessTargetSlug(clean);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("alpha_google_active_tenant", clean);
+    }
+    uazapiConfigLoadedRef.current = false;
+    ociActionMapLoadedRef.current = false;
+    setUazapiBaseUrl("");
+    setUazapiSingleToken("");
+    setUazapiJosiToken("");
+    setUazapiSergioToken("");
+    setUazapiFeedback(null);
+    setUazapiTestResult(null);
+    setAvailableWaLabels([]);
+    setFilterAttendant("all");
+    setReportAttendant("all");
+    setReportCampaign("all");
+    setReportAdGroup("all");
+    setLeadEvents([]);
+    setAuditLogs([]);
+    setOciSyncResult(null);
+    setEditingAdjustmentLeadId(null);
+
+    const found = tenantsList.find((t) => t.slug === clean);
+    if (found?.attendants) {
+      setAttendants(
+        found.attendants.map((a) => ({
+          id: a.id,
+          name: a.name,
+          phone: a.phone,
+          active: a.active !== false,
+          leadsCount: 0,
+        }))
+      );
+    }
+    void fetchData(false, clean);
+    void fetchOciDiagnostics(false, clean);
+  };
+
+  // Carregar dados do cliente ativo (sincronização 100% automática no backend com cache 20m para BI Google)
+  const fetchData = async (refreshBi = false, slugOverride?: string) => {
+    const targetSlug = slugOverride || activeTenantSlug;
     setIsRefreshing(true);
     if (refreshBi) setIsRefreshingBi(true);
     try {
       const queryParams = new URLSearchParams();
+      queryParams.set("client", targetSlug);
       if (reportStartDate) queryParams.set("startDate", reportStartDate);
       if (reportEndDate) queryParams.set("endDate", reportEndDate);
       if (reportCampaign !== "all") queryParams.set("campaign", reportCampaign);
@@ -528,12 +743,13 @@ export default function GoogleAdsPage() {
       if (reportAttendant !== "all") queryParams.set("attendant", reportAttendant);
       if (refreshBi) queryParams.set("refreshBi", "true");
 
+      const clientQs = `client=${encodeURIComponent(targetSlug)}`;
       const [leadsRes, auditsRes, rulesRes, reportsRes, entitiesStatusRes] = await Promise.all([
-        fetch("/api/google-ads/leads"),
-        fetch("/api/google-ads/leads?type=audits"),
-        fetch("/api/google-ads/leads?type=rules"),
+        fetch(`/api/google-ads/leads?${clientQs}`),
+        fetch(`/api/google-ads/leads?type=audits&${clientQs}`),
+        fetch(`/api/google-ads/leads?type=rules&${clientQs}`),
         fetch(`/api/google-ads/reports?${queryParams.toString()}`),
-        fetch("/api/google-ads/leads?type=entities_status"),
+        fetch(`/api/google-ads/leads?type=entities_status&${clientQs}`),
       ]);
 
       if (!leadsRes.ok) {
@@ -545,8 +761,7 @@ export default function GoogleAdsPage() {
       if (leadsRes.ok) {
         const data = await leadsRes.json();
         if (Array.isArray(data)) {
-          // Mantém 100% dos cliques reais com palavras-chave e descarta acessos fantasmas
-          setLeadEvents(data.filter(isRealGoogleLead));
+          setLeadEvents(data);
         }
       }
       if (auditsRes.ok) {
@@ -558,7 +773,18 @@ export default function GoogleAdsPage() {
         const canApplyPollRules =
           !isSavingRulesRef.current && Date.now() - lastRulesEditRef.current > 12000;
         if (canApplyPollRules && data && data.quote && data.purchase) {
-          setRules(data);
+          setRules({
+            quote: {
+              actionName: data.quote.actionName || "WhatsApp - Orçamento Enviado",
+              phrases: Array.isArray(data.quote.phrases) ? data.quote.phrases : [],
+              labels: Array.isArray(data.quote.labels) ? data.quote.labels : [],
+            },
+            purchase: {
+              actionName: data.purchase.actionName || "WhatsApp - Compra Realizada",
+              phrases: Array.isArray(data.purchase.phrases) ? data.purchase.phrases : [],
+              labels: Array.isArray(data.purchase.labels) ? data.purchase.labels : [],
+            },
+          });
         }
       }
       if (reportsRes.ok) {
@@ -572,6 +798,7 @@ export default function GoogleAdsPage() {
           if (!uazapiConfigLoadedRef.current && data.uazapiStatus) {
             uazapiConfigLoadedRef.current = true;
             if (data.uazapiStatus.baseUrl) setUazapiBaseUrl(data.uazapiStatus.baseUrl);
+            if (data.uazapiStatus.singleTokenMasked) setUazapiSingleToken(data.uazapiStatus.singleTokenMasked);
             if (data.uazapiStatus.josiTokenMasked) setUazapiJosiToken(data.uazapiStatus.josiTokenMasked);
             if (data.uazapiStatus.sergioTokenMasked) setUazapiSergioToken(data.uazapiStatus.sergioTokenMasked);
           }
@@ -611,11 +838,12 @@ export default function GoogleAdsPage() {
     setIsSendingAdjustment(true);
     setAdjustmentFeedback(null);
     try {
-      const res = await fetch("/api/google-ads/oci", {
+      const res = await fetch(`/api/google-ads/oci?client=${encodeURIComponent(activeTenantSlug)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "upload_adjustment",
+          clientSlug: activeTenantSlug,
           leadId,
           adjustmentType,
           adjustedValue,
@@ -639,10 +867,14 @@ export default function GoogleAdsPage() {
   };
 
   useEffect(() => {
+    fetchTenants();
+  }, []);
+
+  useEffect(() => {
     fetchData(false);
     const interval = setInterval(() => fetchData(false), 4000);
     return () => clearInterval(interval);
-  }, [reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant]);
+  }, [activeTenantSlug, reportStartDate, reportEndDate, reportCampaign, reportAdGroup, reportAttendant]);
 
   useEffect(() => {
     fetchOciDiagnostics(false);
@@ -650,7 +882,7 @@ export default function GoogleAdsPage() {
       fetchOciDiagnostics(false);
     }, 30000);
     return () => clearInterval(ociInterval);
-  }, []);
+  }, [activeTenantSlug]);
 
   // Manipulador de Presets de Data (Visão Geral & Relatórios — horário de Brasília)
   const handleDatePresetChange = (preset: DatePreset) => {
@@ -674,22 +906,33 @@ export default function GoogleAdsPage() {
     }
   }, [attendants]);
 
-  // Persistência imediata das Regras Dinâmicas (sem sobrescrita pelo polling de 4s)
+  // Persistência imediata das Regras Dinâmicas (Frases + Etiquetas WhatsApp Business — Exclusivas do Gestor)
   const persistRulesImmediately = async (nextRules: ConversionRules) => {
     lastRulesEditRef.current = Date.now();
     isSavingRulesRef.current = true;
     setIsSavingRules(true);
     setRulesErrorMsg(null);
     try {
-      const res = await fetch("/api/google-ads/leads", {
+      const res = await fetch(`/api/google-ads/leads?client=${encodeURIComponent(activeTenantSlug)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "save_rules", rules: nextRules }),
+        body: JSON.stringify({ type: "save_rules", clientSlug: activeTenantSlug, rules: nextRules }),
       });
       if (res.ok) {
         const data = await res.json().catch(() => null);
         if (data?.rules) {
-          setRules(data.rules);
+          setRules({
+            quote: {
+              actionName: data.rules.quote?.actionName || "WhatsApp - Orçamento Enviado",
+              phrases: Array.isArray(data.rules.quote?.phrases) ? data.rules.quote.phrases : [],
+              labels: Array.isArray(data.rules.quote?.labels) ? data.rules.quote.labels : [],
+            },
+            purchase: {
+              actionName: data.rules.purchase?.actionName || "WhatsApp - Compra Realizada",
+              phrases: Array.isArray(data.rules.purchase?.phrases) ? data.rules.purchase.phrases : [],
+              labels: Array.isArray(data.rules.purchase?.labels) ? data.rules.purchase.labels : [],
+            },
+          });
         }
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 2500);
@@ -742,8 +985,73 @@ export default function GoogleAdsPage() {
     void persistRulesImmediately(updated);
   };
 
+  const handleAddLabelRule = (type: "quote" | "purchase", rawLabel: string) => {
+    const clean = rawLabel.trim();
+    if (!clean) return;
+    const currentLabels = Array.isArray(rules[type].labels) ? rules[type].labels : [];
+    if (currentLabels.some((l) => l.trim().toLowerCase() === clean.toLowerCase())) {
+      if (type === "quote") setNewQuoteLabel("");
+      if (type === "purchase") setNewPurchaseLabel("");
+      return;
+    }
+
+    lastRulesEditRef.current = Date.now();
+    const updated: ConversionRules = {
+      ...rules,
+      [type]: {
+        ...rules[type],
+        labels: [...currentLabels, clean],
+      },
+    };
+    setRules(updated);
+    if (type === "quote") setNewQuoteLabel("");
+    if (type === "purchase") setNewPurchaseLabel("");
+    void persistRulesImmediately(updated);
+  };
+
+  const handleRemoveLabelRule = (type: "quote" | "purchase", labelToRemove: string) => {
+    lastRulesEditRef.current = Date.now();
+    const currentLabels = Array.isArray(rules[type].labels) ? rules[type].labels : [];
+    const updated: ConversionRules = {
+      ...rules,
+      [type]: {
+        ...rules[type],
+        labels: currentLabels.filter((l) => l !== labelToRemove),
+      },
+    };
+    setRules(updated);
+    void persistRulesImmediately(updated);
+  };
+
   const handleSaveRules = async () => {
     await persistRulesImmediately(rules);
+  };
+
+  const handleTestLiveUazapi = async () => {
+    setIsTestingUazapi(true);
+    setUazapiFeedback(null);
+    try {
+      const res = await fetch(`/api/google-ads/uazapi-test?client=${encodeURIComponent(activeTenantSlug)}`);
+      const data = await res.json().catch(() => null);
+      if (data) {
+        setUazapiTestResult(data);
+        if (Array.isArray(data.availableLabels)) {
+          setAvailableWaLabels(data.availableLabels);
+        }
+        const okCount = Array.isArray(data.instances)
+          ? data.instances.filter((i: any) => i.connected).length
+          : 0;
+        setUazapiFeedback(
+          data.anyConnected
+            ? `Conexão Uazapi ativa (${okCount} instância(s) conectada(s))! ${data.availableLabels?.length || 0} etiqueta(s) do WhatsApp Business carregada(s).`
+            : "Uazapi configurada, mas nenhuma instância respondeu como conectada neste teste."
+        );
+      }
+    } catch {
+      setUazapiFeedback("Erro ao testar conexão Uazapi ao vivo.");
+    } finally {
+      setIsTestingUazapi(false);
+    }
   };
 
   const handleSaveUazapiConfig = async (e: React.FormEvent) => {
@@ -751,14 +1059,17 @@ export default function GoogleAdsPage() {
     setIsSavingUazapi(true);
     setUazapiFeedback(null);
     try {
-      const res = await fetch("/api/google-ads/leads", {
+      const isSingleMode = activeTenant?.routingMode === "single";
+      const res = await fetch(`/api/google-ads/leads?client=${encodeURIComponent(activeTenantSlug)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           type: "save_uazapi_config",
+          clientSlug: activeTenantSlug,
           baseUrl: uazapiBaseUrl.trim(),
-          josiToken: uazapiJosiToken.trim(),
-          sergioToken: uazapiSergioToken.trim(),
+          singleToken: isSingleMode ? uazapiSingleToken.trim() : undefined,
+          josiToken: !isSingleMode ? uazapiJosiToken.trim() : undefined,
+          sergioToken: !isSingleMode ? uazapiSergioToken.trim() : undefined,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -770,7 +1081,7 @@ export default function GoogleAdsPage() {
             ? `Configuração salva, mas Uazapi retornou: ${data.syncResult.lastError}`
             : `Reconciliação Uazapi ativa! Verificação concluída (${rec} leads recuperados, ${upd} atualizados).`
         );
-        await fetchData();
+        await Promise.all([fetchData(false), fetchTenants(), handleTestLiveUazapi()]);
       } else {
         setUazapiFeedback(data.error || "Falha ao salvar configuração da Uazapi.");
       }
@@ -785,10 +1096,10 @@ export default function GoogleAdsPage() {
     setIsSavingUazapi(true);
     setUazapiFeedback(null);
     try {
-      const res = await fetch("/api/google-ads/leads", {
+      const res = await fetch(`/api/google-ads/leads?client=${encodeURIComponent(activeTenantSlug)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "reconcile_uazapi" }),
+        body: JSON.stringify({ action: "reconcile_uazapi", clientSlug: activeTenantSlug }),
       });
       const data = await res.json().catch(() => ({}));
       const rec = data.recoveredCount || 0;
@@ -808,12 +1119,219 @@ export default function GoogleAdsPage() {
       } else {
         setUazapiFeedback("Histórico conferido! Nenhuma conversa pendente nova encontrada.");
       }
-      await fetchData();
+      await fetchData(false);
     } catch {
       setUazapiFeedback("Erro ao executar reconciliação Uazapi.");
     } finally {
       setIsSavingUazapi(false);
     }
+  };
+
+  // Handlers de Gerenciamento de Clientes & Acessos (Aba 7 — Gestor)
+  const resetTenantForm = () => {
+    setEditingTenantSlug(null);
+    setTenantFormName("");
+    setTenantFormSlug("");
+    setTenantFormCustomerId("");
+    setTenantFormRoutingMode("single");
+    setTenantFormInitialMsg("Olá! Gostaria de solicitar um orçamento.");
+    setTenantFormAttendantName("Atendimento Principal");
+    setTenantFormAttendantPhone("55");
+    setTenantFormUazapiBase(uazapiBaseUrl || "");
+    setTenantFormUazapiToken("");
+    setTenantFormRouletteAttendants([
+      { name: "Atendente 1", phone: "55", uazapiToken: "" },
+      { name: "Atendente 2", phone: "55", uazapiToken: "" },
+    ]);
+    setTenantFormFeedback(null);
+    setTenantFormTestResult(null);
+  };
+
+  const startEditingTenant = (t: ManagedTenant) => {
+    setEditingTenantSlug(t.slug);
+    setTenantFormName(t.name);
+    setTenantFormSlug(t.slug);
+    setTenantFormCustomerId(t.googleCustomerId || "");
+    setTenantFormRoutingMode(t.routingMode === "roulette" ? "roulette" : "single");
+    setTenantFormInitialMsg(t.initialMessage || "");
+    setTenantFormAttendantName(t.attendants?.[0]?.name || t.name);
+    setTenantFormAttendantPhone(t.attendants?.[0]?.phone || "55");
+    setTenantFormUazapiBase(t.uazapi?.baseUrl || "");
+    setTenantFormUazapiToken(t.uazapi?.singleTokenMasked || "");
+    setTenantFormRouletteAttendants(
+      t.attendants && t.attendants.length > 0
+        ? t.attendants.map((a) => ({
+            name: a.name,
+            phone: a.phone,
+            uazapiToken: a.tokenMasked || "",
+          }))
+        : [
+            { name: "Atendente 1", phone: "55", uazapiToken: "" },
+            { name: "Atendente 2", phone: "55", uazapiToken: "" },
+          ]
+    );
+    setTenantFormFeedback(null);
+    setTenantFormTestResult(null);
+  };
+
+  const handleTestTenantFormUazapi = async () => {
+    setIsTestingTenantFormUazapi(true);
+    setTenantFormTestResult(null);
+    try {
+      const tokenToSend =
+        tenantFormRoutingMode === "single"
+          ? tenantFormUazapiToken.trim()
+          : tenantFormRouletteAttendants[0]?.uazapiToken?.trim() || "";
+      const phoneToCheck =
+        tenantFormRoutingMode === "single"
+          ? tenantFormAttendantPhone
+          : tenantFormRouletteAttendants[0]?.phone || "";
+      const res = await fetch("/api/google-ads/uazapi-test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientSlug: tenantFormSlug || editingTenantSlug || "novo",
+          baseUrl: tenantFormUazapiBase.trim(),
+          token: tokenToSend,
+          attendantPhone: phoneToCheck,
+          instanceName: tenantFormAttendantName || tenantFormName || "WhatsApp Principal",
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      setTenantFormTestResult(data);
+    } catch {
+      setTenantFormTestResult({ success: false, error: "Erro de rede ao testar Uazapi." });
+    } finally {
+      setIsTestingTenantFormUazapi(false);
+    }
+  };
+
+  const handleSaveTenantSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingTenant(true);
+    setTenantFormFeedback(null);
+    try {
+      const isEdit = Boolean(editingTenantSlug);
+      const payload: any = {
+        action: isEdit ? "update_tenant" : "create_tenant",
+        name: tenantFormName.trim(),
+        slug: (editingTenantSlug || tenantFormSlug || slugifyClientName(tenantFormName)).trim(),
+        googleCustomerId: tenantFormCustomerId.replace(/\D/g, ""),
+        routingMode: tenantFormRoutingMode,
+        initialMessage: tenantFormInitialMsg.trim(),
+        uazapiBaseUrl: tenantFormUazapiBase.trim(),
+      };
+      if (tenantFormRoutingMode === "single") {
+        payload.attendantName = tenantFormAttendantName.trim() || tenantFormName.trim();
+        payload.attendantPhone = tenantFormAttendantPhone.replace(/\D/g, "");
+        payload.singleToken = tenantFormUazapiToken.trim();
+      } else {
+        payload.attendants = tenantFormRouletteAttendants.map((a) => ({
+          name: a.name.trim(),
+          phone: a.phone.replace(/\D/g, ""),
+          uazapiToken: a.uazapiToken.trim(),
+          active: true,
+        }));
+      }
+
+      const res = await fetch("/api/google-ads/tenants", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        const warnText =
+          Array.isArray(data.phoneWarnings) && data.phoneWarnings.length > 0
+            ? ` (Aviso DDI: ${data.phoneWarnings.join("; ")})`
+            : "";
+        setTenantFormFeedback({ ok: true, msg: `${data.message}${warnText}` });
+        await fetchTenants();
+        if (data.tenant?.slug) {
+          setAccessTargetSlug(data.tenant.slug);
+          if (!isEdit) resetTenantForm();
+          setTenantFormFeedback({ ok: true, msg: `${data.message}${warnText}` });
+        }
+      } else {
+        setTenantFormFeedback({ ok: false, msg: data.error || "Erro ao salvar cliente." });
+      }
+    } catch {
+      setTenantFormFeedback({ ok: false, msg: "Falha de comunicação ao salvar cliente." });
+    } finally {
+      setIsSavingTenant(false);
+    }
+  };
+
+  const handleSaveClientUserSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingClientUser(true);
+    setClientUserFeedback(null);
+    try {
+      const res = await fetch("/api/google-ads/tenants", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "save_client_user",
+          tenantSlug: accessTargetSlug,
+          username: clientUserUsername.trim(),
+          displayName: clientUserDisplayName.trim() || clientUserUsername.trim(),
+          password: clientUserPassword,
+          enablePortal: true,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        setClientUserFeedback({ ok: true, msg: data.message });
+        setClientUserUsername("");
+        setClientUserDisplayName("");
+        setClientUserPassword("");
+        await fetchTenants();
+      } else {
+        setClientUserFeedback({ ok: false, msg: data.error || "Erro ao salvar usuário do cliente." });
+      }
+    } catch {
+      setClientUserFeedback({ ok: false, msg: "Erro de comunicação ao criar acesso." });
+    } finally {
+      setIsSavingClientUser(false);
+    }
+  };
+
+  const handleToggleClientPortal = async (tenantSlug: string, enabled: boolean) => {
+    try {
+      await fetch("/api/google-ads/tenants", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "toggle_client_access", tenantSlug, enabled }),
+      });
+      await fetchTenants();
+    } catch {}
+  };
+
+  const handleDeleteClientUser = async (tenantSlug: string, userId: string) => {
+    if (!confirm("Remover este login de acesso do cliente?")) return;
+    try {
+      await fetch("/api/google-ads/tenants", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete_client_user", tenantSlug, userId }),
+      });
+      await fetchTenants();
+    } catch {}
+  };
+
+  const handleDeleteTenant = async (slug: string, name: string) => {
+    if (!confirm(`Remover o cliente "${name}" (/r/${slug}) do painel?`)) return;
+    try {
+      const res = await fetch(`/api/google-ads/tenants?slug=${encodeURIComponent(slug)}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        await fetchTenants();
+        if (activeTenantSlug === slug) {
+          handleSelectTenant("cnac");
+        }
+      }
+    } catch {}
   };
 
   // Movimentação do Funil via PATCH
@@ -823,10 +1341,10 @@ export default function GoogleAdsPage() {
     );
 
     try {
-      await fetch("/api/google-ads/leads", {
+      await fetch(`/api/google-ads/leads?client=${encodeURIComponent(activeTenantSlug)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, stage: newStage, value }),
+        body: JSON.stringify({ id, stage: newStage, value, clientSlug: activeTenantSlug }),
       });
     } catch (err) {
       console.error("Falha ao atualizar etapa do lead:", err);
@@ -836,7 +1354,7 @@ export default function GoogleAdsPage() {
   // Filtro Infalível: Preserva 100% dos cliques reais e descarta bots
   const realLeadEvents = useMemo(() => {
     return leadEvents.filter(isRealGoogleLead);
-  }, [leadEvents]);
+  }, [leadEvents, activeAttendantPhones]);
 
   // Listas Dinâmicas de Opções para Filtros (ID + Nome Real via Google Ads API)
   const uniqueCampaigns = useMemo(() => {
@@ -1001,9 +1519,30 @@ export default function GoogleAdsPage() {
       }))
       .sort((a, b) => b.cost - a.cost || b.whatsappLeads - a.whatsappLeads);
 
-    // Resumo por Atendente no período
-    const buildAttendantPeriod = (matchFn: (name: string) => boolean, displayName: string) => {
-      const list = filteredReportLeads.filter((l) => matchFn(String(l.attendantName || "").toLowerCase()));
+    // Lista unificada de atendentes do cliente selecionado
+    const baseNames = (
+      activeTenant?.attendants && activeTenant.attendants.length > 0
+        ? activeTenant.attendants.map((a) => a.name)
+        : attendants.map((a) => a.name)
+    ).filter(Boolean);
+    const seenAtt = new Set<string>();
+    const attendantsPeriod: Array<{
+      name: string;
+      clicks: number;
+      chats: number;
+      quotes: number;
+      sales: number;
+      chatRate: number;
+    }> = [];
+
+    const addAttStat = (displayName: string) => {
+      const norm = displayName.trim().toLowerCase();
+      if (!norm || seenAtt.has(norm)) return;
+      seenAtt.add(norm);
+      const list = filteredReportLeads.filter((l) => {
+        const ln = String(l.attendantName || "").toLowerCase();
+        return ln === norm || ln.includes(norm) || norm.includes(ln);
+      });
       const clicks = list.length;
       const chats = list.filter((l) => getEffectiveStage(l) !== "clique_anuncio").length;
       const quotes = list.filter((l) => {
@@ -1012,12 +1551,13 @@ export default function GoogleAdsPage() {
       }).length;
       const sales = list.filter((l) => getEffectiveStage(l) === "compra_realizada").length;
       const chatRate = clicks > 0 ? Math.round((chats / clicks) * 100) : 0;
-      return { name: displayName, clicks, chats, quotes, sales, chatRate };
+      attendantsPeriod.push({ name: displayName, clicks, chats, quotes, sales, chatRate });
     };
-    const attendantsPeriod = [
-      buildAttendantPeriod((n) => n.includes("josi"), "Josi"),
-      buildAttendantPeriod((n) => n.includes("sergio") || n.includes("sérgio"), "Sérgio"),
-    ];
+
+    baseNames.forEach(addAttStat);
+    filteredReportLeads.forEach((l) => {
+      if (l.attendantName) addAttStat(l.attendantName);
+    });
 
     const recentConversations = [
       ...filteredReportLeads.filter((l) => getEffectiveStage(l) !== "clique_anuncio"),
@@ -1033,7 +1573,18 @@ export default function GoogleAdsPage() {
       attendantsPeriod,
       recentConversations,
     };
-  }, [filteredReportLeads, reportsData.reports, reportMetrics]);
+  }, [filteredReportLeads, reportsData.reports, reportMetrics, activeTenant, attendants]);
+
+  const attendantFilterOptions = useMemo(() => {
+    const names = new Set<string>();
+    (activeTenant?.attendants || attendants).forEach((a) => {
+      if (a.name) names.add(a.name);
+    });
+    realLeadEvents.forEach((l) => {
+      if (l.attendantName) names.add(l.attendantName);
+    });
+    return Array.from(names);
+  }, [activeTenant, attendants, realLeadEvents]);
 
   // Exportar Relatório para CSV
   const handleExportCSV = () => {
@@ -1108,49 +1659,6 @@ export default function GoogleAdsPage() {
     const realChats = total - clicksOnly;
     return { total, clicksOnly, realChats };
   }, [filteredEvents]);
-
-  const josiStats = useMemo(() => {
-    const list = realLeadEvents.filter((l) => l.attendantName.toLowerCase().includes("josi"));
-    const quotes = list.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length;
-    const sales = list.filter((l) => l.stage === "compra_realizada").length;
-    return {
-      total: list.length,
-      percentage: totalLeads > 0 ? Math.round((list.length / totalLeads) * 100) : 50,
-      quotes,
-      sales,
-    };
-  }, [realLeadEvents, totalLeads]);
-
-  const sergioStats = useMemo(() => {
-    const list = realLeadEvents.filter((l) => l.attendantName.toLowerCase().includes("sergio") || l.attendantName.toLowerCase().includes("sérgio"));
-    const quotes = list.filter((l) => l.stage === "orcamento_enviado" || l.stage === "compra_realizada").length;
-    const sales = list.filter((l) => l.stage === "compra_realizada").length;
-    return {
-      total: list.length,
-      percentage: totalLeads > 0 ? Math.round((list.length / totalLeads) * 100) : 50,
-      quotes,
-      sales,
-    };
-  }, [realLeadEvents, totalLeads]);
-
-  const handleAddAttendant = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newName.trim() || !newPhone.trim()) return;
-    const clean = newPhone.replace(/\D/g, "");
-    setAttendants([...attendants, { id: String(Date.now()), name: newName.trim(), phone: clean, active: true, leadsCount: 0 }]);
-    setNewName("");
-    setNewPhone("");
-  };
-
-  const toggleAttendant = (id: string) => {
-    setAttendants(attendants.map((a) => (a.id === id ? { ...a, active: !a.active } : a)));
-  };
-
-  const removeAttendant = (id: string) => {
-    if (confirm("Deseja desativar este atendente da roleta de WhatsApp?")) {
-      setAttendants(attendants.filter((a) => a.id !== id));
-    }
-  };
 
   return (
     <div className="gads-wrapper">
@@ -1456,36 +1964,94 @@ export default function GoogleAdsPage() {
                 <span style={{ background: "#2563eb", borderRadius: "8px", padding: "6px", display: "inline-flex" }}>
                   <Send size={20} color="#fff" />
                 </span>
-                <h1 className="gads-title">Google Ads — Inteligência & Funil</h1>
+                <h1 className="gads-title">Google Ads — Painel do Gestor</h1>
               </div>
               <span className="gads-badge-iso">
                 <ShieldCheck size={13} /> 100% Isolado da Meta Ads
               </span>
             </div>
             <p className="gads-subtitle">
-              Relatórios customizáveis de ROAS, atribuição de palavras-chave, funil CRM por etapas e roleta justa de WhatsApp.
+              Gerenciamento multi-cliente via MCC, atribuição de palavras-chave, funil CRM, regras exclusivas do gestor e controle de acessos.
             </p>
           </div>
 
-          <Link
-            href="/overview"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "8px",
-              padding: "9px 14px",
-              borderRadius: "8px",
-              background: "#0f172a",
-              border: "1px solid #334155",
-              color: "#e2e8f0",
-              fontSize: "13px",
-              fontWeight: 600,
-              textDecoration: "none",
-              whiteSpace: "nowrap",
-            }}
-          >
-            <ArrowLeft size={15} /> Voltar para Meta Ads
-          </Link>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+            {/* SELETOR DE CLIENTE GOOGLE ADS */}
+            <div style={{ display: "inline-flex", alignItems: "center", gap: "6px", background: "#0f172a", border: "1px solid #334155", borderRadius: "8px", padding: "4px 8px" }}>
+              <Building2 size={14} color="#38bdf8" />
+              <select
+                value={activeTenantSlug}
+                onChange={(e) => handleSelectTenant(e.target.value)}
+                aria-label="Selecionar Cliente"
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "#fff",
+                  fontSize: "13px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  outline: "none",
+                  paddingRight: "6px",
+                }}
+              >
+                {tenantsList.length === 0 ? (
+                  <option value={activeTenantSlug} style={{ background: "#0f172a" }}>
+                    {activeTenantSlug.toUpperCase()}
+                  </option>
+                ) : (
+                  tenantsList.map((t) => (
+                    <option key={t.slug} value={t.slug} style={{ background: "#0f172a" }}>
+                      {t.name} ({t.routingMode === "single" ? "1 WhatsApp" : "Roleta"})
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                resetTenantForm();
+                setCurrentTab("clientes");
+              }}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "9px 12px",
+                borderRadius: "8px",
+                background: "rgba(37, 99, 235, 0.16)",
+                border: "1px solid rgba(56, 189, 248, 0.35)",
+                color: "#7dd3fc",
+                fontSize: "12px",
+                fontWeight: 700,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              <Plus size={14} /> Novo Cliente
+            </button>
+
+            <Link
+              href="/overview"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "9px 14px",
+                borderRadius: "8px",
+                background: "#0f172a",
+                border: "1px solid #334155",
+                color: "#e2e8f0",
+                fontSize: "13px",
+                fontWeight: 600,
+                textDecoration: "none",
+                whiteSpace: "nowrap",
+              }}
+            >
+              <ArrowLeft size={15} /> Voltar para Meta Ads
+            </Link>
+          </div>
         </div>
 
         {/* NAVEGAÇÃO ENTRE AS ABAS */}
@@ -1538,7 +2104,7 @@ export default function GoogleAdsPage() {
               color: currentTab === "roleta" ? "#fff" : "#94a3b8",
             }}
           >
-            <RefreshCw size={15} /> 4. Roleta de Atendentes
+            <RefreshCw size={15} /> {activeTenant?.routingMode === "single" ? "4. Atendimento WhatsApp" : "4. Roleta de Atendentes"}
           </button>
           <button
             onClick={() => setCurrentTab("conversoes")}
@@ -1559,6 +2125,16 @@ export default function GoogleAdsPage() {
             }}
           >
             <Target size={15} /> 6. Inteligência & Decisão (BI)
+          </button>
+          <button
+            onClick={() => setCurrentTab("clientes")}
+            className="gads-tab-btn"
+            style={{
+              background: currentTab === "clientes" ? "#7c3aed" : "transparent",
+              color: currentTab === "clientes" ? "#fff" : "#c084fc",
+            }}
+          >
+            <Building2 size={15} /> 7. Clientes & Acessos
           </button>
         </div>
 
@@ -1972,22 +2548,22 @@ export default function GoogleAdsPage() {
               <div className="gads-panel">
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
                   <h3 style={{ fontSize: "14px", fontWeight: 700, color: "#fff", margin: 0 }}>
-                    Atendimento no Período (Josi & Sérgio)
+                    Atendimento no Período ({activeTenant?.name || "Cliente"})
                   </h3>
                   <button
                     type="button"
                     onClick={() => setCurrentTab("roleta")}
                     style={{ background: "transparent", border: "none", color: "#38bdf8", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}
                   >
-                    Ver Roleta →
+                    Ver Detalhes →
                   </button>
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "10px" }}>
-                  {overviewStats.attendantsPeriod.map((att) => (
+                  {overviewStats.attendantsPeriod.map((att, idx) => (
                     <div key={att.name} style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "10px 12px" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                        <strong style={{ color: att.name === "Josi" ? "#f472b6" : "#60a5fa", fontSize: "13px" }}>{att.name}</strong>
+                        <strong style={{ color: idx % 2 === 0 ? "#f472b6" : "#60a5fa", fontSize: "13px" }}>{att.name}</strong>
                         <span style={{ fontSize: "11px", color: "#94a3b8", fontWeight: 600 }}>{att.chatRate}% conv.</span>
                       </div>
                       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "4px", fontSize: "11px", color: "#cbd5e1" }}>
@@ -2166,8 +2742,11 @@ export default function GoogleAdsPage() {
                 className="gads-select-field"
               >
                 <option value="all">Todos Atendentes</option>
-                <option value="Josi">Atendente: Josi</option>
-                <option value="Sérgio">Atendente: Sérgio</option>
+                {attendantFilterOptions.map((attName) => (
+                  <option key={attName} value={attName}>
+                    Atendente: {attName}
+                  </option>
+                ))}
               </select>
 
               <select
@@ -2202,10 +2781,7 @@ export default function GoogleAdsPage() {
                 <RefreshCw size={13} style={{ transform: isRefreshing ? "rotate(180deg)" : "none", transition: "transform 0.4s" }} />
               </button>
 
-              {leadEvents.some((l) => {
-                const p = String(l.leadPhone || "").replace(/\D/g, "");
-                return p.includes("980659269") || p.includes("994060206");
-              }) && (
+              {leadEvents.some((l) => isAttendantLead(l.leadPhone)) && (
                 <button
                   type="button"
                   onClick={handleCleanAttendantLeads}
@@ -2222,7 +2798,7 @@ export default function GoogleAdsPage() {
                     alignItems: "center",
                     gap: "6px",
                   }}
-                  title="Remove os registros com telefones da Josi e do Sérgio criados por acessos diretos"
+                  title="Remove registros com telefones dos próprios atendentes do cliente"
                 >
                   <Trash2 size={13} /> Limpar Leads com Telefones dos Atendentes
                 </button>
@@ -2964,8 +3540,11 @@ export default function GoogleAdsPage() {
                   style={{ padding: "8px 10px" }}
                 >
                   <option value="all">Todos Atendentes</option>
-                  <option value="Josi">Josi</option>
-                  <option value="Sérgio">Sérgio</option>
+                  {attendantFilterOptions.map((attName) => (
+                    <option key={attName} value={attName}>
+                      {attName}
+                    </option>
+                  ))}
                 </select>
               </div>
 
@@ -3220,169 +3799,119 @@ export default function GoogleAdsPage() {
          ========================================================================= */}
       {currentTab === "roleta" && (
         <div className="gads-panel">
-          <div style={{ marginBottom: "20px" }}>
-            <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-              Equilíbrio da Roleta & Desempenho dos Atendentes
-            </h2>
-            <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-              Divisão 50% / 50% entre Josi e Sérgio com métricas individuais de orçamentos e vendas geradas.
-            </p>
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px", marginBottom: "24px" }}>
-            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div>
-                  <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>Josi</h3>
-                  <span style={{ color: "#64748b", fontSize: "12px" }}>5521980659269</span>
-                </div>
-                <span style={{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399", padding: "3px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: 700 }}>
-                  Ativa na Roleta
-                </span>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px", marginTop: "16px", textAlign: "center" }}>
-                <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>Leads</span>
-                  <div style={{ fontSize: "20px", fontWeight: 800, color: "#fff" }}>{josiStats.total}</div>
-                  <small style={{ color: "#38bdf8", fontSize: "11px" }}>{josiStats.percentage}%</small>
-                </div>
-                <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>Orçamentos</span>
-                  <div style={{ fontSize: "20px", fontWeight: 800, color: "#c084fc" }}>{josiStats.quotes}</div>
-                </div>
-                <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>Vendas</span>
-                  <div style={{ fontSize: "20px", fontWeight: 800, color: "#34d399" }}>{josiStats.sales}</div>
-                </div>
-              </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "10px", marginBottom: "20px" }}>
+            <div>
+              <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
+                {activeTenant?.routingMode === "single"
+                  ? `Atendimento Único (1 WhatsApp) — ${activeTenant?.name || "Cliente"}`
+                  : `Equilíbrio da Roleta & Desempenho — ${activeTenant?.name || "Cliente"}`}
+              </h2>
+              <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
+                {activeTenant?.routingMode === "single"
+                  ? "Este cliente opera com 1 único número de WhatsApp (100% dos cliques do link vão direto para este número, sem roleta)."
+                  : "Divisão automática de cliques entre os atendentes ativos da equipe."}
+              </p>
             </div>
-
-            <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div>
-                  <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>Sérgio</h3>
-                  <span style={{ color: "#64748b", fontSize: "12px" }}>5521994060206</span>
-                </div>
-                <span style={{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399", padding: "3px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: 700 }}>
-                  Ativo na Roleta
-                </span>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px", marginTop: "16px", textAlign: "center" }}>
-                <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>Leads</span>
-                  <div style={{ fontSize: "20px", fontWeight: 800, color: "#fff" }}>{sergioStats.total}</div>
-                  <small style={{ color: "#38bdf8", fontSize: "11px" }}>{sergioStats.percentage}%</small>
-                </div>
-                <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>Orçamentos</span>
-                  <div style={{ fontSize: "20px", fontWeight: 800, color: "#c084fc" }}>{sergioStats.quotes}</div>
-                </div>
-                <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>Vendas</span>
-                  <div style={{ fontSize: "20px", fontWeight: 800, color: "#34d399" }}>{sergioStats.sales}</div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "16px", marginBottom: "24px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", fontWeight: 600, marginBottom: "8px" }}>
-              <span>Josi ({josiStats.percentage}%)</span>
-              <span>Distribuição Atual de Leads</span>
-              <span>Sérgio ({sergioStats.percentage}%)</span>
-            </div>
-            <div style={{ width: "100%", height: "10px", background: "#1e293b", borderRadius: "5px", overflow: "hidden", display: "flex" }}>
-              <div style={{ width: `${josiStats.percentage}%`, background: "#ec4899", transition: "width 0.3s" }} />
-              <div style={{ width: `${sergioStats.percentage}%`, background: "#3b82f6", transition: "width 0.3s" }} />
-            </div>
-          </div>
-
-          <form onSubmit={handleAddAttendant} style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginBottom: "20px", background: "#0f172a", padding: "14px", borderRadius: "10px", border: "1px solid #1e293b" }}>
-            <input
-              type="text"
-              placeholder="Nome do atendente"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              className="gads-input-field"
-              style={{ flex: 1, minWidth: "160px" }}
-            />
-            <input
-              type="text"
-              placeholder="WhatsApp com DDD (ex: 5521999998888)"
-              value={newPhone}
-              onChange={(e) => setNewPhone(e.target.value)}
-              className="gads-input-field"
-              style={{ flex: 1, minWidth: "180px" }}
-            />
             <button
-              type="submit"
+              type="button"
+              onClick={() => {
+                if (activeTenant) startEditingTenant(activeTenant);
+                setCurrentTab("clientes");
+              }}
+              style={{
+                background: "#1e293b",
+                border: "1px solid #334155",
+                color: "#38bdf8",
+                borderRadius: "8px",
+                padding: "8px 14px",
+                fontSize: "12px",
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Alterar Modo / Números em Clientes
+            </button>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "16px", marginBottom: "24px" }}>
+            {overviewStats.attendantsPeriod.length === 0 ? (
+              <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px", color: "#94a3b8", fontSize: "13px" }}>
+                Nenhum lead registrado ainda para os atendentes deste cliente.
+              </div>
+            ) : (
+              overviewStats.attendantsPeriod.map((att, idx) => {
+                const attInfo = (activeTenant?.attendants || []).find(
+                  (a) => a.name.toLowerCase() === att.name.toLowerCase()
+                );
+                const pct = totalLeads > 0 ? Math.round((att.clicks / totalLeads) * 100) : Math.round(100 / Math.max(1, overviewStats.attendantsPeriod.length));
+                return (
+                  <div key={att.name} style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>{att.name}</h3>
+                        <span style={{ color: "#64748b", fontSize: "12px" }}>{attInfo?.phone || "WhatsApp conectado"}</span>
+                      </div>
+                      <span style={{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399", padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 700 }}>
+                        {activeTenant?.routingMode === "single" ? "WhatsApp Único" : "Ativo na Roleta"}
+                      </span>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px", marginTop: "16px", textAlign: "center" }}>
+                      <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
+                        <span style={{ fontSize: "11px", color: "#94a3b8" }}>Cliques</span>
+                        <div style={{ fontSize: "20px", fontWeight: 800, color: "#fff" }}>{att.clicks}</div>
+                        <small style={{ color: idx % 2 === 0 ? "#f472b6" : "#38bdf8", fontSize: "11px" }}>{pct}%</small>
+                      </div>
+                      <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
+                        <span style={{ fontSize: "11px", color: "#94a3b8" }}>Orçamentos</span>
+                        <div style={{ fontSize: "20px", fontWeight: 800, color: "#c084fc" }}>{att.quotes}</div>
+                      </div>
+                      <div style={{ background: "#0f172a", padding: "10px", borderRadius: "8px" }}>
+                        <span style={{ fontSize: "11px", color: "#94a3b8" }}>Vendas</span>
+                        <div style={{ fontSize: "20px", fontWeight: 800, color: "#34d399" }}>{att.sales}</div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }}>
+            <div style={{ fontSize: "12px", color: "#94a3b8" }}>
+              <strong style={{ color: "#fff" }}>Link oficial deste cliente:</strong>{" "}
+              <code style={{ color: "#38bdf8" }}>
+                {typeof window !== "undefined"
+                  ? `${window.location.origin}/r/${activeTenantSlug}`
+                  : `https://painel.anunciosalpha.com.br/r/${activeTenantSlug}`}
+              </code>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const url =
+                  typeof window !== "undefined"
+                    ? `${window.location.origin}/r/${activeTenantSlug}`
+                    : `https://painel.anunciosalpha.com.br/r/${activeTenantSlug}`;
+                navigator.clipboard?.writeText(url).catch(() => {});
+                setCopiedHelperMsg(`Link /r/${activeTenantSlug} copiado!`);
+                setTimeout(() => setCopiedHelperMsg(null), 2500);
+              }}
               style={{
                 background: "#2563eb",
-                color: "#fff",
                 border: "none",
+                color: "#fff",
                 borderRadius: "8px",
-                padding: "10px 16px",
-                fontWeight: 600,
-                fontSize: "13px",
+                padding: "7px 12px",
+                fontSize: "12px",
+                fontWeight: 700,
                 cursor: "pointer",
                 display: "inline-flex",
                 alignItems: "center",
-                gap: "6px",
+                gap: "5px",
               }}
             >
-              <UserPlus size={15} /> Adicionar
+              <Copy size={12} /> {copiedHelperMsg || "Copiar Link de Rastreamento"}
             </button>
-          </form>
-
-          <div className="gads-table-scroll">
-            <table className="gads-table">
-              <thead>
-                <tr style={{ borderBottom: "1px solid #1e293b", textAlign: "left", color: "#64748b" }}>
-                  <th style={{ padding: "10px 12px" }}>Atendente</th>
-                  <th style={{ padding: "10px 12px" }}>WhatsApp</th>
-                  <th style={{ padding: "10px 12px" }}>Status</th>
-                  <th style={{ padding: "10px 12px" }}>Leads Recebidos</th>
-                  <th style={{ padding: "10px 12px", textAlign: "right" }}>Ações</th>
-                </tr>
-              </thead>
-              <tbody>
-                {attendants.map((attendant) => (
-                  <tr key={attendant.id} style={{ borderBottom: "1px solid #0f172a" }}>
-                    <td style={{ padding: "10px 12px", fontWeight: 600, color: "#fff" }}>{attendant.name}</td>
-                    <td style={{ padding: "10px 12px", color: "#94a3b8" }}>{attendant.phone}</td>
-                    <td style={{ padding: "10px 12px" }}>
-                      <button
-                        onClick={() => toggleAttendant(attendant.id)}
-                        style={{
-                          background: attendant.active ? "rgba(16, 185, 129, 0.1)" : "rgba(239, 68, 68, 0.1)",
-                          color: attendant.active ? "#10b981" : "#f87171",
-                          border: "1px solid",
-                          borderColor: attendant.active ? "rgba(16, 185, 129, 0.3)" : "rgba(239, 68, 68, 0.3)",
-                          padding: "4px 10px",
-                          borderRadius: "20px",
-                          fontSize: "12px",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <Power size={11} style={{ display: "inline", marginRight: "4px" }} />
-                        {attendant.active ? "Ativo na Roleta" : "Pausado"}
-                      </button>
-                    </td>
-                    <td style={{ padding: "10px 12px", fontWeight: 700, color: "#fff" }}>
-                      {realLeadEvents.filter((l) => l.attendantName.toLowerCase().includes(attendant.name.toLowerCase())).length} leads
-                    </td>
-                    <td style={{ padding: "10px 12px", textAlign: "right" }}>
-                      <button
-                        onClick={() => removeAttendant(attendant.id)}
-                        style={{ background: "transparent", border: "none", color: "#ef4444", cursor: "pointer" }}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           </div>
         </div>
       )}
@@ -3394,11 +3923,16 @@ export default function GoogleAdsPage() {
         <div className="gads-panel">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "10px", marginBottom: "20px" }}>
             <div>
-              <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
-                Configuração Dinâmica de Frases & Regras Google Ads
-              </h2>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                <h2 style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff", margin: 0 }}>
+                  Regras de Funil &amp; Conversões ({activeTenant?.name || "Cliente"})
+                </h2>
+                <span style={{ fontSize: "11px", fontWeight: 700, color: "#fbbf24", background: "rgba(245, 158, 11, 0.12)", border: "1px solid rgba(245, 158, 11, 0.3)", padding: "2px 8px", borderRadius: "6px" }}>
+                  Exclusivo do Gestor
+                </span>
+              </div>
               <p style={{ color: "#64748b", fontSize: "13px", marginTop: "4px" }}>
-                Adicione ou remova frases em tempo real — toda alteração é salva automaticamente no servidor e aplicada na hora no webhook do WhatsApp.
+                Configure frases no WhatsApp e etiquetas do WhatsApp Business (Uazapi) para mover o funil e disparar o Google Ads automaticamente. O cliente não altera esta área.
               </p>
               {rulesErrorMsg && (
                 <p style={{ color: "#f87171", fontSize: "12px", marginTop: "4px", fontWeight: 600 }}>
@@ -3407,30 +3941,53 @@ export default function GoogleAdsPage() {
               )}
             </div>
 
-            <button
-              onClick={handleSaveRules}
-              disabled={isSavingRules}
-              style={{
-                background: saveSuccess ? "#10b981" : "#2563eb",
-                color: "#fff",
-                border: "none",
-                borderRadius: "8px",
-                padding: "10px 18px",
-                fontSize: "13px",
-                fontWeight: 700,
-                cursor: "pointer",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "8px",
-                transition: "background 0.2s",
-              }}
-            >
-              {saveSuccess ? <CheckCircle2 size={16} /> : <Save size={16} />}
-              {isSavingRules ? "Salvando..." : saveSuccess ? "Regras Salvas!" : "Salvar Regras de Conversão"}
-            </button>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={handleTestLiveUazapi}
+                disabled={isTestingUazapi}
+                style={{
+                  background: "#1e293b",
+                  color: "#38bdf8",
+                  border: "1px solid #334155",
+                  borderRadius: "8px",
+                  padding: "10px 14px",
+                  fontSize: "12px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                }}
+              >
+                <Tag size={14} /> {isTestingUazapi ? "Lendo WhatsApp..." : "Carregar Etiquetas do WhatsApp"}
+              </button>
+
+              <button
+                onClick={handleSaveRules}
+                disabled={isSavingRules}
+                style={{
+                  background: saveSuccess ? "#10b981" : "#2563eb",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: "8px",
+                  padding: "10px 18px",
+                  fontSize: "13px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  transition: "background 0.2s",
+                }}
+              >
+                {saveSuccess ? <CheckCircle2 size={16} /> : <Save size={16} />}
+                {isSavingRules ? "Salvando..." : saveSuccess ? "Regras Salvas!" : "Salvar Regras de Conversão"}
+              </button>
+            </div>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px", marginBottom: "28px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: "16px", marginBottom: "28px" }}>
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#c084fc", fontWeight: 700, fontSize: "14px", marginBottom: "6px" }}>
                 <Award size={16} /> Conversão: Orçamento Enviado
@@ -3439,7 +3996,10 @@ export default function GoogleAdsPage() {
                 Ação Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.quote.actionName}</strong>
               </small>
 
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px", minHeight: "65px" }}>
+              <div style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "6px" }}>
+                1. Por Frase / Palavra-Chave na Mensagem:
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "12px", minHeight: "46px" }}>
                 {rules.quote.phrases.map((phrase) => (
                   <span
                     key={phrase}
@@ -3458,7 +4018,7 @@ export default function GoogleAdsPage() {
                 ))}
               </div>
 
-              <div style={{ display: "flex", gap: "8px" }}>
+              <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
                 <input
                   type="text"
                   placeholder="Nova frase (ex: proposta enviada)"
@@ -3489,6 +4049,84 @@ export default function GoogleAdsPage() {
                   <Plus size={13} /> Adicionar
                 </button>
               </div>
+
+              <div style={{ borderTop: "1px solid #1e293b", paddingTop: "12px" }}>
+                <div style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "6px", display: "flex", alignItems: "center", gap: "5px" }}>
+                  <Tag size={12} color="#c084fc" /> 2. Por Etiqueta do WhatsApp Business:
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "10px", minHeight: "30px" }}>
+                  {(rules.quote.labels || []).length === 0 ? (
+                    <span style={{ fontSize: "11px", color: "#64748b" }}>Nenhuma etiqueta vinculada a Orçamento.</span>
+                  ) : (
+                    (rules.quote.labels || []).map((lbl) => (
+                      <span
+                        key={lbl}
+                        className="phrase-pill"
+                        style={{ background: "rgba(168, 85, 247, 0.2)", color: "#e9d5ff", border: "1px solid rgba(168, 85, 247, 0.4)" }}
+                      >
+                        <Tag size={11} /> {lbl}
+                        <button onClick={() => handleRemoveLabelRule("quote", lbl)} className="phrase-remove-btn" title="Remover etiqueta">
+                          <X size={12} />
+                        </button>
+                      </span>
+                    ))
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <input
+                    type="text"
+                    placeholder="Nome exato da etiqueta (ex: Orçamento Enviado)"
+                    value={newQuoteLabel}
+                    onChange={(e) => setNewQuoteLabel(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleAddLabelRule("quote", newQuoteLabel)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 12px", fontSize: "12px" }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleAddLabelRule("quote", newQuoteLabel)}
+                    style={{
+                      background: "#1e293b",
+                      border: "1px solid #334155",
+                      color: "#e9d5ff",
+                      borderRadius: "8px",
+                      padding: "8px 12px",
+                      cursor: "pointer",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    <Plus size={13} /> Etiqueta
+                  </button>
+                </div>
+                {availableWaLabels.length > 0 && (
+                  <div style={{ marginTop: "8px", display: "flex", flexWrap: "wrap", gap: "5px", alignItems: "center" }}>
+                    <span style={{ fontSize: "10px", color: "#64748b" }}>Do WhatsApp:</span>
+                    {availableWaLabels.map((wl) => (
+                      <button
+                        key={`q_${wl.name}`}
+                        type="button"
+                        onClick={() => handleAddLabelRule("quote", wl.name)}
+                        style={{
+                          background: "#0f172a",
+                          border: "1px solid #334155",
+                          color: "#cbd5e1",
+                          borderRadius: "6px",
+                          padding: "3px 8px",
+                          fontSize: "11px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        + {wl.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "12px", padding: "18px" }}>
@@ -3499,7 +4137,10 @@ export default function GoogleAdsPage() {
                 Ação Google Ads: <strong style={{ color: "#cbd5e1" }}>{rules.purchase.actionName}</strong>
               </small>
 
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px", minHeight: "65px" }}>
+              <div style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "6px" }}>
+                1. Por Frase / Palavra-Chave na Mensagem:
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "12px", minHeight: "46px" }}>
                 {rules.purchase.phrases.map((phrase) => (
                   <span
                     key={phrase}
@@ -3518,7 +4159,7 @@ export default function GoogleAdsPage() {
                 ))}
               </div>
 
-              <div style={{ display: "flex", gap: "8px" }}>
+              <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
                 <input
                   type="text"
                   placeholder="Nova frase (ex: pix confirmado)"
@@ -3549,15 +4190,93 @@ export default function GoogleAdsPage() {
                   <Plus size={13} /> Adicionar
                 </button>
               </div>
+
+              <div style={{ borderTop: "1px solid #1e293b", paddingTop: "12px" }}>
+                <div style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "6px", display: "flex", alignItems: "center", gap: "5px" }}>
+                  <Tag size={12} color="#34d399" /> 2. Por Etiqueta do WhatsApp Business:
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "10px", minHeight: "30px" }}>
+                  {(rules.purchase.labels || []).length === 0 ? (
+                    <span style={{ fontSize: "11px", color: "#64748b" }}>Nenhuma etiqueta vinculada a Venda Fechada.</span>
+                  ) : (
+                    (rules.purchase.labels || []).map((lbl) => (
+                      <span
+                        key={lbl}
+                        className="phrase-pill"
+                        style={{ background: "rgba(16, 185, 129, 0.2)", color: "#a7f3d0", border: "1px solid rgba(16, 185, 129, 0.4)" }}
+                      >
+                        <Tag size={11} /> {lbl}
+                        <button onClick={() => handleRemoveLabelRule("purchase", lbl)} className="phrase-remove-btn" title="Remover etiqueta">
+                          <X size={12} />
+                        </button>
+                      </span>
+                    ))
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <input
+                    type="text"
+                    placeholder="Nome exato da etiqueta (ex: Venda Fechada)"
+                    value={newPurchaseLabel}
+                    onChange={(e) => setNewPurchaseLabel(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleAddLabelRule("purchase", newPurchaseLabel)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 12px", fontSize: "12px" }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleAddLabelRule("purchase", newPurchaseLabel)}
+                    style={{
+                      background: "#1e293b",
+                      border: "1px solid #334155",
+                      color: "#a7f3d0",
+                      borderRadius: "8px",
+                      padding: "8px 12px",
+                      cursor: "pointer",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    <Plus size={13} /> Etiqueta
+                  </button>
+                </div>
+                {availableWaLabels.length > 0 && (
+                  <div style={{ marginTop: "8px", display: "flex", flexWrap: "wrap", gap: "5px", alignItems: "center" }}>
+                    <span style={{ fontSize: "10px", color: "#64748b" }}>Do WhatsApp:</span>
+                    {availableWaLabels.map((wl) => (
+                      <button
+                        key={`p_${wl.name}`}
+                        type="button"
+                        onClick={() => handleAddLabelRule("purchase", wl.name)}
+                        style={{
+                          background: "#0f172a",
+                          border: "1px solid #334155",
+                          color: "#cbd5e1",
+                          borderRadius: "6px",
+                          padding: "3px 8px",
+                          fontSize: "11px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        + {wl.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
           <div style={{ borderTop: "1px solid #1e293b", paddingTop: "20px" }}>
             <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#ffffff", marginBottom: "4px" }}>
-              Auditoria de Disparos de Conversão Pelos Atendentes
+              Auditoria de Disparos de Conversão ({activeTenant?.name || "Cliente"})
             </h3>
             <p style={{ color: "#64748b", fontSize: "12px", marginBottom: "14px" }}>
-              Registro exato de quando a Josi ou o Sérgio usaram as palavras-chave na conversa para acionar a conversão.
+              Registro automático quando frases ou etiquetas do WhatsApp Business movem o funil e acionam a conversão.
             </p>
 
             {auditLogs.length === 0 ? (
@@ -3643,12 +4362,29 @@ export default function GoogleAdsPage() {
                 </h4>
                 <p style={{ color: "#94a3b8", fontSize: "12px", margin: "3px 0 0" }}>
                   {entitiesStatus.uazapiStatus?.configured
-                    ? `Ativo (${entitiesStatus.uazapiStatus.instancesCount || 1} instância(s) configurada(s)) — resgata leads e conversas caso algum webhook da Josi ou Sérgio falhe.`
+                    ? `Ativo (${entitiesStatus.uazapiStatus.instancesCount || 1} instância(s) configurada(s)) — resgata leads e conversas caso algum webhook do WhatsApp falhe.`
                     : "Informe os dados da Uazapi para testar conexão e recuperar mensagens perdidas caso algum webhook falhe."}
                 </p>
               </div>
 
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={handleTestLiveUazapi}
+                  disabled={isTestingUazapi}
+                  style={{
+                    background: "#1e293b",
+                    border: "1px solid #334155",
+                    color: "#38bdf8",
+                    borderRadius: "8px",
+                    padding: "7px 12px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {isTestingUazapi ? "Testando..." : "Testar Conexão Uazapi"}
+                </button>
                 {entitiesStatus.uazapiStatus?.configured && (
                   <>
                     <button
@@ -3691,6 +4427,29 @@ export default function GoogleAdsPage() {
                 )}
               </div>
             </div>
+
+            {uazapiTestResult?.instances && (
+              <div style={{ marginTop: "10px", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                {uazapiTestResult.instances.map((it: any) => (
+                  <div
+                    key={`live_${it.name}`}
+                    style={{
+                      background: "#0f172a",
+                      border: `1px solid ${it.connected ? "rgba(16,185,129,0.4)" : "rgba(239,68,68,0.4)"}`,
+                      borderRadius: "8px",
+                      padding: "6px 10px",
+                      fontSize: "11px",
+                      color: "#e2e8f0",
+                    }}
+                  >
+                    <strong>{it.name}:</strong>{" "}
+                    <span style={{ color: it.connected ? "#34d399" : "#f87171", fontWeight: 700 }}>
+                      {it.connected ? `Conectado (${it.phone || "OK"}) • ${it.latencyMs}ms` : it.error || "Desconectado"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* Status limpo por atendente (sem métricas técnicas na Aba 5) */}
             {entitiesStatus.uazapiStatus?.configured &&
@@ -3760,33 +4519,51 @@ export default function GoogleAdsPage() {
                   />
                 </div>
 
-                <div>
-                  <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                    Token Instância Josi
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Cole o token da instância Josi"
-                    value={uazapiJosiToken}
-                    onChange={(e) => setUazapiJosiToken(e.target.value)}
-                    className="gads-input-field"
-                    style={{ padding: "8px 12px", fontSize: "12px" }}
-                  />
-                </div>
+                {activeTenant?.routingMode === "single" ? (
+                  <div>
+                    <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                      Token Instância WhatsApp
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Cole o token da instância Uazapi"
+                      value={uazapiSingleToken}
+                      onChange={(e) => setUazapiSingleToken(e.target.value)}
+                      className="gads-input-field"
+                      style={{ padding: "8px 12px", fontSize: "12px" }}
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                        Token Instância {activeTenant?.attendants?.[0]?.name || "Atendente 1"}
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Cole o token da instância"
+                        value={uazapiJosiToken}
+                        onChange={(e) => setUazapiJosiToken(e.target.value)}
+                        className="gads-input-field"
+                        style={{ padding: "8px 12px", fontSize: "12px" }}
+                      />
+                    </div>
 
-                <div>
-                  <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
-                    Token Instância Sérgio
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Cole o token da instância Sérgio"
-                    value={uazapiSergioToken}
-                    onChange={(e) => setUazapiSergioToken(e.target.value)}
-                    className="gads-input-field"
-                    style={{ padding: "8px 12px", fontSize: "12px" }}
-                  />
-                </div>
+                    <div>
+                      <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#cbd5e1", marginBottom: "4px" }}>
+                        Token Instância {activeTenant?.attendants?.[1]?.name || "Atendente 2"}
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Cole o token da instância"
+                        value={uazapiSergioToken}
+                        onChange={(e) => setUazapiSergioToken(e.target.value)}
+                        className="gads-input-field"
+                        style={{ padding: "8px 12px", fontSize: "12px" }}
+                      />
+                    </div>
+                  </>
+                )}
 
                 <div>
                   <button
@@ -3896,20 +4673,23 @@ export default function GoogleAdsPage() {
                       }}
                     >
                       <div style={{ color: "#94a3b8" }}>
-                        <strong style={{ color: "#cbd5e1" }}>URL do Webhook (Uazapi):</strong>{" "}
+                        <strong style={{ color: "#cbd5e1" }}>URL do Webhook (Uazapi — {activeTenant?.name || activeTenantSlug}):</strong>{" "}
                         <code style={{ color: "#38bdf8", wordBreak: "break-all" }}>
                           {typeof window !== "undefined"
-                            ? `${window.location.origin}/api/webhooks/google-whatsapp`
-                            : "https://painel.anunciosalpha.com.br/api/webhooks/google-whatsapp"}
+                            ? `${window.location.origin}/api/webhooks/google-whatsapp?client=${activeTenantSlug}`
+                            : `https://painel.anunciosalpha.com.br/api/webhooks/google-whatsapp?client=${activeTenantSlug}`}
                         </code>
+                        <div style={{ color: "#64748b", marginTop: "3px" }}>
+                          Marque na Uazapi os eventos: <code>messages</code>, <code>chats</code>, <code>chat_labels</code>, <code>labels</code>.
+                        </div>
                       </div>
                       <button
                         type="button"
                         onClick={() => {
                           const url =
                             typeof window !== "undefined"
-                              ? `${window.location.origin}/api/webhooks/google-whatsapp`
-                              : "https://painel.anunciosalpha.com.br/api/webhooks/google-whatsapp";
+                              ? `${window.location.origin}/api/webhooks/google-whatsapp?client=${activeTenantSlug}`
+                              : `https://painel.anunciosalpha.com.br/api/webhooks/google-whatsapp?client=${activeTenantSlug}`;
                           navigator.clipboard?.writeText(url).catch(() => {});
                           setUazapiFeedback("URL do Webhook copiada!");
                         }}
@@ -4035,7 +4815,7 @@ export default function GoogleAdsPage() {
                     <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px", marginBottom: "12px" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px", marginBottom: "10px" }}>
                         <strong style={{ fontSize: "12px", color: "#e2e8f0" }}>
-                          Vínculo com Ações de Conversão (Conta {ociDiagnostics?.customerId || "3228136878"})
+                          Vínculo com Ações de Conversão (Conta {ociDiagnostics?.customerId || activeTenant?.googleCustomerId || "MCC"})
                         </strong>
                         <button
                           type="button"
@@ -4962,6 +5742,755 @@ export default function GoogleAdsPage() {
           </div>
         );
       })()}
+
+      {/* =========================================================================
+          ABA 7: CLIENTES & ACESSOS (EXCLUSIVA DO GESTOR — PASSO M3)
+         ========================================================================= */}
+      {currentTab === "clientes" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+          <div className="gads-panel">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", marginBottom: "16px" }}>
+              <div>
+                <h2 style={{ fontSize: "17px", fontWeight: 700, color: "#fff", margin: 0 }}>
+                  Clientes Google Ads Cadastrados ({tenantsList.length})
+                </h2>
+                <p style={{ color: "#94a3b8", fontSize: "13px", margin: "4px 0 0" }}>
+                  Cada cliente possui dados, funil, regras de conversão e Uazapi 100% isolados em <code>/data/tenants/&lt;slug&gt;/</code>.
+                </p>
+              </div>
+              {copiedHelperMsg && (
+                <span style={{ background: "rgba(16,185,129,0.16)", border: "1px solid rgba(16,185,129,0.4)", color: "#6ee7b7", padding: "6px 12px", borderRadius: "8px", fontSize: "12px", fontWeight: 700 }}>
+                  {copiedHelperMsg}
+                </span>
+              )}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(310px, 1fr))", gap: "14px" }}>
+              {tenantsList.map((t) => {
+                const isSelected = t.slug === activeTenantSlug;
+                const originUrl =
+                  typeof window !== "undefined" ? window.location.origin : "https://painel.anunciosalpha.com.br";
+                const trackLink = `${originUrl}/r/${t.slug}`;
+                const webhookUrl = `${originUrl}/api/webhooks/google-whatsapp?client=${t.slug}`;
+                const lpSnippet = `<script src="${originUrl}/alpha-track.js"></script>\n<!-- Link do botão WhatsApp na LP: ${trackLink} -->`;
+
+                return (
+                  <div
+                    key={t.slug}
+                    style={{
+                      background: "#090f20",
+                      border: `1px solid ${isSelected ? "#3b82f6" : "#1e293b"}`,
+                      borderRadius: "12px",
+                      padding: "16px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "10px",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "8px" }}>
+                      <div>
+                        <div style={{ fontSize: "15px", fontWeight: 700, color: "#fff" }}>{t.name}</div>
+                        <div style={{ fontSize: "12px", color: "#94a3b8" }}>
+                          /r/<strong>{t.slug}</strong> · Conta Ads:{" "}
+                          <strong style={{ color: "#cbd5e1", fontVariantNumeric: "tabular-nums" }}>
+                            {t.googleCustomerId || "Sem ID"}
+                          </strong>
+                        </div>
+                      </div>
+                      <span
+                        style={{
+                          fontSize: "11px",
+                          fontWeight: 700,
+                          color: t.routingMode === "single" ? "#38bdf8" : "#c084fc",
+                        }}
+                      >
+                        {t.routingMode === "single" ? "1 WhatsApp" : `Roleta (${t.attendants.length})`}
+                      </span>
+                    </div>
+
+                    <div style={{ fontSize: "12px", color: "#cbd5e1", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                      <span>
+                        Uazapi:{" "}
+                        <strong style={{ color: t.uazapi?.configured ? "#34d399" : "#fbbf24" }}>
+                          {t.uazapi?.configured ? "Configurada" : "Pendente"}
+                        </strong>
+                      </span>
+                      <span>·</span>
+                      <span>
+                        Portal Cliente:{" "}
+                        <strong style={{ color: t.clientAccess?.enabled ? "#34d399" : "#94a3b8" }}>
+                          {t.clientAccess?.enabled
+                            ? `Ativo (${t.clientAccess.users.length} usuário)`
+                            : "Desativado"}
+                        </strong>
+                      </span>
+                    </div>
+
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "4px" }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleSelectTenant(t.slug);
+                          setCurrentTab("overview");
+                        }}
+                        style={{
+                          background: isSelected ? "#2563eb" : "#1e293b",
+                          border: "1px solid #334155",
+                          color: "#fff",
+                          borderRadius: "7px",
+                          padding: "6px 10px",
+                          fontSize: "11px",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {isSelected ? "Painel Aberto" : "Abrir Painel"}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => startEditingTenant(t)}
+                        style={{
+                          background: "#1e293b",
+                          border: "1px solid #334155",
+                          color: "#cbd5e1",
+                          borderRadius: "7px",
+                          padding: "6px 10px",
+                          fontSize: "11px",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Editar
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(trackLink).catch(() => {});
+                          setCopiedHelperMsg(`Link ${trackLink} copiado!`);
+                          setTimeout(() => setCopiedHelperMsg(null), 2500);
+                        }}
+                        style={{
+                          background: "#1e293b",
+                          border: "1px solid #334155",
+                          color: "#38bdf8",
+                          borderRadius: "7px",
+                          padding: "6px 10px",
+                          fontSize: "11px",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Copiar /r/{t.slug}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(webhookUrl).catch(() => {});
+                          setCopiedHelperMsg(`Webhook de ${t.name} copiado!`);
+                          setTimeout(() => setCopiedHelperMsg(null), 2500);
+                        }}
+                        style={{
+                          background: "#1e293b",
+                          border: "1px solid #334155",
+                          color: "#34d399",
+                          borderRadius: "7px",
+                          padding: "6px 10px",
+                          fontSize: "11px",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Copiar Webhook
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(lpSnippet).catch(() => {});
+                          setCopiedHelperMsg(`Script da LP (${t.name}) copiado!`);
+                          setTimeout(() => setCopiedHelperMsg(null), 2500);
+                        }}
+                        style={{
+                          background: "#1e293b",
+                          border: "1px solid #334155",
+                          color: "#e2e8f0",
+                          borderRadius: "7px",
+                          padding: "6px 10px",
+                          fontSize: "11px",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Copiar Script LP
+                      </button>
+
+                      {t.slug !== "cnac" && (
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteTenant(t.slug, t.name)}
+                          style={{
+                            background: "rgba(239,68,68,0.14)",
+                            border: "1px solid rgba(239,68,68,0.35)",
+                            color: "#fca5a5",
+                            borderRadius: "7px",
+                            padding: "6px 9px",
+                            fontSize: "11px",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                          }}
+                        >
+                          Remover
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))", gap: "20px" }}>
+            {/* FORMULÁRIO CADASTRO / EDIÇÃO DE CLIENTE + INTEGRACAO UAZAPI */}
+            <form onSubmit={handleSaveTenantSubmit} className="gads-panel" style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
+                <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>
+                  {editingTenantSlug ? `Editar Cliente: ${tenantFormName}` : "Cadastrar Novo Cliente Google Ads"}
+                </h3>
+                {editingTenantSlug && (
+                  <button
+                    type="button"
+                    onClick={resetTenantForm}
+                    style={{ background: "#1e293b", border: "1px solid #334155", color: "#cbd5e1", borderRadius: "6px", padding: "5px 10px", fontSize: "11px", cursor: "pointer" }}
+                  >
+                    + Novo Cadastro
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "10px" }}>
+                <div>
+                  <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
+                    Nome da Empresa *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Ex: Clínica Sorriso"
+                    value={tenantFormName}
+                    onChange={(e) => {
+                      setTenantFormName(e.target.value);
+                      if (!editingTenantSlug) {
+                        setTenantFormSlug(slugifyClientName(e.target.value));
+                      }
+                    }}
+                    className="gads-input-field"
+                    style={{ padding: "9px 12px" }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
+                    Slug do Link (/r/slug) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={Boolean(editingTenantSlug)}
+                    placeholder="ex: clinica-sorriso"
+                    value={tenantFormSlug}
+                    onChange={(e) => setTenantFormSlug(slugifyClientName(e.target.value))}
+                    className="gads-input-field"
+                    style={{ padding: "9px 12px", opacity: editingTenantSlug ? 0.65 : 1 }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
+                    Customer ID Google Ads (MCC)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: 123-456-7890"
+                    value={tenantFormCustomerId}
+                    onChange={(e) => setTenantFormCustomerId(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "9px 12px" }}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "6px" }}>
+                  Modo de Atendimento no WhatsApp
+                </label>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => setTenantFormRoutingMode("single")}
+                    style={{
+                      flex: 1,
+                      minWidth: "180px",
+                      padding: "9px 12px",
+                      borderRadius: "8px",
+                      border: `1px solid ${tenantFormRoutingMode === "single" ? "#3b82f6" : "#334155"}`,
+                      background: tenantFormRoutingMode === "single" ? "rgba(37,99,235,0.2)" : "#0f172a",
+                      color: tenantFormRoutingMode === "single" ? "#fff" : "#94a3b8",
+                      fontSize: "12px",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                  >
+                    1 Único WhatsApp (Padrão)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTenantFormRoutingMode("roulette")}
+                    style={{
+                      flex: 1,
+                      minWidth: "180px",
+                      padding: "9px 12px",
+                      borderRadius: "8px",
+                      border: `1px solid ${tenantFormRoutingMode === "roulette" ? "#a855f7" : "#334155"}`,
+                      background: tenantFormRoutingMode === "roulette" ? "rgba(168,85,247,0.2)" : "#0f172a",
+                      color: tenantFormRoutingMode === "roulette" ? "#fff" : "#94a3b8",
+                      fontSize: "12px",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                  >
+                    Roleta Multi-Atendentes (Opcional)
+                  </button>
+                </div>
+              </div>
+
+              {tenantFormRoutingMode === "single" ? (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "10px" }}>
+                  <div>
+                    <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
+                      Nome do Atendimento
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Comercial"
+                      value={tenantFormAttendantName}
+                      onChange={(e) => setTenantFormAttendantName(e.target.value)}
+                      className="gads-input-field"
+                      style={{ padding: "9px 12px" }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
+                      WhatsApp com DDI 55 + DDD *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="5521999998888"
+                      value={tenantFormAttendantPhone}
+                      onChange={(e) => setTenantFormAttendantPhone(e.target.value)}
+                      className="gads-input-field"
+                      style={{ padding: "9px 12px" }}
+                    />
+                    {tenantFormAttendantPhone.replace(/\D/g, "").length > 4 &&
+                      !isBrazilianPhoneDdiValid(tenantFormAttendantPhone) && (
+                        <small style={{ color: "#fbbf24", fontSize: "11px", display: "block", marginTop: "3px" }}>
+                          Inclua DDI 55 + DDD + 8/9 dígitos (ex: 5511999998888).
+                        </small>
+                      )}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px", background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "12px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: "12px", fontWeight: 700, color: "#cbd5e1" }}>Atendentes da Roleta</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setTenantFormRouletteAttendants((prev) => [
+                          ...prev,
+                          { name: `Atendente ${prev.length + 1}`, phone: "55", uazapiToken: "" },
+                        ])
+                      }
+                      style={{ background: "#1e293b", border: "1px solid #334155", color: "#38bdf8", borderRadius: "6px", padding: "4px 8px", fontSize: "11px", cursor: "pointer" }}
+                    >
+                      + Adicionar Atendente
+                    </button>
+                  </div>
+                  {tenantFormRouletteAttendants.map((att, idx) => (
+                    <div key={idx} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: "6px", alignItems: "center" }}>
+                      <input
+                        type="text"
+                        placeholder="Nome"
+                        value={att.name}
+                        onChange={(e) =>
+                          setTenantFormRouletteAttendants((prev) =>
+                            prev.map((row, i) => (i === idx ? { ...row, name: e.target.value } : row))
+                          )
+                        }
+                        className="gads-input-field"
+                        style={{ padding: "7px 10px", fontSize: "12px" }}
+                      />
+                      <input
+                        type="text"
+                        placeholder="55219..."
+                        value={att.phone}
+                        onChange={(e) =>
+                          setTenantFormRouletteAttendants((prev) =>
+                            prev.map((row, i) => (i === idx ? { ...row, phone: e.target.value } : row))
+                          )
+                        }
+                        className="gads-input-field"
+                        style={{ padding: "7px 10px", fontSize: "12px" }}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Token Uazapi"
+                        value={att.uazapiToken}
+                        onChange={(e) =>
+                          setTenantFormRouletteAttendants((prev) =>
+                            prev.map((row, i) => (i === idx ? { ...row, uazapiToken: e.target.value } : row))
+                          )
+                        }
+                        className="gads-input-field"
+                        style={{ padding: "7px 10px", fontSize: "12px" }}
+                      />
+                      {tenantFormRouletteAttendants.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setTenantFormRouletteAttendants((prev) => prev.filter((_, i) => i !== idx))
+                          }
+                          style={{ background: "transparent", border: "none", color: "#f87171", cursor: "pointer" }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div>
+                <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
+                  Mensagem Inicial Automática do Botão WhatsApp
+                </label>
+                <input
+                  type="text"
+                  value={tenantFormInitialMsg}
+                  onChange={(e) => setTenantFormInitialMsg(e.target.value)}
+                  placeholder="Olá! Vim pelo site e gostaria de um orçamento."
+                  className="gads-input-field"
+                  style={{ padding: "9px 12px" }}
+                />
+              </div>
+
+              {/* INTEGRADOR UAZAPI NO CADASTRO */}
+              <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "12px", display: "flex", flexDirection: "column", gap: "10px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
+                  <span style={{ fontSize: "12px", fontWeight: 700, color: "#34d399" }}>
+                    Integração Uazapi do Cliente (Zero Código)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleTestTenantFormUazapi}
+                    disabled={isTestingTenantFormUazapi}
+                    style={{
+                      background: "#1e293b",
+                      border: "1px solid #334155",
+                      color: "#38bdf8",
+                      borderRadius: "6px",
+                      padding: "5px 10px",
+                      fontSize: "11px",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {isTestingTenantFormUazapi ? "Testando..." : "Testar Conexão Uazapi"}
+                  </button>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: tenantFormRoutingMode === "single" ? "1fr 1fr" : "1fr", gap: "8px" }}>
+                  <div>
+                    <label style={{ display: "block", fontSize: "11px", color: "#94a3b8", marginBottom: "3px" }}>
+                      URL Base da Uazapi
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="https://suaempresa.uazapi.com"
+                      value={tenantFormUazapiBase}
+                      onChange={(e) => setTenantFormUazapiBase(e.target.value)}
+                      className="gads-input-field"
+                      style={{ padding: "8px 10px", fontSize: "12px" }}
+                    />
+                  </div>
+                  {tenantFormRoutingMode === "single" && (
+                    <div>
+                      <label style={{ display: "block", fontSize: "11px", color: "#94a3b8", marginBottom: "3px" }}>
+                        Token da Instância WhatsApp
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Cole o token da instância"
+                        value={tenantFormUazapiToken}
+                        onChange={(e) => setTenantFormUazapiToken(e.target.value)}
+                        className="gads-input-field"
+                        style={{ padding: "8px 10px", fontSize: "12px" }}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {tenantFormTestResult && (
+                  <div
+                    style={{
+                      fontSize: "11px",
+                      padding: "8px 10px",
+                      borderRadius: "8px",
+                      background: "#0f172a",
+                      border: `1px solid ${tenantFormTestResult.anyConnected ? "rgba(16,185,129,0.4)" : "rgba(245,158,11,0.4)"}`,
+                      color: tenantFormTestResult.anyConnected ? "#6ee7b7" : "#fde68a",
+                    }}
+                  >
+                    {tenantFormTestResult.anyConnected ? (
+                      <div>
+                        <strong>Uazapi Conectada!</strong>{" "}
+                        {tenantFormTestResult.instances?.[0]?.phone
+                          ? `Número: ${tenantFormTestResult.instances[0].phone} · `
+                          : ""}
+                        {tenantFormTestResult.instances?.[0]?.latencyMs}ms ·{" "}
+                        {tenantFormTestResult.availableLabels?.length || 0} etiqueta(s) encontrada(s).
+                      </div>
+                    ) : (
+                      <div>
+                        {tenantFormTestResult.instances?.[0]?.error ||
+                          tenantFormTestResult.error ||
+                          "Instância desconectada ou token não validado."}
+                      </div>
+                    )}
+                    {tenantFormTestResult.webhookUrl && (
+                      <div style={{ color: "#94a3b8", marginTop: "4px", wordBreak: "break-all" }}>
+                        Webhook: <code style={{ color: "#38bdf8" }}>{tenantFormTestResult.webhookUrl}</code>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {tenantFormFeedback && (
+                <div
+                  style={{
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    padding: "9px 12px",
+                    borderRadius: "8px",
+                    background: tenantFormFeedback.ok ? "rgba(16,185,129,0.12)" : "rgba(239,68,68,0.12)",
+                    color: tenantFormFeedback.ok ? "#6ee7b7" : "#fca5a5",
+                    border: `1px solid ${tenantFormFeedback.ok ? "rgba(16,185,129,0.35)" : "rgba(239,68,68,0.35)"}`,
+                  }}
+                >
+                  {tenantFormFeedback.msg}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isSavingTenant}
+                style={{
+                  background: "#2563eb",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: "8px",
+                  padding: "11px 18px",
+                  fontSize: "13px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "8px",
+                }}
+              >
+                <Save size={15} />
+                {isSavingTenant
+                  ? "Salvando..."
+                  : editingTenantSlug
+                    ? "Salvar Alterações do Cliente"
+                    : "Criar Cliente & Gerar Link /r/<slug>"}
+              </button>
+            </form>
+
+            {/* GERENCIADOR DE ACESSOS DO PORTAL DO CLIENTE */}
+            <div className="gads-panel" style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              <div>
+                <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#fff", margin: 0 }}>
+                  Acessos do Portal do Cliente (/google-ads/acesso)
+                </h3>
+                <p style={{ color: "#94a3b8", fontSize: "12px", margin: "4px 0 0" }}>
+                  Crie o login do seu cliente para acompanhar apenas{" "}
+                  <strong style={{ color: "#cbd5e1" }}>Visão Geral Comercial, Leads e Funil Kanban</strong>{" "}
+                  — sem palavras-chave, custos, ROAS, prejuízo ou edição de regras.
+                </p>
+              </div>
+
+              <div>
+                <label style={{ display: "block", fontSize: "11px", fontWeight: 700, color: "#94a3b8", marginBottom: "4px" }}>
+                  Cliente Selecionado para Acesso
+                </label>
+                <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                  <select
+                    value={accessTargetSlug}
+                    onChange={(e) => setAccessTargetSlug(e.target.value)}
+                    className="gads-select-field"
+                    style={{ flex: 1, padding: "9px 12px" }}
+                  >
+                    {tenantsList.map((t) => (
+                      <option key={`acc_${t.slug}`} value={t.slug}>
+                        {t.name} (/r/{t.slug})
+                      </option>
+                    ))}
+                  </select>
+                  {(() => {
+                    const target = tenantsList.find((t) => t.slug === accessTargetSlug);
+                    if (!target) return null;
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => handleToggleClientPortal(target.slug, !target.clientAccess?.enabled)}
+                        style={{
+                          background: target.clientAccess?.enabled ? "rgba(16,185,129,0.16)" : "rgba(239,68,68,0.14)",
+                          border: `1px solid ${target.clientAccess?.enabled ? "rgba(16,185,129,0.4)" : "rgba(239,68,68,0.35)"}`,
+                          color: target.clientAccess?.enabled ? "#6ee7b7" : "#fca5a5",
+                          borderRadius: "8px",
+                          padding: "8px 12px",
+                          fontSize: "12px",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {target.clientAccess?.enabled ? "Portal Ativo" : "Portal Desativado"}
+                      </button>
+                    );
+                  })()}
+                </div>
+              </div>
+
+              <form onSubmit={handleSaveClientUserSubmit} style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "14px", display: "flex", flexDirection: "column", gap: "10px" }}>
+                <div style={{ fontSize: "12px", fontWeight: 700, color: "#cbd5e1" }}>
+                  Criar / Atualizar Login do Cliente
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: "8px" }}>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Login ou e-mail"
+                    value={clientUserUsername}
+                    onChange={(e) => setClientUserUsername(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 10px", fontSize: "12px" }}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Nome exibido"
+                    value={clientUserDisplayName}
+                    onChange={(e) => setClientUserDisplayName(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 10px", fontSize: "12px" }}
+                  />
+                  <input
+                    type="password"
+                    required
+                    placeholder="Senha (mín. 4 dígitos)"
+                    value={clientUserPassword}
+                    onChange={(e) => setClientUserPassword(e.target.value)}
+                    className="gads-input-field"
+                    style={{ padding: "8px 10px", fontSize: "12px" }}
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isSavingClientUser}
+                  style={{
+                    background: "#7c3aed",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: "8px",
+                    padding: "9px 14px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "6px",
+                  }}
+                >
+                  <KeyRound size={14} /> {isSavingClientUser ? "Salvando..." : "Salvar Acesso do Cliente"}
+                </button>
+                {clientUserFeedback && (
+                  <div style={{ fontSize: "12px", color: clientUserFeedback.ok ? "#6ee7b7" : "#fca5a5", fontWeight: 600 }}>
+                    {clientUserFeedback.msg}
+                  </div>
+                )}
+              </form>
+
+              <div>
+                <div style={{ fontSize: "12px", fontWeight: 700, color: "#94a3b8", marginBottom: "8px" }}>
+                  Usuários Cadastrados Neste Cliente:
+                </div>
+                {(() => {
+                  const target = tenantsList.find((t) => t.slug === accessTargetSlug);
+                  const users = target?.clientAccess?.users || [];
+                  if (users.length === 0) {
+                    return (
+                      <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "16px", fontSize: "12px", color: "#64748b", textAlign: "center" }}>
+                        Nenhum usuário criado para {target?.name || accessTargetSlug} ainda.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                      {users.map((u) => (
+                        <div
+                          key={u.id}
+                          style={{
+                            background: "#090f20",
+                            border: "1px solid #1e293b",
+                            borderRadius: "8px",
+                            padding: "10px 12px",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: "8px",
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontSize: "13px", fontWeight: 700, color: "#fff" }}>{u.displayName}</div>
+                            <div style={{ fontSize: "11px", color: "#94a3b8" }}>
+                              Login: <strong>{u.username}</strong>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteClientUser(accessTargetSlug, u.id)}
+                            style={{ background: "rgba(239,68,68,0.14)", border: "1px solid rgba(239,68,68,0.3)", color: "#fca5a5", borderRadius: "6px", padding: "5px 9px", fontSize: "11px", cursor: "pointer" }}
+                          >
+                            Excluir
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
