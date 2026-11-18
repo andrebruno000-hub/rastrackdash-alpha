@@ -634,17 +634,19 @@ export class WebhooksController {
       };
     }
 
-    const message = this.recordValue(body.message);
+    const data = this.recordValue(body.data);
+    const message =
+      this.recordValue(body.message) ?? this.recordValue(data?.message);
     if (message !== undefined) {
       await this.touchBridgedChannel(resolvedContext);
     }
     const isInboundMessage =
       message !== undefined &&
-      message.fromMe === false &&
+      parsed.fromMe === false &&
       parsed.isGroupChat !== true;
     const isTeamMessage =
       message !== undefined &&
-      message.fromMe === true &&
+      parsed.fromMe === true &&
       parsed.isGroupChat !== true;
 
     // U2c: attendant (fromMe=true) messages evaluate message_phrase
