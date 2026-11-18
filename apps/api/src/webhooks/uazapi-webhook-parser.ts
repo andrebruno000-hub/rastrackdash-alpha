@@ -11,6 +11,7 @@ export type ParsedUazapiWebhook = {
   phoneHash?: string;
   contactName?: string;
   messageText?: string;
+  fromMe?: boolean;
   labels: string[];
   waLabelIds: string[];
   labelEventKind: "chat_labels" | "labels_catalog" | "other";
@@ -26,7 +27,8 @@ export type ParsedUazapiWebhook = {
 export function parseUazapiWebhook(
   body: UazapiWebhookBody,
 ): ParsedUazapiWebhook {
-  const message = recordValue(body.message);
+  const data = recordValue(body.data);
+  const message = recordValue(body.message) ?? recordValue(data?.message);
   const context = recordValue(body.context);
   const bodyReferral = recordValue(body.referral);
   const messageReferral = recordValue(message?.referral);
@@ -40,6 +42,7 @@ export function parseUazapiWebhook(
     recordValue(referral?.adsContextData);
   const externalAdReply = getExternalAdReply(body, message);
   const phone = getPhone(body, message);
+  const chat = recordValue(body.chat) ?? recordValue(data?.chat);
 
   return {
     eventType:
@@ -52,13 +55,16 @@ export function parseUazapiWebhook(
       firstString(body.id) ??
       firstString(body.eventId) ??
       firstString(body.externalEventId) ??
-      firstString(message?.id),
+      firstString(message?.id) ??
+      firstString(message?.messageid) ??
+      firstString(recordValue(message?.key)?.id),
     leadId: firstString(body.leadId),
     phone,
-    waChatId: firstString(recordValue(body.chat)?.wa_chatid),
+    waChatId: firstString(chat?.wa_chatid),
     phoneHash: firstString(body.phoneHash) ?? hashPhoneIdentity(phone),
     contactName: getContactName(body),
     messageText: getMessageText(body),
+    fromMe: getFromMe(body, message),
     labels: getLabels(body),
     waLabelIds: getWaLabelIds(body),
     campaignId:
@@ -141,28 +147,158 @@ function firstStringFromRecords(
   return undefined;
 }
 
-function getMessageText(body: UazapiWebhookBody): string | undefined {
-  const message = body.message;
+function getFromMe(
+  body: UazapiWebhookBody,
+  message?: Record<string, unknown>,
+): boolean | undefined {
+  const messageKey = recordValue(message?.key);
+  const bodyKey = recordValue(body.key);
 
-  if (typeof message === "string") {
-    return firstString(message);
+  if (typeof message?.fromMe === "boolean") {
+    return message.fromMe;
+  }
+  if (typeof messageKey?.fromMe === "boolean") {
+    return messageKey.fromMe;
+  }
+  if (typeof body.fromMe === "boolean") {
+    return body.fromMe;
+  }
+  if (typeof bodyKey?.fromMe === "boolean") {
+    return bodyKey.fromMe;
   }
 
-  if (message && typeof message === "object" && !Array.isArray(message)) {
-    const messageObject = message as Record<string, unknown>;
-    return (
+  return undefined;
+}
+
+/**
+ * Extracts plain text OR media/file captions (PDF/document, image, video,
+ * documentWithCaptionMessage, ephemeralMessage, viewOnceMessage, Uazapi content.caption).
+ * Plain text fields keep top priority to guarantee zero regression.
+ * Intentionally ignores contextInfo/quotedMessage so replied old messages never trigger rules.
+ */
+function getMessageText(body: UazapiWebhookBody): string | undefined {
+  const data = recordValue(body.data);
+  const rawMessage = body.message ?? data?.message;
+
+  if (typeof rawMessage === "string") {
+    const direct = firstString(rawMessage);
+    if (direct) {
+      return direct;
+    }
+  }
+
+  const messageObject = recordValue(rawMessage);
+  if (messageObject) {
+    const plainText =
       firstString(messageObject.text) ??
       firstString(messageObject.body) ??
       firstString(messageObject.message) ??
-      firstString(messageObject.conversation)
-    );
+      firstString(messageObject.conversation);
+
+    if (plainText) {
+      return plainText;
+    }
+
+    const mediaCaption = extractMediaCaptionOrNestedText(messageObject, 0);
+    if (mediaCaption) {
+      return mediaCaption;
+    }
   }
+
+  const bodyContent = recordValue(body.content);
+  const dataContent = recordValue(data?.content);
 
   return (
     firstString(body.text) ??
     firstString(body.body) ??
-    firstString(body.messageText)
+    firstString(body.messageText) ??
+    firstString(body.caption) ??
+    (typeof body.content === "string"
+      ? firstString(body.content)
+      : (firstString(bodyContent?.text) ??
+        firstString(bodyContent?.caption) ??
+        firstString(bodyContent?.description))) ??
+    firstString(data?.text) ??
+    firstString(data?.body) ??
+    firstString(data?.messageText) ??
+    firstString(data?.caption) ??
+    (typeof data?.content === "string"
+      ? firstString(data.content)
+      : (firstString(dataContent?.text) ??
+        firstString(dataContent?.caption) ??
+        firstString(dataContent?.description)))
   );
+}
+
+function extractMediaCaptionOrNestedText(
+  node: unknown,
+  depth: number,
+): string | undefined {
+  if (depth > 4) {
+    return undefined;
+  }
+
+  const directString = firstString(node);
+  if (directString) {
+    return directString;
+  }
+
+  const obj = recordValue(node);
+  if (!obj) {
+    return undefined;
+  }
+
+  const contentObj = recordValue(obj.content);
+  const mediaObj = recordValue(obj.media);
+  const extendedTextMessage = recordValue(obj.extendedTextMessage);
+  const documentMessage = recordValue(obj.documentMessage);
+  const imageMessage = recordValue(obj.imageMessage);
+  const videoMessage = recordValue(obj.videoMessage);
+
+  const directCandidate =
+    firstString(obj.text) ??
+    firstString(obj.body) ??
+    firstString(obj.caption) ??
+    firstString(obj.conversation) ??
+    firstString(obj.messageText) ??
+    (typeof obj.content === "string" ? firstString(obj.content) : undefined) ??
+    firstString(contentObj?.text) ??
+    firstString(contentObj?.caption) ??
+    firstString(contentObj?.description) ??
+    firstString(mediaObj?.caption) ??
+    firstString(mediaObj?.text) ??
+    firstString(extendedTextMessage?.text) ??
+    firstString(documentMessage?.caption) ??
+    firstString(imageMessage?.caption) ??
+    firstString(videoMessage?.caption);
+
+  if (directCandidate) {
+    return directCandidate;
+  }
+
+  // Unwrap Baileys / GoWS / Uazapi nested wrappers (never contextInfo or quotedMessage).
+  const wrappers = [
+    obj.message,
+    recordValue(obj.documentWithCaptionMessage)?.message,
+    obj.documentWithCaptionMessage,
+    recordValue(obj.viewOnceMessage)?.message,
+    recordValue(obj.viewOnceMessageV2)?.message,
+    recordValue(obj.viewOnceMessageV2Extension)?.message,
+    recordValue(obj.ephemeralMessage)?.message,
+  ];
+
+  for (const wrapper of wrappers) {
+    if (!wrapper) {
+      continue;
+    }
+
+    const nested = extractMediaCaptionOrNestedText(wrapper, depth + 1);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return undefined;
 }
 
 function getLabels(body: UazapiWebhookBody): string[] {
@@ -219,8 +355,10 @@ function getPhone(
   body: UazapiWebhookBody,
   message?: Record<string, unknown>,
 ): string | undefined {
-  const contact = recordValue(body.contact);
-  const chat = recordValue(body.chat);
+  const data = recordValue(body.data);
+  const contact = recordValue(body.contact) ?? recordValue(data?.contact);
+  const chat = recordValue(body.chat) ?? recordValue(data?.chat);
+  const messageKey = recordValue(message?.key);
 
   return (
     firstString(body.phone) ??
@@ -229,13 +367,16 @@ function getPhone(
     firstString(contact?.phone) ??
     firstString(chat?.phone) ??
     firstString(message?.chatid) ??
-    firstString(chat?.wa_chatid)
+    firstString(chat?.wa_chatid) ??
+    firstString(message?.sender_pn) ??
+    firstString(messageKey?.remoteJid)
   );
 }
 
 function getContactName(body: UazapiWebhookBody): string | undefined {
-  const contact = recordValue(body.contact);
-  const chat = recordValue(body.chat);
+  const data = recordValue(body.data);
+  const contact = recordValue(body.contact) ?? recordValue(data?.contact);
+  const chat = recordValue(body.chat) ?? recordValue(data?.chat);
 
   return (
     firstString(body.name) ??
@@ -248,7 +389,8 @@ function getContactName(body: UazapiWebhookBody): string | undefined {
 }
 
 function getIsGroupChat(body: UazapiWebhookBody): boolean | undefined {
-  const chat = recordValue(body.chat);
+  const data = recordValue(body.data);
+  const chat = recordValue(body.chat) ?? recordValue(data?.chat);
 
   return typeof chat?.wa_isGroup === "boolean" ? chat.wa_isGroup : undefined;
 }
