@@ -261,6 +261,67 @@ function matchDynamicPhrase(messageText: string, phrases: string[]): string | nu
   return null;
 }
 
+/**
+ * Extrai texto de mensagens de texto simples OU legendas de arquivos/mídias
+ * (PDF/documento, imagem, vídeo, documentWithCaptionMessage, ephemeral/viewOnce).
+ * Nunca lê quotedMessage/contextInfo para evitar falsos positivos ao responder mensagens antigas.
+ */
+function extractWhatsAppMessageText(msg: any): string {
+  const m = msg && typeof msg === "object" ? msg : {};
+  const inner = m.message && typeof m.message === "object" ? m.message : m;
+  const unwrapped =
+    inner.documentWithCaptionMessage?.message ||
+    inner.viewOnceMessage?.message ||
+    inner.viewOnceMessageV2?.message ||
+    inner.viewOnceMessageV2Extension?.message ||
+    inner.ephemeralMessage?.message ||
+    m.documentWithCaptionMessage?.message ||
+    m.viewOnceMessage?.message ||
+    m.viewOnceMessageV2?.message ||
+    m.ephemeralMessage?.message ||
+    null;
+
+  const contentObj = m.content && typeof m.content === "object" ? m.content : {};
+  const mediaObj = m.media && typeof m.media === "object" ? m.media : {};
+
+  const candidates = [
+    m.conversation,
+    m.text,
+    typeof m.content === "string" ? m.content : contentObj.text,
+    contentObj.caption,
+    contentObj.description,
+    m.caption,
+    mediaObj.caption,
+    m.extendedTextMessage?.text,
+    m.documentWithCaptionMessage?.message?.documentMessage?.caption,
+    m.documentMessage?.caption,
+    m.imageMessage?.caption,
+    m.videoMessage?.caption,
+    inner.conversation,
+    inner.text,
+    inner.caption,
+    inner.extendedTextMessage?.text,
+    inner.documentWithCaptionMessage?.message?.documentMessage?.caption,
+    inner.documentMessage?.caption,
+    inner.imageMessage?.caption,
+    inner.videoMessage?.caption,
+    unwrapped?.conversation,
+    unwrapped?.text,
+    unwrapped?.caption,
+    unwrapped?.extendedTextMessage?.text,
+    unwrapped?.documentMessage?.caption,
+    unwrapped?.imageMessage?.caption,
+    unwrapped?.videoMessage?.caption,
+  ];
+
+  for (const cand of candidates) {
+    if (typeof cand === "string" && cand.trim()) {
+      return cand;
+    }
+  }
+  return "";
+}
+
 async function checkUazapiInstanceStatus(
   baseUrl: string,
   name: string,
@@ -342,7 +403,7 @@ async function fetchUazapiRecentMessages(
       const mid = String(m?.messageid || m?.id || m?.key?.id || "");
       const dedupKey =
         mid ||
-        `${m?.chatid || m?.wa_chatid || m?._chatId || ""}_${m?.messageTimestamp || ""}_${String(m?.text || m?.conversation || "").slice(0, 24)}`;
+        `${m?.chatid || m?.wa_chatid || m?._chatId || ""}_${m?.messageTimestamp || ""}_${extractWhatsAppMessageText(m).slice(0, 24)}`;
       if (seenKeys.has(dedupKey)) continue;
       seenKeys.add(dedupKey);
       aggregated.push(m);
@@ -526,17 +587,11 @@ async function autoReconcileUazapiIfConfigured(
       if (!cleanPhone || isTenantAttendantPhone(tenant, cleanPhone)) continue;
 
       const messageId = String(msg?.messageid || msg?.id || msg?.key?.id || "").trim();
-      if (messageId && processedIds.includes(messageId)) continue;
-
-      const text = String(
-        msg?.text ||
-          msg?.conversation ||
-          (typeof msg?.content === "string" ? msg.content : msg?.content?.text) ||
-          msg?.extendedTextMessage?.text ||
-          ""
-      );
-
+      const text = extractWhatsAppMessageText(msg);
       const fromMe = Boolean(msg?.fromMe ?? msg?.key?.fromMe ?? false);
+      if (messageId && processedIds.includes(messageId) && !(force && fromMe && text)) {
+        continue;
+      }
       const tsMs = parseUazapiTimestampMs(msg);
       const msgIso = tsMs > 0 ? new Date(tsMs).toISOString() : new Date().toISOString();
 
