@@ -74,6 +74,74 @@ function matchDynamicPhrase(messageText: string, phrases: string[]): string | nu
   return null;
 }
 
+/**
+ * Extrai texto de mensagens de texto simples OU legendas de arquivos/mídias
+ * (PDF/documento, imagem, vídeo, documentWithCaptionMessage, ephemeral/viewOnce).
+ * Nunca lê quotedMessage/contextInfo para evitar falsos positivos ao responder mensagens antigas.
+ */
+function extractWhatsAppMessageText(msgOrBody: any, rootBody?: any): string {
+  const m = msgOrBody && typeof msgOrBody === "object" ? msgOrBody : {};
+  const r = rootBody && typeof rootBody === "object" ? rootBody : {};
+  const inner = m.message && typeof m.message === "object" ? m.message : m;
+  const unwrapped =
+    inner.documentWithCaptionMessage?.message ||
+    inner.viewOnceMessage?.message ||
+    inner.viewOnceMessageV2?.message ||
+    inner.viewOnceMessageV2Extension?.message ||
+    inner.ephemeralMessage?.message ||
+    m.documentWithCaptionMessage?.message ||
+    m.viewOnceMessage?.message ||
+    m.viewOnceMessageV2?.message ||
+    m.ephemeralMessage?.message ||
+    null;
+
+  const contentObj = m.content && typeof m.content === "object" ? m.content : {};
+  const mediaObj = m.media && typeof m.media === "object" ? m.media : {};
+  const rootContentObj = r.content && typeof r.content === "object" ? r.content : {};
+
+  const candidates = [
+    m.conversation,
+    m.text,
+    typeof m.content === "string" ? m.content : contentObj.text,
+    contentObj.caption,
+    contentObj.description,
+    m.caption,
+    mediaObj.caption,
+    m.extendedTextMessage?.text,
+    m.documentWithCaptionMessage?.message?.documentMessage?.caption,
+    m.documentMessage?.caption,
+    m.imageMessage?.caption,
+    m.videoMessage?.caption,
+    inner.conversation,
+    inner.text,
+    inner.caption,
+    inner.extendedTextMessage?.text,
+    inner.documentWithCaptionMessage?.message?.documentMessage?.caption,
+    inner.documentMessage?.caption,
+    inner.imageMessage?.caption,
+    inner.videoMessage?.caption,
+    unwrapped?.conversation,
+    unwrapped?.text,
+    unwrapped?.caption,
+    unwrapped?.extendedTextMessage?.text,
+    unwrapped?.documentMessage?.caption,
+    unwrapped?.imageMessage?.caption,
+    unwrapped?.videoMessage?.caption,
+    r.text,
+    r.messageText,
+    r.caption,
+    typeof r.content === "string" ? r.content : rootContentObj.text,
+    rootContentObj.caption,
+  ];
+
+  for (const cand of candidates) {
+    if (typeof cand === "string" && cand.trim()) {
+      return cand;
+    }
+  }
+  return "";
+}
+
 function readProcessedMessageIds(slug: string): string[] {
   const file = getTenantFilePath(slug, "processed_messages");
   const parsed = readJsonSafe<string[]>(file, []);
@@ -304,11 +372,7 @@ async function recoverMissedGoogleLeadFromUazapi(
               : [];
 
         for (const msg of messages) {
-          const text =
-            msg?.text ||
-            msg?.conversation ||
-            (typeof msg?.content === "string" ? msg.content : msg?.content?.text) ||
-            "";
+          const text = extractWhatsAppMessageText(msg);
           const tracking = extractTrackingTag(text);
           if (tracking?.gclid) {
             return {
@@ -465,14 +529,7 @@ export async function POST(request: NextRequest) {
       chatObj?.wa_name ||
       "";
 
-    const messageText =
-      message.conversation ||
-      message.text ||
-      (typeof message.content === "string" ? message.content : message.content?.text) ||
-      message.extendedTextMessage?.text ||
-      body.text ||
-      body.messageText ||
-      "";
+    const messageText = extractWhatsAppMessageText(message, body);
 
     const fromMe = Boolean(key.fromMe ?? message.fromMe ?? body.fromMe ?? false);
     const instanceName = String(
