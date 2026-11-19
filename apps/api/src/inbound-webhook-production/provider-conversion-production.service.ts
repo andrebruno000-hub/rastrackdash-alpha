@@ -105,6 +105,7 @@ import {
   manualOrderKey,
   PURCHASE_REGISTERED_MANUALLY,
 } from "../leads/manual-conversion-purchase";
+import { authorizedInboundMetaDestinationIds } from "../inbound-webhooks/inbound-webhook-meta-route-eligibility";
 import { InboundWebhookMetaRouteReaderService } from "../inbound-webhooks/inbound-webhook-meta-route-reader.service";
 import { InboundWebhookPayloadEncryptionService } from "../inbound-webhooks/inbound-webhook-payload-encryption.service";
 import {
@@ -285,7 +286,9 @@ export class ProviderConversionProductionService
 {
   private readonly billingAccess = new ExternalChannelBillingAccessStub();
   private outboxTimer?: NodeJS.Timeout;
+  private routeRecoveryBootTimer?: NodeJS.Timeout;
   private recoveringOutbox = false;
+  private recoveringRouteBlocked = false;
 
   private readonly logger = new Logger(
     ProviderConversionProductionService.name,
@@ -310,15 +313,25 @@ export class ProviderConversionProductionService
 
   onApplicationBootstrap(): void {
     if (!this.productionEnabled()) return;
+    this.routeRecoveryBootTimer = setTimeout(() => {
+      void this.recoverRouteBlockedExecutions().catch(() =>
+        this.logger.error("provider_conversion_route_blocked_recovery_failed"),
+      );
+    }, 15_000);
+    this.routeRecoveryBootTimer.unref();
     this.outboxTimer = setInterval(() => {
       void this.recoverPurchaseOutbox().catch(() =>
         this.logger.error("provider_purchase_outbox_recovery_failed"),
+      );
+      void this.recoverRouteBlockedExecutions().catch(() =>
+        this.logger.error("provider_conversion_route_blocked_recovery_failed"),
       );
     }, 60_000);
     this.outboxTimer.unref();
   }
 
   onModuleDestroy(): void {
+    if (this.routeRecoveryBootTimer) clearTimeout(this.routeRecoveryBootTimer);
     if (this.outboxTimer) clearInterval(this.outboxTimer);
   }
 
@@ -397,6 +410,87 @@ export class ProviderConversionProductionService
       return enqueued;
     } finally {
       this.recoveringOutbox = false;
+    }
+  }
+
+  /**
+   * Reprocessa automaticamente execuções bloqueadas por "Rota Meta indisponível"
+   * (`provider_conversion_route_*`) dentro da janela de 7 dias da Meta CAPI
+   * (com margem de segurança de 1h), respeitando cooldown de 5 minutos por
+   * registro para nunca entrar em loop. Preserva todos os locks e travas de
+   * deduplicação do `processExecution()`.
+   */
+  async recoverRouteBlockedExecutions(): Promise<number> {
+    if (!this.productionEnabled() || this.recoveringRouteBlocked) return 0;
+    this.recoveringRouteBlocked = true;
+    let recovered = 0;
+    try {
+      const metaWindowCutoff = new Date(
+        Date.now() - 7 * 24 * 60 * 60 * 1_000 + 60 * 60 * 1_000,
+      );
+      const retryCooldown = new Date(Date.now() - 5 * 60 * 1_000);
+      const blocked =
+        await this.prisma.providerConversionRuleExecution.findMany({
+          where: {
+            status: "blocked",
+            conversionEventLogId: null,
+            reasonCode: { startsWith: "provider_conversion_route_" },
+            occurredAt: { gte: metaWindowCutoff },
+            OR: [
+              { lastAttemptedAt: null },
+              { lastAttemptedAt: { lte: retryCooldown } },
+            ],
+          },
+          select: {
+            id: true,
+            workspaceId: true,
+          },
+          orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
+          take: 25,
+        });
+
+      for (const row of blocked) {
+        const unlocked =
+          await this.prisma.providerConversionRuleExecution.updateMany({
+            where: {
+              id: row.id,
+              workspaceId: row.workspaceId,
+              status: "blocked",
+              conversionEventLogId: null,
+              reasonCode: { startsWith: "provider_conversion_route_" },
+            },
+            data: {
+              status: "eligible",
+              reasonCode: null,
+            },
+          });
+        if (unlocked.count !== 1) continue;
+
+        try {
+          const outcome = await this.processExecution({
+            providerConversionExecutionId: row.id,
+            workspaceId: row.workspaceId,
+          });
+          if (outcome.status === "materialized") {
+            recovered++;
+          }
+        } catch {
+          // processExecution já persistiu o status bloqueado/falha e atualizou
+          // lastAttemptedAt para aguardar o cooldown antes da próxima tentativa.
+        }
+      }
+
+      if (recovered > 0) {
+        this.logger.log(
+          JSON.stringify({
+            event: "provider_conversion_route_blocked_recovered",
+            recovered,
+          }),
+        );
+      }
+      return recovered;
+    } finally {
+      this.recoveringRouteBlocked = false;
     }
   }
 
@@ -907,7 +1001,9 @@ export class ProviderConversionProductionService
         // live for Payt (same rules as the paid-lead resolver).
         if (!ctwaProof && isSalesPlatformProvider(occurrence.provider))
           ctwaProof = await this.livePaytCtwaProof(execution, lead);
-        if (!ctwaProof) throw error;
+        const allowBridgedFallback =
+          !purchaseKey && isBridgedWhatsappProvider(occurrence.provider);
+        if (!ctwaProof && !allowBridgedFallback) throw error;
         adRoute = {
           status: "unresolved",
           reason: error.code.slice("provider_conversion_route_".length),
@@ -932,6 +1028,32 @@ export class ProviderConversionProductionService
       if (!adRouteResolved && ctwaProof) {
         ctwaDestination = ctwaProof;
         route = ctwaRoute(ctwaProof);
+      } else if (
+        !adRouteResolved &&
+        !purchaseKey &&
+        isBridgedWhatsappProvider(occurrence.provider)
+      ) {
+        const fallbackRoute = await this.resolveUniqueWorkspaceMetaRoute(
+          execution.workspaceId,
+          lead.campaignId,
+        );
+        if (fallbackRoute) {
+          this.logger.log(
+            JSON.stringify({
+              event: "provider_conversion_route_workspace_fallback",
+              workspaceId: execution.workspaceId,
+              providerConversionExecutionId: execution.id,
+              provider: occurrence.provider,
+              adId: lead.adId,
+              originalReason: adRoute.reason,
+              adAccountId: fallbackRoute.adAccountId,
+              conversionDestinationId: fallbackRoute.conversionDestinationId,
+            }),
+          );
+          route = fallbackRoute;
+        } else {
+          route = adRoute;
+        }
       } else {
         route = adRoute;
       }
@@ -2500,6 +2622,141 @@ export class ProviderConversionProductionService
         "provider_conversion_route_missing_or_conflicting",
       );
     return previews[0]!;
+  }
+
+  /**
+   * Fallback fail-closed para conexões WhatsApp bridged (UAZAPI/WAHA) quando o
+   * anúncio (`lead.adId`) ainda não foi sincronizado em `MetaAd` no momento do
+   * disparo (anúncio novo, pausado ou fora do último sync). Segue as mesmas
+   * regras de autorização do `InboundWebhookMetaRouteReaderService` (conta
+   * ativa, conexão Meta ativa, credencial ativa e destino único autorizado e
+   * configurado). Só resolve quando há uma única rota inequívoca no workspace
+   * (ou quando o `campaignId` do lead identifica exatamente uma conta ativa).
+   */
+  private async resolveUniqueWorkspaceMetaRoute(
+    workspaceId: string,
+    campaignId?: string | null,
+  ): Promise<{
+    status: "resolved";
+    reason: string;
+    reportingAccountId: string;
+    adAccountId: string;
+    businessConnectionId: string;
+    conversionDestinationId: string;
+  } | null> {
+    const accounts = await this.prisma.metaReportingAccount.findMany({
+      where: { workspaceId, active: true },
+      select: {
+        id: true,
+        adAccountId: true,
+        businessConnectionId: true,
+        conversionDestinationId: true,
+        allowedDestinations: {
+          where: { workspaceId, active: true },
+          select: { conversionDestinationId: true },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
+    const activeAccounts = accounts.filter(
+      (
+        account,
+      ): account is typeof account & {
+        adAccountId: string;
+        businessConnectionId: string;
+      } => Boolean(account.adAccountId && account.businessConnectionId),
+    );
+    if (activeAccounts.length === 0) return null;
+
+    const workspaceConfiguredDestinations =
+      await this.prisma.metaConversionDestination.findMany({
+        where: { workspaceId, status: "configured" },
+        select: { id: true },
+        take: 2,
+      });
+    const singleWorkspaceDestinationId =
+      workspaceConfiguredDestinations.length === 1
+        ? workspaceConfiguredDestinations[0]!.id
+        : null;
+
+    const resolved: Array<{
+      status: "resolved";
+      reason: string;
+      reportingAccountId: string;
+      adAccountId: string;
+      businessConnectionId: string;
+      conversionDestinationId: string;
+    }> = [];
+
+    for (const account of activeAccounts) {
+      const connection = await this.prisma.metaBusinessConnection.findFirst({
+        where: {
+          id: account.businessConnectionId,
+          workspaceId,
+          credential: { is: { workspaceId } },
+        },
+        select: {
+          id: true,
+          status: true,
+          defaultConversionDestinationId: true,
+          credential: { select: { status: true } },
+        },
+      });
+      if (
+        !connection ||
+        connection.status !== "active" ||
+        connection.credential.status !== "active"
+      ) {
+        continue;
+      }
+
+      const authorizedIds = authorizedInboundMetaDestinationIds(account);
+      if (authorizedIds.length > 1) {
+        // Múltiplos destinos autorizados nesta conta: fail-closed para nunca
+        // escolher pixel/página ambíguo sem o vínculo do anúncio.
+        continue;
+      }
+
+      const destinationId =
+        authorizedIds[0] ??
+        connection.defaultConversionDestinationId ??
+        singleWorkspaceDestinationId;
+      if (!destinationId) continue;
+
+      const destination = await this.prisma.metaConversionDestination.findFirst({
+        where: { id: destinationId, workspaceId, status: "configured" },
+        select: { id: true },
+      });
+      if (!destination) continue;
+
+      resolved.push({
+        status: "resolved",
+        reason: "workspace_unique_meta_route_fallback",
+        reportingAccountId: account.id,
+        adAccountId: account.adAccountId,
+        businessConnectionId: connection.id,
+        conversionDestinationId: destination.id,
+      });
+    }
+
+    if (resolved.length === 1) {
+      return resolved[0]!;
+    }
+    if (resolved.length > 1 && campaignId?.trim()) {
+      const campaignAd = await this.prisma.metaAd.findFirst({
+        where: { workspaceId, campaignId: campaignId.trim() },
+        select: { adAccountId: true },
+      });
+      if (campaignAd?.adAccountId) {
+        const matched = resolved.filter(
+          (item) => item.adAccountId === campaignAd.adAccountId,
+        );
+        if (matched.length === 1) {
+          return matched[0]!;
+        }
+      }
+    }
+    return null;
   }
 
   /**
