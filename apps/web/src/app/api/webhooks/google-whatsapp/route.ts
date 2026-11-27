@@ -37,11 +37,6 @@ export const dynamic = "force-dynamic";
  * 6. Reconciliação pontual Uazapi para resgatar GCLID caso o webhook da 1ª mensagem tenha falhado.
  */
 
-function isPendingPlaceholder(tenant: GoogleTenantConfig, phone?: string): boolean {
-  const p = String(phone || "").trim();
-  return !p || /aguardando/i.test(p) || isTenantAttendantPhone(tenant, p);
-}
-
 function extractCleanPhoneFromCandidates(candidates: unknown[]): string {
   const strings = candidates
     .map((c) => String(c || "").trim())
@@ -159,14 +154,16 @@ function markMessageProcessed(slug: string, messageId: string): void {
   } catch {}
 }
 
-function decodeZeroWidth(text: string): string | null {
-  if (!text) return null;
+function decodeZeroWidthSegment(segment: string): string | null {
+  if (!segment || segment.length < 16 || segment.length % 4 !== 0) return null;
   const map: Record<string, number> = { "\u200B": 0, "\u200C": 1, "\u200D": 2, "\u2060": 3 };
-  const chars = text.match(/[\u200B\u200C\u200D\u2060]/g);
-  if (!chars || chars.length % 4 !== 0) return null;
   const bytes: number[] = [];
-  for (let i = 0; i < chars.length; i += 4) {
-    const b = (map[chars[i]] << 6) | (map[chars[i + 1]] << 4) | (map[chars[i + 2]] << 2) | map[chars[i + 3]];
+  for (let i = 0; i < segment.length; i += 4) {
+    const b =
+      (map[segment[i]] << 6) |
+      (map[segment[i + 1]] << 4) |
+      (map[segment[i + 2]] << 2) |
+      map[segment[i + 3]];
     bytes.push(b);
   }
   try {
@@ -174,6 +171,24 @@ function decodeZeroWidth(text: string): string | null {
   } catch {
     return null;
   }
+}
+
+function decodeZeroWidth(text: string): string | null {
+  if (!text) return null;
+
+  // 1. Prioriza blocos contíguos de Zero-Width (resiste a emojis com \u200D na mesma mensagem)
+  const blocks = text.match(/[\u200B\u200C\u200D\u2060]{16,}/g);
+  if (blocks) {
+    for (const block of blocks) {
+      const decoded = decodeZeroWidthSegment(block);
+      if (decoded && decoded.includes("ref:")) return decoded;
+    }
+  }
+
+  // 2. Fallback global padrão
+  const chars = text.match(/[\u200B\u200C\u200D\u2060]/g);
+  if (!chars || chars.length % 4 !== 0) return null;
+  return decodeZeroWidthSegment(chars.join(""));
 }
 
 function extractTrackingTag(
@@ -625,67 +640,10 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      // CAMADA 2: Atribuição Temporal Inteligente (30 min) se cliente apagou o texto pronto
-      const nowMs = Date.now();
-      const pendingLeadIndex = leads.findIndex((l: any) => {
-        const isPending = !l.firstMessageAt || isPendingPlaceholder(tenant, l.leadPhone);
-        if (!isPending) return false;
-
-        const leadTime = new Date(l.occurredAt).getTime();
-        if (isNaN(leadTime) || nowMs - leadTime >= 30 * 60 * 1000) return false;
-
-        // Para cliente com 1 único WhatsApp, não restringe por nome da instância
-        if (tenant.routingMode === "single") return true;
-
-        const attendantNorm = normalizeText(l.attendantName || "");
-        const resolvedNorm = normalizeText(resolvedAttendant);
-        const instNorm = normalizeText(instanceName);
-        if (!instNorm && !resolvedNorm) return true;
-        return (
-          (resolvedNorm && (attendantNorm.includes(resolvedNorm) || resolvedNorm.includes(attendantNorm))) ||
-          (instNorm && (attendantNorm.includes(instNorm) || instNorm.includes(attendantNorm)))
-        );
-      });
-
-      if (pendingLeadIndex !== -1) {
-        const nowIso = new Date().toISOString();
-        leads[pendingLeadIndex].leadPhone = cleanPhone;
-        if (pushName) leads[pendingLeadIndex].leadName = pushName;
-        if (
-          leads[pendingLeadIndex].stage !== "orcamento_enviado" &&
-          leads[pendingLeadIndex].stage !== "compra_realizada"
-        ) {
-          leads[pendingLeadIndex].stage = "conversa_iniciada";
-          leads[pendingLeadIndex].conversionType = "conversa_iniciada";
-        }
-        leads[pendingLeadIndex].firstMessageAt = nowIso;
-        leads[pendingLeadIndex].updatedAt = nowIso;
-
-        writeTenantLeads(tenant.slug, leads);
-        if (messageId) markMessageProcessed(tenant.slug, messageId);
-
-        appendTenantAudit(tenant.slug, {
-          id: `audit_temporal_${Date.now()}`,
-          leadPhone: cleanPhone,
-          leadName: pushName || "Cliente WhatsApp",
-          action: "conversa_iniciada",
-          detectedPhrase: `Texto livre do cliente: "${messageText.slice(0, 50)}" (Atribuição Temporal 30min)`,
-          attendant: leads[pendingLeadIndex].attendantName || resolvedAttendant,
-          gclid: leads[pendingLeadIndex].gclid,
-          timestamp: nowIso,
-          statusOci: "queued",
-        });
-
-        return NextResponse.json({
-          success: true,
-          action: "lead_identified_temporal_window",
-          tenant: tenant.slug,
-          leadName: pushName,
-          leadPhone: cleanPhone,
-          matchedKeyword: leads[pendingLeadIndex].keyword,
-          gclid: leads[pendingLeadIndex].gclid,
-        });
-      }
+      // MODO 100% DETERMINÍSTICO ESTRITO (ZERO ATRIBUIÇÃO TEMPORAL / CHUTÔMETRO):
+      // Somente mensagens com a Tag Invisível real (ref:<gclid>) promovem um clique para "Conversa Iniciada".
+      // Cliques em que o usuário fechou o WhatsApp sem enviar permanecem corretamente em "1. Clicou no WhatsApp"
+      // e NUNCA sequestram leads do Meta Ads, clientes antigos ou contatos orgânicos.
     }
 
     // =========================================================================
