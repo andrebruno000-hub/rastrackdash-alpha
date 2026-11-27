@@ -581,6 +581,70 @@ export default function GoogleAdsPage() {
     }
   };
 
+  // Auditoria & Limpeza segura de falsos positivos da antiga Janela Temporal (30 min)
+  const [temporalCleanupPreview, setTemporalCleanupPreview] = useState<any | null>(null);
+  const [isCheckingTemporalCleanup, setIsCheckingTemporalCleanup] = useState(false);
+  const [isExecutingTemporalCleanup, setIsExecutingTemporalCleanup] = useState(false);
+  const [temporalCleanupFeedback, setTemporalCleanupFeedback] = useState<string | null>(null);
+
+  const hasTemporalAuditEntries = useMemo(() => {
+    return auditLogs.some((a: any) => {
+      const aid = String(a?.id || "");
+      const phrase = String(a?.detectedPhrase || "");
+      return (
+        aid.startsWith("audit_temporal_") ||
+        aid.startsWith("audit_uazapi_temp_") ||
+        /atribui[çc][ãa]o temporal|janela 30min|janela 5min/i.test(phrase)
+      );
+    });
+  }, [auditLogs]);
+
+  const handlePreviewTemporalCleanup = async () => {
+    setIsCheckingTemporalCleanup(true);
+    setTemporalCleanupFeedback(null);
+    try {
+      const res = await fetch(`/api/google-ads/leads?client=${encodeURIComponent(activeTenantSlug)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "clean_temporal_leads", dryRun: true, clientSlug: activeTenantSlug }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setTemporalCleanupPreview(data);
+      } else {
+        setTemporalCleanupFeedback(data.error || "Não foi possível auditar os registros temporais.");
+      }
+    } catch {
+      setTemporalCleanupFeedback("Erro de rede ao auditar registros temporais.");
+    } finally {
+      setIsCheckingTemporalCleanup(false);
+    }
+  };
+
+  const handleConfirmTemporalCleanup = async () => {
+    setIsExecutingTemporalCleanup(true);
+    setTemporalCleanupFeedback(null);
+    try {
+      const res = await fetch(`/api/google-ads/leads?client=${encodeURIComponent(activeTenantSlug)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "clean_temporal_leads", dryRun: false, clientSlug: activeTenantSlug }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setTemporalCleanupPreview(null);
+        setTemporalCleanupFeedback(data.message || "Limpeza concluída com sucesso!");
+        await fetchData();
+      } else {
+        setTemporalCleanupFeedback(data.error || "Falha ao executar limpeza.");
+      }
+    } catch {
+      setTemporalCleanupFeedback("Erro de rede ao executar limpeza.");
+    } finally {
+      setIsExecutingTemporalCleanup(false);
+    }
+  };
+
   // Verificação dinâmica de números dos atendentes do cliente selecionado
   const activeAttendantPhones = useMemo(() => {
     const list: string[] = [];
@@ -1030,7 +1094,7 @@ export default function GoogleAdsPage() {
     fetchMonitorStatus(true, false);
     const monitorInterval = setInterval(() => {
       fetchMonitorStatus(true, false);
-    }, 5 * 60 * 1000);
+    }, 60 * 60 * 1000);
     return () => clearInterval(monitorInterval);
   }, []);
 
@@ -2997,8 +3061,147 @@ export default function GoogleAdsPage() {
                   <Trash2 size={13} /> Limpar Leads com Telefones dos Atendentes
                 </button>
               )}
+
+              {hasTemporalAuditEntries && (
+                <button
+                  type="button"
+                  disabled={isCheckingTemporalCleanup}
+                  onClick={handlePreviewTemporalCleanup}
+                  style={{
+                    background: "rgba(245, 158, 11, 0.15)",
+                    border: "1px solid rgba(245, 158, 11, 0.45)",
+                    color: "#fcd34d",
+                    borderRadius: "8px",
+                    padding: "9px 12px",
+                    fontSize: "12px",
+                    fontWeight: "700",
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                  title="Audita e reverte leads vinculados pela antiga Janela Temporal de 30min sem tocar nos leads reais com Tag Invisível"
+                >
+                  <AlertTriangle size={13} />{" "}
+                  {isCheckingTemporalCleanup ? "Auditando..." : "Limpar Falsos Positivos (Janela Temporal)"}
+                </button>
+              )}
             </div>
           </div>
+
+          {temporalCleanupFeedback && (
+            <div
+              style={{
+                marginBottom: "14px",
+                padding: "11px 14px",
+                borderRadius: "10px",
+                background: "rgba(16, 185, 129, 0.14)",
+                border: "1px solid rgba(16, 185, 129, 0.35)",
+                color: "#a7f3d0",
+                fontSize: "13px",
+                fontWeight: 600,
+              }}
+            >
+              {temporalCleanupFeedback}
+            </div>
+          )}
+
+          {temporalCleanupPreview && (
+            <div
+              style={{
+                marginBottom: "16px",
+                padding: "16px",
+                borderRadius: "12px",
+                background: "#12172a",
+                border: "1px solid rgba(245, 158, 11, 0.45)",
+                color: "#e2e8f0",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px", flexWrap: "wrap", marginBottom: "10px" }}>
+                <div>
+                  <div style={{ fontSize: "14px", fontWeight: 700, color: "#fcd34d" }}>
+                    Auditoria de Falsos Positivos (Antiga Janela Temporal de 30 min)
+                  </div>
+                  <div style={{ fontSize: "12px", color: "#94a3b8", marginTop: "4px" }}>
+                    Encontrados <strong style={{ color: "#fff" }}>{temporalCleanupPreview.affectedCount}</strong> registro(s) vinculados por Janela Temporal.{" "}
+                    Todos os <strong style={{ color: "#34d399" }}>{temporalCleanupPreview.preservedExactCount}</strong> lead(s) com Tag Invisível real serão <strong>100% preservados</strong>.
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  {temporalCleanupPreview.affectedCount > 0 && (
+                    <button
+                      type="button"
+                      disabled={isExecutingTemporalCleanup}
+                      onClick={handleConfirmTemporalCleanup}
+                      style={{
+                        background: "#dc2626",
+                        border: "none",
+                        color: "#ffffff",
+                        borderRadius: "8px",
+                        padding: "8px 14px",
+                        fontSize: "12px",
+                        fontWeight: 700,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {isExecutingTemporalCleanup
+                        ? "Limpando..."
+                        : `Confirmar: Reverter ${temporalCleanupPreview.affectedCount} para "1. Clicou no WhatsApp"`}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setTemporalCleanupPreview(null)}
+                    style={{
+                      background: "#1e293b",
+                      border: "1px solid #334155",
+                      color: "#cbd5e1",
+                      borderRadius: "8px",
+                      padding: "8px 12px",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Fechar
+                  </button>
+                </div>
+              </div>
+
+              {temporalCleanupPreview.sentPurchasesCount > 0 && (
+                <div
+                  style={{
+                    marginBottom: "10px",
+                    padding: "10px 12px",
+                    borderRadius: "8px",
+                    background: "rgba(239, 68, 68, 0.14)",
+                    border: "1px solid rgba(239, 68, 68, 0.35)",
+                    color: "#fecaca",
+                    fontSize: "12px",
+                  }}
+                >
+                  <strong>Atenção antes de limpar:</strong> {temporalCleanupPreview.sentPurchasesCount} registro(s) abaixo já tiveram <strong>Compra enviada ao Google Ads OCI</strong>. Vá primeiro em <strong>Central OCI → Ajustes de Conversões Enviadas</strong> e clique em <strong>Estornar (RETRACT)</strong> nesses registros para cancelar o valor lá no Google Ads antes de confirmar esta limpeza.
+                </div>
+              )}
+
+              {Array.isArray(temporalCleanupPreview.affected) && temporalCleanupPreview.affected.length > 0 && (
+                <div style={{ maxHeight: "180px", overflowY: "auto", background: "#090f20", borderRadius: "8px", padding: "8px 10px", fontSize: "12px", fontFamily: "ui-monospace, monospace" }}>
+                  {temporalCleanupPreview.affected.map((item: any) => (
+                    <div key={item.id} style={{ padding: "4px 0", borderBottom: "1px solid #1e293b", display: "flex", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
+                      <span>
+                        <strong style={{ color: "#fff" }}>{item.leadName}</strong> ({item.leadPhone}) · {item.attendantName} · kw: {item.keyword}
+                      </span>
+                      <span style={{ color: item.stage === "compra_realizada" ? "#f87171" : "#fcd34d" }}>
+                        {item.stage}
+                        {item.value > 0 ? ` (R$ ${item.value})` : ""}
+                        {item.hasSentPurchaseOci ? " · [OCI ENVIADO — ESTORNAR ANTES]" : ""}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Filtro por Data na Aba de Leads (padrão Meta Ads) */}
           <div style={{ background: "#090f20", border: "1px solid #1e293b", borderRadius: "10px", padding: "12px 14px", marginBottom: "16px", display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -6878,7 +7081,7 @@ export default function GoogleAdsPage() {
                   Monitoramento Global de Quedas Uazapi (Alertas no WhatsApp do Gestor)
                 </h3>
                 <p style={{ fontSize: "12px", color: "#94a3b8", margin: "4px 0 0" }}>
-                  Verifica periodicamente todas as instâncias dos clientes e usa qualquer instância saudável online para avisar seu WhatsApp se alguma desconectar.
+                  Checagem leve a cada <strong>1 hora</strong> de todas as instâncias dos clientes; usa qualquer instância saudável online para avisar seu WhatsApp se alguma desconectar.
                 </p>
               </div>
 
@@ -7026,14 +7229,46 @@ export default function GoogleAdsPage() {
               </div>
             </div>
 
-            <label style={{ display: "inline-flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#cbd5e1", cursor: "pointer", width: "fit-content" }}>
-              <input
-                type="checkbox"
-                checked={monitorEnabledDraft}
-                onChange={(e) => setMonitorEnabledDraft(e.target.checked)}
-              />
-              Ativar envio automático de alertas no WhatsApp quando alguma Uazapi cair (e aviso quando reconectar)
-            </label>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }}>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#cbd5e1", cursor: "pointer", width: "fit-content" }}>
+                <input
+                  type="checkbox"
+                  checked={monitorEnabledDraft}
+                  onChange={(e) => setMonitorEnabledDraft(e.target.checked)}
+                />
+                Ativar envio automático de alertas no WhatsApp quando alguma Uazapi cair (e aviso quando reconectar)
+              </label>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const originUrl =
+                    typeof window !== "undefined" ? window.location.origin : "https://painel.anunciosalpha.com.br";
+                  const cronUrl = `${originUrl}/api/google-ads/uazapi-monitor?check=true`;
+                  navigator.clipboard?.writeText(cronUrl).catch(() => {});
+                  setMonitorFeedback({
+                    ok: true,
+                    msg: `URL 24/7 copiada (${cronUrl}) — cadastre no UptimeRobot ou Cron-job.org a cada 60 min para rodar mesmo com o painel fechado.`,
+                  });
+                }}
+                style={{
+                  background: "#090f20",
+                  border: "1px solid #334155",
+                  color: "#7dd3fc",
+                  borderRadius: "7px",
+                  padding: "6px 10px",
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "5px",
+                }}
+                title="Copie e cole no UptimeRobot / Cron-job.org com intervalo de 60 minutos para monitorar 24/7 mesmo sem abrir o navegador"
+              >
+                <Copy size={12} /> Copiar URL Monitor 24/7 (1h)
+              </button>
+            </div>
 
             {monitorFeedback && (
               <div
