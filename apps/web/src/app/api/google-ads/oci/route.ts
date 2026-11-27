@@ -7,6 +7,7 @@ import {
   isTenantAttendantPhone,
   normalizeText,
   readJsonSafe,
+  readTenantAudits,
   readTenantLeads,
   readTenantRules,
   resolveRequestTenant,
@@ -733,7 +734,13 @@ function parsePartialFailureErrors(resJson: any, totalItems: number): {
       const fieldElems: any[] = Array.isArray(err?.location?.fieldPathElements)
         ? err.location.fieldPathElements
         : [];
-      const convElem = fieldElems.find((f: any) => f?.fieldName === "conversions" && f?.index !== undefined);
+      const convElem = fieldElems.find(
+        (f: any) =>
+          (f?.fieldName === "conversions" ||
+            f?.fieldName === "conversion_adjustments" ||
+            f?.fieldName === "conversionAdjustments") &&
+          f?.index !== undefined
+      );
       if (convElem && Number.isInteger(Number(convElem.index))) {
         const idx = Number(convElem.index);
         perItemError[idx] = perItemError[idx] ? `${perItemError[idx]} | ${fullMsg}` : fullMsg;
@@ -1092,6 +1099,435 @@ export async function POST(request: NextRequest) {
         adjustedValue,
         apiVersionUsed: ctxAdj.version,
         lead: leads[idx],
+      });
+    }
+
+    if (body?.action === "retract_false_positives") {
+      const dryRun = body?.dryRun !== false;
+      const requestedStages: FunnelStage[] = Array.isArray(body?.stages) && body.stages.length > 0
+        ? body.stages.filter((s: any): s is FunnelStage =>
+            s === "conversa_iniciada" || s === "orcamento_enviado" || s === "compra_realizada"
+          )
+        : ["conversa_iniciada", "orcamento_enviado", "compra_realizada"];
+
+      const leads = readTenantLeads(tenant.slug, tenant);
+      const audits = readTenantAudits(tenant.slug);
+      const sentIndex = readSentIndex(tenant.slug);
+
+      const isTemporalAudit = (a: any): boolean => {
+        const aid = String(a?.id || "");
+        const phrase = String(a?.detectedPhrase || "");
+        return (
+          aid.startsWith("audit_temporal_") ||
+          aid.startsWith("audit_uazapi_temp_") ||
+          /atribui[çc][ãa]o temporal|janela 30min|janela 5min/i.test(phrase)
+        );
+      };
+
+      const isExactTagAudit = (a: any): boolean => {
+        const phrase = String(a?.detectedPhrase || "");
+        return (
+          /tag invis[íi]vel/i.test(phrase) ||
+          /lead recuperado automaticamente via reconcilia[çc][ãa]o uazapi/i.test(phrase)
+        );
+      };
+
+      const exactTagGclids = new Set<string>();
+      const temporalGclids = new Set<string>();
+      const temporalPhonesNoGclid = new Set<string>();
+
+      for (const a of audits) {
+        const g = String(a?.gclid || "").trim();
+        const p = String(a?.leadPhone || "").replace(/\D/g, "");
+        if (isExactTagAudit(a) && g && g !== "sem_gclid") {
+          exactTagGclids.add(g);
+        }
+        if (isTemporalAudit(a)) {
+          if (g && g !== "sem_gclid") {
+            temporalGclids.add(g);
+          } else if (p) {
+            temporalPhonesNoGclid.add(p);
+          }
+        }
+      }
+
+      const sentIndexByLeadId = new Map<string, SentIndexEntry[]>();
+      for (const entry of Object.values(sentIndex)) {
+        if (!entry?.leadId) continue;
+        const arr = sentIndexByLeadId.get(entry.leadId) || [];
+        arr.push(entry);
+        sentIndexByLeadId.set(entry.leadId, arr);
+      }
+
+      interface RetractCandidate {
+        leadIndex: number;
+        leadId: string;
+        gclid: string;
+        keyword: string;
+        stage: FunnelStage;
+        orderId: string;
+        conversionAction?: string;
+        conversionActionName?: string;
+        sentAt?: string;
+        value: number;
+        reason: string;
+      }
+
+      const candidates: RetractCandidate[] = [];
+      const seenOrderIds = new Set<string>();
+      let preservedExactCount = 0;
+      let totalFalsePositiveLeads = 0;
+      let skippedAlreadyRetractedCount = 0;
+
+      for (let i = 0; i < leads.length; i++) {
+        const l = leads[i];
+        const g = String(l?.gclid || "").trim();
+        const p = String(l?.leadPhone || "").replace(/\D/g, "");
+
+        // Trava absoluta: NUNCA estornar leads confirmados por Tag Invisível Zero-Width
+        if (g && exactTagGclids.has(g)) {
+          preservedExactCount++;
+          continue;
+        }
+
+        const isCleanedTemporal = Boolean(l?.cleanedTemporalAt);
+        const isClickOnly =
+          l?.stage === "clique_anuncio" && (!p || /aguardando/i.test(String(l?.leadPhone || "")));
+        const matchedTemporalAudit =
+          Boolean(g && temporalGclids.has(g)) || Boolean(!g && p && temporalPhonesNoGclid.has(p));
+
+        if (!isCleanedTemporal && !isClickOnly && !matchedTemporalAudit) {
+          continue;
+        }
+
+        const reason = isCleanedTemporal
+          ? "limpo_janela_temporal"
+          : isClickOnly
+            ? "clique_sem_conversa_enviado_oci"
+            : "auditoria_janela_temporal";
+
+        let leadHasCandidate = false;
+
+        for (const stage of requestedStages) {
+          const stageRecords: Array<{
+            orderId: string;
+            conversionAction?: string;
+            conversionActionName?: string;
+            sentAt?: string;
+            value: number;
+            alreadyRetracted: boolean;
+          }> = [];
+
+          const sentStageObj = l?.sentStages?.[stage];
+          if (sentStageObj?.orderId || sentStageObj?.sentAt) {
+            const oid = String(sentStageObj.orderId || buildDeterministicOrderId(l.id, stage));
+            const alreadyRetracted =
+              Boolean(sentStageObj.retractedAt) ||
+              (Array.isArray(l?.conversionAdjustments) &&
+                l.conversionAdjustments.some(
+                  (adj: any) => adj?.adjustmentType === "RETRACTION" && adj?.orderId === oid
+                ));
+            stageRecords.push({
+              orderId: oid,
+              conversionAction: sentStageObj.conversionAction,
+              conversionActionName: sentStageObj.conversionActionName,
+              sentAt: sentStageObj.sentAt,
+              value: Number(sentStageObj.value || 0),
+              alreadyRetracted,
+            });
+          }
+
+          const idxEntries = (sentIndexByLeadId.get(String(l.id || "")) || []).filter(
+            (e) => e.stage === stage
+          );
+          for (const e of idxEntries) {
+            if (!e.orderId) continue;
+            if (stageRecords.some((r) => r.orderId === e.orderId)) continue;
+            const alreadyRetracted =
+              Boolean(l?.sentStages?.[stage]?.retractedAt) ||
+              (Array.isArray(l?.conversionAdjustments) &&
+                l.conversionAdjustments.some(
+                  (adj: any) => adj?.adjustmentType === "RETRACTION" && adj?.orderId === e.orderId
+                ));
+            stageRecords.push({
+              orderId: e.orderId,
+              conversionAction: e.conversionAction,
+              conversionActionName: e.conversionActionName,
+              sentAt: e.sentAt,
+              value: Number(e.value || 0),
+              alreadyRetracted,
+            });
+          }
+
+          // Fallback legado: lead antigo marcado como status="sent" sem sentStages
+          if (
+            stageRecords.length === 0 &&
+            l?.status === "sent" &&
+            (l?.lastUploadedStage === stage || (!l?.lastUploadedStage && stage === "conversa_iniciada"))
+          ) {
+            const oid = String(l?.ociOrderId || buildDeterministicOrderId(l.id, stage));
+            const alreadyRetracted =
+              Array.isArray(l?.conversionAdjustments) &&
+              l.conversionAdjustments.some(
+                (adj: any) => adj?.adjustmentType === "RETRACTION" && adj?.orderId === oid
+              );
+            stageRecords.push({
+              orderId: oid,
+              sentAt: l?.sentAt || undefined,
+              value: Number(l?.value || 0),
+              alreadyRetracted,
+            });
+          }
+
+          for (const rec of stageRecords) {
+            if (seenOrderIds.has(rec.orderId)) continue;
+            seenOrderIds.add(rec.orderId);
+            if (rec.alreadyRetracted) {
+              skippedAlreadyRetractedCount++;
+              continue;
+            }
+            leadHasCandidate = true;
+            candidates.push({
+              leadIndex: i,
+              leadId: String(l.id || ""),
+              gclid: g,
+              keyword: String(l.keyword || ""),
+              stage,
+              orderId: rec.orderId,
+              conversionAction: rec.conversionAction,
+              conversionActionName: rec.conversionActionName,
+              sentAt: rec.sentAt,
+              value: rec.value,
+              reason,
+            });
+          }
+        }
+
+        if (leadHasCandidate) {
+          totalFalsePositiveLeads++;
+        }
+      }
+
+      const byStage: Record<FunnelStage, number> = {
+        conversa_iniciada: 0,
+        orcamento_enviado: 0,
+        compra_realizada: 0,
+      };
+      for (const c of candidates) {
+        byStage[c.stage]++;
+      }
+
+      if (dryRun) {
+        return NextResponse.json({
+          success: true,
+          dryRun: true,
+          tenantSlug: tenant.slug,
+          requestedStages,
+          totalFalsePositiveLeads,
+          totalCandidates: candidates.length,
+          skippedAlreadyRetractedCount,
+          preservedExactCount,
+          byStage,
+          items: candidates.map((c) => ({
+            leadId: c.leadId,
+            stage: c.stage,
+            orderId: c.orderId,
+            keyword: c.keyword,
+            gclid: c.gclid ? `${c.gclid.slice(0, 18)}...` : "",
+            conversionActionName: c.conversionActionName || c.conversionAction || "(resolver via API)",
+            sentAt: c.sentAt || null,
+            value: c.value,
+            reason: c.reason,
+          })),
+        });
+      }
+
+      if (candidates.length === 0) {
+        return NextResponse.json({
+          success: true,
+          dryRun: false,
+          tenantSlug: tenant.slug,
+          retractedCount: 0,
+          failedCount: 0,
+          skippedAlreadyRetractedCount,
+          preservedExactCount,
+          message: "Nenhuma conversão falsa pendente de estorno (RETRACT) encontrada.",
+          results: [],
+        });
+      }
+
+      const ctxAdj = await resolveWorkingGoogleAdsContext(tenant);
+      if (!ctxAdj.ok || !ctxAdj.version || !ctxAdj.accessToken || !ctxAdj.devToken || !ctxAdj.customerId) {
+        return NextResponse.json(
+          { success: false, error: ctxAdj.error || "Google Ads API indisponível." },
+          { status: 400 }
+        );
+      }
+
+      const actionMapping = readActionMapping(tenant.slug);
+      const rulesNames = readRulesActionNames(tenant.slug);
+      const adjustmentDateTime = formatGoogleAdsDateTime(Date.now());
+
+      const resolvedBatch: Array<{ candidate: RetractCandidate; conversionAction: string }> = [];
+      const results: Array<{
+        leadId: string;
+        stage: FunnelStage;
+        orderId: string;
+        status: "retracted" | "failed";
+        error?: string;
+      }> = [];
+
+      for (const c of candidates) {
+        const actionResource =
+          c.conversionAction ||
+          resolveStageConversionAction(c.stage, ctxAdj.conversionActions, actionMapping, rulesNames)
+            ?.resourceName;
+
+        if (!actionResource) {
+          results.push({
+            leadId: c.leadId,
+            stage: c.stage,
+            orderId: c.orderId,
+            status: "failed",
+            error: `Ação de conversão Google Ads não encontrada para etapa "${c.stage}".`,
+          });
+          continue;
+        }
+        resolvedBatch.push({ candidate: c, conversionAction: actionResource });
+      }
+
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${ctxAdj.accessToken}`,
+        "developer-token": ctxAdj.devToken,
+        "Content-Type": "application/json",
+      };
+      if (ctxAdj.loginCustomerId) headers["login-customer-id"] = ctxAdj.loginCustomerId;
+
+      let retractedCount = 0;
+      let failedCount = results.length;
+      const byStageRetracted: Record<FunnelStage, number> = {
+        conversa_iniciada: 0,
+        orcamento_enviado: 0,
+        compra_realizada: 0,
+      };
+      const nowIso = new Date().toISOString();
+      let leadsMutated = false;
+
+      const CHUNK_SIZE = 500;
+      for (let start = 0; start < resolvedBatch.length; start += CHUNK_SIZE) {
+        const chunk = resolvedBatch.slice(start, start + CHUNK_SIZE);
+        const payload = {
+          conversionAdjustments: chunk.map((item) => ({
+            conversionAction: item.conversionAction,
+            orderId: item.candidate.orderId,
+            adjustmentType: "RETRACTION",
+            adjustmentDateTime,
+          })),
+          partialFailure: true,
+        };
+
+        const adjRes = await fetch(
+          `https://googleads.googleapis.com/${ctxAdj.version}/customers/${ctxAdj.customerId}:uploadConversionAdjustments`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload),
+          }
+        );
+
+        const adjJson = await adjRes.json().catch(() => ({}));
+
+        if (!adjRes.ok) {
+          const rawErr =
+            adjJson?.error?.message ||
+            adjJson?.error?.details?.[0]?.errors?.[0]?.message ||
+            `Erro HTTP ${adjRes.status} ao enviar RETRACTION em lote`;
+          const friendly = buildFriendlyGoogleOciError(rawErr);
+          for (const item of chunk) {
+            failedCount++;
+            results.push({
+              leadId: item.candidate.leadId,
+              stage: item.candidate.stage,
+              orderId: item.candidate.orderId,
+              status: "failed",
+              error: friendly,
+            });
+          }
+          continue;
+        }
+
+        const pf = parsePartialFailureErrors(adjJson, chunk.length);
+        const resItems: any[] = Array.isArray(adjJson?.results) ? adjJson.results : [];
+
+        for (let j = 0; j < chunk.length; j++) {
+          const item = chunk[j];
+          const itemRes = resItems[j];
+          const isEmptyRes = pf.hasAnyFailure && (!itemRes || Object.keys(itemRes).length === 0);
+          const itemErr = pf.perItemError[j] || (isEmptyRes ? pf.globalMessage || "Falha parcial Google Ads" : null);
+
+          if (itemErr) {
+            failedCount++;
+            results.push({
+              leadId: item.candidate.leadId,
+              stage: item.candidate.stage,
+              orderId: item.candidate.orderId,
+              status: "failed",
+              error: buildFriendlyGoogleOciError(itemErr),
+            });
+          } else {
+            const lead = leads[item.candidate.leadIndex];
+            if (!Array.isArray(lead.conversionAdjustments)) {
+              lead.conversionAdjustments = [];
+            }
+            lead.conversionAdjustments.unshift({
+              adjustmentType: "RETRACTION",
+              stage: item.candidate.stage,
+              orderId: item.candidate.orderId,
+              adjustedValue: 0,
+              adjustedAt: nowIso,
+              apiVersion: ctxAdj.version,
+              reason: item.candidate.reason,
+            });
+            if (!lead.sentStages) lead.sentStages = {};
+            if (!lead.sentStages[item.candidate.stage]) {
+              lead.sentStages[item.candidate.stage] = {
+                orderId: item.candidate.orderId,
+                conversionAction: item.conversionAction,
+                sentAt: item.candidate.sentAt || nowIso,
+                value: item.candidate.value,
+              };
+            }
+            lead.sentStages[item.candidate.stage].retractedAt = nowIso;
+            lead.updatedAt = nowIso;
+            leadsMutated = true;
+
+            retractedCount++;
+            byStageRetracted[item.candidate.stage]++;
+            results.push({
+              leadId: item.candidate.leadId,
+              stage: item.candidate.stage,
+              orderId: item.candidate.orderId,
+              status: "retracted",
+            });
+          }
+        }
+      }
+
+      if (leadsMutated) {
+        writeTenantLeads(tenant.slug, leads);
+      }
+
+      return NextResponse.json({
+        success: true,
+        dryRun: false,
+        tenantSlug: tenant.slug,
+        apiVersionUsed: ctxAdj.version,
+        retractedCount,
+        failedCount,
+        skippedAlreadyRetractedCount,
+        preservedExactCount,
+        byStageRetracted,
+        results,
       });
     }
 
