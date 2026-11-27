@@ -1644,6 +1644,150 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, rules: saved, message: "Regras salvas com sucesso!" });
     }
 
+    if (body.type === "clean_temporal_leads") {
+      const dryRun = body.dryRun !== false;
+      const leads = readTenantLeads(tenant.slug, tenant);
+      const audits = readTenantAudits(tenant.slug);
+
+      const isTemporalAudit = (a: any): boolean => {
+        const aid = String(a?.id || "");
+        const phrase = String(a?.detectedPhrase || "");
+        return (
+          aid.startsWith("audit_temporal_") ||
+          aid.startsWith("audit_uazapi_temp_") ||
+          /atribui[çc][ãa]o temporal|janela 30min|janela 5min/i.test(phrase)
+        );
+      };
+
+      const isExactTagAudit = (a: any): boolean => {
+        const phrase = String(a?.detectedPhrase || "");
+        return (
+          /tag invis[íi]vel/i.test(phrase) ||
+          /lead recuperado automaticamente via reconcilia[çc][ãa]o uazapi/i.test(phrase)
+        );
+      };
+
+      const exactTagGclids = new Set<string>();
+      const temporalGclids = new Set<string>();
+      const temporalPhonesNoGclid = new Set<string>();
+
+      for (const a of audits) {
+        const g = String(a?.gclid || "").trim();
+        const p = String(a?.leadPhone || "").replace(/\D/g, "");
+        if (isExactTagAudit(a) && g && g !== "sem_gclid") {
+          exactTagGclids.add(g);
+        }
+        if (isTemporalAudit(a)) {
+          if (g && g !== "sem_gclid") {
+            temporalGclids.add(g);
+          } else if (p) {
+            temporalPhonesNoGclid.add(p);
+          }
+        }
+      }
+
+      const affected: Array<{
+        id: string;
+        leadName: string;
+        leadPhone: string;
+        keyword: string;
+        stage: string;
+        value: number;
+        attendantName: string;
+        gclid: string;
+        hasSentPurchaseOci: boolean;
+        sentPurchaseOrderId?: string;
+      }> = [];
+
+      let preservedExactCount = 0;
+      const cleanedGclids = new Set<string>();
+
+      const updatedLeads = leads.map((l: any) => {
+        const g = String(l?.gclid || "").trim();
+        const p = String(l?.leadPhone || "").replace(/\D/g, "");
+        const isAlreadyClickOnly =
+          l?.stage === "clique_anuncio" && (!p || /aguardando/i.test(String(l?.leadPhone || "")));
+
+        if (isAlreadyClickOnly) return l;
+
+        if (g && exactTagGclids.has(g)) {
+          preservedExactCount++;
+          return l;
+        }
+
+        const matchedByGclid = Boolean(g && temporalGclids.has(g));
+        const matchedByPhone = Boolean(!g && p && temporalPhonesNoGclid.has(p));
+        if (!matchedByGclid && !matchedByPhone) {
+          return l;
+        }
+
+        const sentPurchase = l?.sentStages?.compra_realizada;
+        affected.push({
+          id: String(l.id || ""),
+          leadName: String(l.leadName || "Cliente WhatsApp"),
+          leadPhone: String(l.leadPhone || ""),
+          keyword: String(l.keyword || ""),
+          stage: String(l.stage || "conversa_iniciada"),
+          value: Number(l.value || 0),
+          attendantName: String(l.attendantName || ""),
+          gclid: g,
+          hasSentPurchaseOci: Boolean(sentPurchase?.sentAt || (l?.stage === "compra_realizada" && l?.status === "sent")),
+          sentPurchaseOrderId: sentPurchase?.orderId || l?.lastOrderId || undefined,
+        });
+
+        if (g) cleanedGclids.add(g);
+
+        if (dryRun) return l;
+
+        const cleanedLead: any = {
+          ...l,
+          leadPhone: "Aguardando envio no WhatsApp...",
+          stage: "clique_anuncio",
+          conversionType: "clique_anuncio",
+          status: "queued",
+          cleanedTemporalAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        delete cleanedLead.leadName;
+        delete cleanedLead.firstMessageAt;
+        delete cleanedLead.quotedAt;
+        delete cleanedLead.purchasedAt;
+        delete cleanedLead.value;
+        delete cleanedLead.triggerPhrase;
+        delete cleanedLead.matchedRulePhrase;
+        delete cleanedLead.matchedRuleLabel;
+        delete cleanedLead.recoveredFromUazapi;
+        return cleanedLead;
+      });
+
+      if (!dryRun) {
+        writeTenantLeads(tenant.slug, updatedLeads);
+
+        const cleanedAudits = audits.filter((a: any) => {
+          if (isTemporalAudit(a)) return false;
+          const ag = String(a?.gclid || "").trim();
+          if (ag && cleanedGclids.has(ag)) return false;
+          return true;
+        });
+
+        try {
+          writeJsonAtomic(getTenantFilePath(tenant.slug, "audits"), cleanedAudits);
+        } catch {}
+      }
+
+      return NextResponse.json({
+        success: true,
+        dryRun,
+        affectedCount: affected.length,
+        preservedExactCount,
+        sentPurchasesCount: affected.filter((x) => x.hasSentPurchaseOci).length,
+        affected,
+        message: dryRun
+          ? `${affected.length} registro(s) contaminado(s) pela antiga Janela Temporal encontrado(s).`
+          : `${affected.length} registro(s) revertido(s) com sucesso para "1. Clicou no WhatsApp" e auditoria limpa!`,
+      });
+    }
+
     return NextResponse.json({ error: "Ação não reconhecida" }, { status: 400 });
   } catch (error: any) {
     return NextResponse.json({ error: error?.message || "Erro ao processar POST" }, { status: 500 });
