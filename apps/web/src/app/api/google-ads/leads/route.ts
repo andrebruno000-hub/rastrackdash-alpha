@@ -197,14 +197,16 @@ function getUazapiPublicStatus(tenant: GoogleTenantConfig) {
   };
 }
 
-function decodeZeroWidth(text: string): string | null {
-  if (!text) return null;
+function decodeZeroWidthSegment(segment: string): string | null {
+  if (!segment || segment.length < 16 || segment.length % 4 !== 0) return null;
   const map: Record<string, number> = { "\u200B": 0, "\u200C": 1, "\u200D": 2, "\u2060": 3 };
-  const chars = text.match(/[\u200B\u200C\u200D\u2060]/g);
-  if (!chars || chars.length % 4 !== 0) return null;
   const bytes: number[] = [];
-  for (let i = 0; i < chars.length; i += 4) {
-    const b = (map[chars[i]] << 6) | (map[chars[i + 1]] << 4) | (map[chars[i + 2]] << 2) | map[chars[i + 3]];
+  for (let i = 0; i < segment.length; i += 4) {
+    const b =
+      (map[segment[i]] << 6) |
+      (map[segment[i + 1]] << 4) |
+      (map[segment[i + 2]] << 2) |
+      map[segment[i + 3]];
     bytes.push(b);
   }
   try {
@@ -212,6 +214,24 @@ function decodeZeroWidth(text: string): string | null {
   } catch {
     return null;
   }
+}
+
+function decodeZeroWidth(text: string): string | null {
+  if (!text) return null;
+
+  // 1. Prioriza blocos contíguos de Zero-Width (resiste a emojis com \u200D na mesma mensagem)
+  const blocks = text.match(/[\u200B\u200C\u200D\u2060]{16,}/g);
+  if (blocks) {
+    for (const block of blocks) {
+      const decoded = decodeZeroWidthSegment(block);
+      if (decoded && decoded.includes("ref:")) return decoded;
+    }
+  }
+
+  // 2. Fallback global padrão
+  const chars = text.match(/[\u200B\u200C\u200D\u2060]/g);
+  if (!chars || chars.length % 4 !== 0) return null;
+  return decodeZeroWidthSegment(chars.join(""));
 }
 
 function extractTrackingTag(
@@ -665,76 +685,9 @@ async function autoReconcileUazapiIfConfigured(
             processedIds.unshift(messageId);
             processedChanged = true;
           }
-        } else if (tsMs > 0) {
-          const alreadyLinked = leads.some((existing: any) => isSamePhone(existing.leadPhone, cleanPhone));
-          if (!alreadyLinked) {
-            let bestPendingIdx = -1;
-            let bestDelta = Infinity;
-
-            for (let i = 0; i < leads.length; i++) {
-              const l = leads[i];
-              const isPending =
-                !l.firstMessageAt ||
-                /aguardando/i.test(String(l.leadPhone || "")) ||
-                isTenantAttendantPhone(tenant, l.leadPhone);
-              if (!isPending) continue;
-
-              const attendantNorm = normalizeText(l.attendantName || "");
-              const instNorm = normalizeText(inst.name);
-              const sameAttendant =
-                tenant.routingMode === "single" ||
-                (attendantNorm.includes("josi") && instNorm.includes("josi")) ||
-                (attendantNorm.includes("sergio") && instNorm.includes("sergio")) ||
-                attendantNorm === instNorm;
-              if (!sameAttendant) continue;
-
-              const clickMs = new Date(l.occurredAt || 0).getTime();
-              if (isNaN(clickMs) || clickMs <= 0) continue;
-
-              const delta = tsMs - clickMs;
-              if (delta >= -60 * 1000 && delta <= 30 * 60 * 1000 && Math.abs(delta) < bestDelta) {
-                bestDelta = Math.abs(delta);
-                bestPendingIdx = i;
-              }
-            }
-
-            if (bestPendingIdx !== -1) {
-              const pushName = msg?._chatName || msg?.pushName || msg?.senderName || "";
-              leads[bestPendingIdx].leadPhone = cleanPhone;
-              if (pushName) leads[bestPendingIdx].leadName = pushName;
-              if (
-                leads[bestPendingIdx].stage !== "orcamento_enviado" &&
-                leads[bestPendingIdx].stage !== "compra_realizada"
-              ) {
-                leads[bestPendingIdx].stage = "conversa_iniciada";
-                leads[bestPendingIdx].conversionType = "conversa_iniciada";
-              }
-              leads[bestPendingIdx].firstMessageAt = msgIso;
-              leads[bestPendingIdx].updatedAt = new Date().toISOString();
-              leads[bestPendingIdx].recoveredFromUazapi = true;
-              leadsChanged = true;
-              updatedCount++;
-              instUpdated++;
-
-              appendTenantAudit(tenant.slug, {
-                id: `audit_uazapi_temp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                leadPhone: cleanPhone,
-                leadName: pushName || "Cliente WhatsApp",
-                action: "conversa_iniciada",
-                detectedPhrase: `Recuperação Uazapi (Janela 30min): "${(text || "Mídia/Áudio").slice(0, 45)}"`,
-                attendant: inst.name,
-                gclid: leads[bestPendingIdx].gclid,
-                timestamp: msgIso,
-                statusOci: leads[bestPendingIdx].status || "queued",
-              });
-
-              if (messageId && !processedIds.includes(messageId)) {
-                processedIds.unshift(messageId);
-                processedChanged = true;
-              }
-            }
-          }
         }
+        // MODO 100% DETERMINÍSTICO ESTRITO: sem janela temporal na reconciliação Uazapi.
+        // Apenas mensagens que carregam a Tag Invisível real (ref:<gclid>) são vinculadas a cliques do Google Ads.
       } else if (text) {
         const leadIdx = leads.findIndex((l: any) => isSamePhone(l.leadPhone, cleanPhone));
         if (leadIdx !== -1) {
